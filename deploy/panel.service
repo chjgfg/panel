@@ -1,10 +1,18 @@
-# 让面板本身也开机自启。装法：
+# 让面板本身也开机自启。二进制和配置放一个目录，互不干扰：
 #
-#   install -m 755 target/release/panel /usr/local/bin/panel
-#   install -m 600 panel.toml /etc/panel.toml
+#   mkdir -p /opt/panel /opt/apps
+#   install -m 755 panel            /opt/panel/panel
+#   install -m 600 panel.toml       /opt/panel/panel.toml
 #   cp deploy/panel.service /etc/systemd/system/
 #   systemctl daemon-reload && systemctl enable --now panel
 #
+# /opt/apps 就是放项目的地方（配置里的 dirs）。以后加项目：
+#   mkdir /opt/apps/blog                     # 文件夹名 = 服务名
+#   vi /etc/systemd/system/blog.service      # 写好这个项目怎么启动
+#   systemctl daemon-reload
+# 然后刷新网页就能看到 blog，不用动面板。
+#
+# 看面板自己的日志：journalctl -u panel -f
 # 别忘了放行端口：ufw allow 8080   （或云厂商控制台的安全组）
 
 [Unit]
@@ -16,8 +24,8 @@ Wants=network-online.target
 Type=exec
 # 用 root 跑，这样面板直接调 systemctl 就行，不用额外配 sudo 授权
 User=root
-Environment=PANEL_CONFIG=/etc/panel.toml
-ExecStart=/usr/local/bin/panel
+# 配置不用在这里指定：panel 会自动找自己旁边的 panel.toml
+ExecStart=/opt/panel/panel
 Restart=on-failure
 RestartSec=2
 

@@ -1,5 +1,7 @@
-# 复制成 /etc/panel.toml，然后 chmod 600（里面是明文密码）
-# 想换位置就设环境变量 PANEL_CONFIG
+# 改好后重命名成 panel.toml，跟 panel 这个可执行文件放在同一个目录里。
+# 面板启动时按这个顺序找：PANEL_CONFIG 环境变量 > panel 旁边的 panel.toml > /etc/panel.toml
+#
+# 里面有明文密码，记得 chmod 600 panel.toml
 
 # 直接监听公网口，浏览器打开 http://你的服务器IP:8080
 bind = "0.0.0.0:8080"
@@ -9,16 +11,12 @@ bind = "0.0.0.0:8080"
 #   openssl rand -base64 24
 password = "换成你自己的长随机密码"
 
-# 每个项目一段：
-#   key  = 内部标识，只用英文和数字，网页上看不到
-#   name = 网页上显示的名字
-#   unit = systemd 服务名，只有列在这里的服务能被面板操作
-[[projects]]
-key = "blog"
-name = "博客"
-unit = "blog.service"
-
-[[projects]]
-key = "api"
-name = "API 服务"
-unit = "myapi.service"
+# 放项目的目录，可以写多个。面板每次刷新都重新扫一遍这些目录，
+# 里面每个子文件夹算一个项目，文件夹名就是服务名：
+#
+#   /opt/apps/blog/   ->  blog.service
+#   /opt/apps/myapi/  ->  myapi.service
+#
+# 新增项目只要建文件夹 + 写好对应的 .service，刷新网页就能看到，
+# 不用改这个文件，也不用重启面板。
+dirs = ["/opt/apps"]

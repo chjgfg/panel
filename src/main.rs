@@ -28,17 +28,16 @@ struct Config {
     bind: String,
     /// 明文密码。配置文件记得 chmod 600
     password: String,
-    projects: Vec<Project>,
+    /// 放项目的目录。里面每个子文件夹算一个项目，
+    /// 文件夹叫 blog 就对应 blog.service，加项目不用改这里
+    #[serde(default = "default_dirs")]
+    dirs: Vec<String>,
 }
 fn default_bind() -> String {
     "0.0.0.0:8080".into()
 }
-
-#[derive(Deserialize)]
-struct Project {
-    key: String,
-    name: String,
-    unit: String,
+fn default_dirs() -> Vec<String> {
+    vec!["/opt/apps".into()]
 }
 
 #[derive(Serialize)]
@@ -198,6 +197,39 @@ async fn boot_secs() -> f64 {
         .unwrap_or(0.0)
 }
 
+// ---------- 项目发现 ----------
+
+/// 文件夹名会拼成 unit 名交给 systemctl，所以只放行安全字符。
+/// 开头是 - 会被当成命令行选项，开头是 . 的是隐藏目录（.git 之类）。
+fn ok_name(n: &str) -> bool {
+    !n.is_empty()
+        && n.len() <= 100
+        && !n.starts_with(['-', '.'])
+        && n.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._@-".contains(c))
+}
+
+/// 扫配置里的目录，每个子文件夹算一个项目。
+/// 每次请求都重新扫，所以新建文件夹后刷新网页就能看到，不用重启面板。
+async fn discover(dirs: &[String]) -> Vec<String> {
+    let mut names = Vec::new();
+    for d in dirs {
+        let Ok(mut rd) = tokio::fs::read_dir(d).await else {
+            continue; // 目录不存在就跳过，不影响其它目录
+        };
+        while let Ok(Some(e)) = rd.next_entry().await {
+            let is_dir = e.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
+            let name = e.file_name().to_string_lossy().into_owned();
+            if is_dir && ok_name(&name) {
+                names.push(name);
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
 // ---------- 接口 ----------
 
 async fn index() -> impl IntoResponse {
@@ -245,17 +277,19 @@ async fn me() -> StatusCode {
 
 async fn units(State(app): State<Arc<App>>) -> Json<Vec<Status>> {
     let boot = boot_secs().await;
-    let mut v = Vec::with_capacity(app.cfg.projects.len());
-    for p in &app.cfg.projects {
-        let r = show(&p.unit).await;
+    let names = discover(&app.cfg.dirs).await;
+    let mut v = Vec::with_capacity(names.len());
+    for name in names {
+        let unit = format!("{name}.service");
+        let r = show(&unit).await;
         let uptime = (r.active == "active")
             .then(|| r.active_since_us.map(|u| (boot - u as f64 / 1e6).max(0.0)))
             .flatten();
         v.push(Status {
-            key: p.key.clone(),
-            name: p.name.clone(),
-            unit: p.unit.clone(),
-            cpu: app.cpu(&p.unit, r.cpu_nsec),
+            key: name.clone(),
+            name,
+            cpu: app.cpu(&unit, r.cpu_nsec),
+            unit,
             loaded: r.load == "loaded",
             enabled: r.enabled == "enabled",
             active: r.active,
@@ -268,15 +302,26 @@ async fn units(State(app): State<Arc<App>>) -> Json<Vec<Status>> {
     Json(v)
 }
 
+/// 前端传来的名字一律重新扫目录核对，绝不直接拼进命令行
+async fn resolve(app: &App, key: &str) -> Option<String> {
+    if !ok_name(key) {
+        return None;
+    }
+    discover(&app.cfg.dirs)
+        .await
+        .iter()
+        .any(|n| n == key)
+        .then(|| format!("{key}.service"))
+}
+
 async fn action(State(app): State<Arc<App>>, Path((key, act)): Path<(String, String)>) -> Response {
     if !matches!(act.as_str(), "start" | "stop" | "restart") {
         return (StatusCode::BAD_REQUEST, "非法操作").into_response();
     }
-    // 前端传来的 key 只用来查配置表，unit 名永远取自配置文件
-    let Some(p) = app.cfg.projects.iter().find(|p| p.key == key) else {
+    let Some(unit) = resolve(&app, &key).await else {
         return (StatusCode::NOT_FOUND, "未知项目").into_response();
     };
-    match run("systemctl", &[act.as_str(), p.unit.as_str()]).await {
+    match run("systemctl", &[act.as_str(), "--", unit.as_str()]).await {
         Ok((true, ..)) => StatusCode::NO_CONTENT.into_response(),
         Ok((false, out, err)) => {
             let msg = if err.trim().is_empty() { out } else { err };
@@ -296,13 +341,13 @@ async fn logs(
     Path(key): Path<String>,
     Query(q): Query<LogQuery>,
 ) -> Response {
-    let Some(p) = app.cfg.projects.iter().find(|p| p.key == key) else {
+    let Some(unit) = resolve(&app, &key).await else {
         return (StatusCode::NOT_FOUND, "未知项目").into_response();
     };
     let n = q.lines.unwrap_or(300).clamp(1, 2000).to_string();
     let args = [
         "-u",
-        p.unit.as_str(),
+        unit.as_str(),
         "-n",
         &n,
         "--no-pager",
@@ -337,16 +382,42 @@ async fn main() {
     }
 }
 
+/// 找配置文件：PANEL_CONFIG > panel 自己旁边的 panel.toml > /etc/panel.toml
+///
+/// 故意不看「当前工作目录」：systemd 启动服务时工作目录是 /，
+/// 写 ./panel.toml 会跑去找 /panel.toml，手动跑好使、开机自启就失败。
+/// current_exe() 拿到的是绝对路径，不受这个影响。
+fn config_path() -> Result<std::path::PathBuf, BoxErr> {
+    if let Ok(p) = std::env::var("PANEL_CONFIG") {
+        return Ok(p.into());
+    }
+    let mut tried = Vec::new();
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        tried.push(dir.join("panel.toml"));
+    }
+    tried.push("/etc/panel.toml".into());
+
+    if let Some(found) = tried.iter().find(|p| p.is_file()) {
+        return Ok(found.clone());
+    }
+    let list: Vec<String> = tried.iter().map(|p| format!("  {}", p.display())).collect();
+    Err(format!(
+        "找不到配置文件，这几个位置都看过了：\n{}\n\
+         照 panel.toml.example 改一份，放到 panel 旁边就行；\
+         或者用 PANEL_CONFIG=/你的/路径 指定",
+        list.join("\n")
+    )
+    .into())
+}
+
 async fn start() -> Result<(), BoxErr> {
-    let path = std::env::var("PANEL_CONFIG").unwrap_or_else(|_| "/etc/panel.toml".into());
-    let text = std::fs::read_to_string(&path).map_err(|e| {
-        format!(
-            "读不到配置文件 {path}（{e}）\n\
-             照 panel.toml.example 建一个：cp panel.toml.example /etc/panel.toml && chmod 600 /etc/panel.toml\n\
-             想放别的位置就设环境变量 PANEL_CONFIG=/你的/路径"
-        )
-    })?;
-    let cfg: Config = toml::from_str(&text).map_err(|e| format!("配置文件 {path} 有问题：{e}"))?;
+    let path = config_path()?;
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("读不到配置文件 {}（{e}）", path.display()))?;
+    let cfg: Config =
+        toml::from_str(&text).map_err(|e| format!("配置文件 {} 有问题：{e}", path.display()))?;
 
     if cfg.password.chars().count() < 12 {
         return Err(
@@ -355,13 +426,17 @@ async fn start() -> Result<(), BoxErr> {
                 .into(),
         );
     }
-    let mut keys = std::collections::HashSet::new();
-    for p in &cfg.projects {
-        if !keys.insert(&p.key) {
-            return Err(format!("重复的 key: {}", p.key).into());
+    if cfg.dirs.is_empty() {
+        return Err("dirs 不能为空：至少给一个放项目的目录".into());
+    }
+    for d in &cfg.dirs {
+        // 目录不存在不算致命错误：你可能打算稍后再建
+        if !std::path::Path::new(d).is_dir() {
+            eprintln!("提示：目录 {d} 目前不存在，扫描时会跳过");
         }
     }
     let bind = cfg.bind.clone();
+    let dirs = cfg.dirs.clone();
 
     let app = Arc::new(App {
         cfg,
@@ -388,6 +463,13 @@ async fn start() -> Result<(), BoxErr> {
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
         .map_err(|e| format!("监听 {bind} 失败：{e}"))?;
+    println!("配置: {}", path.display());
+    println!("扫描目录: {}", dirs.join(", "));
+    // 只是启动时打一眼方便对账，真正的列表是每次请求现扫的
+    match discover(&dirs).await {
+        v if v.is_empty() => println!("当前扫到的项目: (无)"),
+        v => println!("当前扫到的项目: {}", v.join(", ")),
+    }
     println!("面板已启动: http://{}", listener.local_addr()?);
     axum::serve(listener, router).await?;
     Ok(())

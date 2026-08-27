@@ -190,7 +190,7 @@ function render(list) {
       .filter(Boolean).join(' · ');
     name.appendChild(small);
 
-    const st = cell(tr, !u.loaded ? 'unit 不存在'
+    const st = cell(tr, !u.loaded ? '未创建服务'
       : running ? '运行中' : u.active === 'failed' ? '失败' : '已停止');
     const dot = document.createElement('span');
     dot.className = 'dot ' + (running ? 'on' : u.active === 'failed' ? 'bad' : 'off');
