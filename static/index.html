@@ -215,26 +215,32 @@ function btn(ops, label, disabled, onclick, ghost) {
 function render(list) {
   $('rows').replaceChildren(...list.map(u => {
     const running = u.active === 'active';
+    const outside = u.outside_pid != null;      // 面板外启动的裸进程
+    const alive = running || outside;
     const tr = document.createElement('tr');
 
     const name = cell(tr, u.name);
     name.className = 'name';
     const small = document.createElement('small');
-    small.textContent = u.external
-      ? u.unit + '（你自己的 service）'
-      : [
-          u.cur_bin ? '▶ ' + u.cur_bin + (u.cur_args ? ' ' + u.cur_args : '') : null,
-          u.pid ? 'pid ' + u.pid : null,
-        ].filter(Boolean).join(' · ') || `${u.bins.length} 个可运行程序`;
+    small.textContent = outside
+      ? `面板外启动 · pid ${u.outside_pid} · 日志看不到`
+      : u.external
+        ? u.unit + '（你自己的 service）'
+        : [
+            u.cur_bin ? '▶ ' + u.cur_bin + (u.cur_args ? ' ' + u.cur_args : '') : null,
+            u.pid ? 'pid ' + u.pid : null,
+          ].filter(Boolean).join(' · ') || `${u.bins.length} 个可运行程序`;
     small.title = u.unit;     // journalctl -u 用的就是这个名字
     name.appendChild(small);
 
-    const st = cell(tr, !u.loaded ? '未运行'
+    const st = cell(tr, outside ? '运行中（面板外）'
+      : !u.loaded ? '未运行'
       : running ? '运行中' : u.active === 'failed' ? '失败' : '已停止');
     const dot = document.createElement('span');
-    dot.className = 'dot ' + (running ? 'on' : u.active === 'failed' ? 'bad' : 'off');
+    dot.className = 'dot ' + (alive ? 'on' : u.active === 'failed' ? 'bad' : 'off');
     st.prepend(dot);
-    st.title = `${u.active} / ${u.sub}`;   // 悬停能看到 systemd 的原始状态
+    st.title = outside ? '这个进程不是面板起的，systemd 不认识它'
+                       : `${u.active} / ${u.sub}`;
 
     cell(tr, fmtDur(u.uptime));
     cell(tr, u.cpu == null ? '—' : u.cpu.toFixed(1) + '%');
@@ -247,7 +253,8 @@ function render(list) {
       // 你自己写的 unit，ExecStart 是你定的，面板不掺和选 bin
       btn(ops, '启动', false, () => doAction(u, 'start', '启动', tr));
     } else {
-      btn(ops, running ? '切换程序…' : '运行…', false, () => openRun(u));
+      btn(ops, outside ? '接管…' : running ? '切换程序…' : '运行…',
+          false, () => openRun(u));
     }
     btn(ops, '停止', false, () => doAction(u, 'stop', '停止', tr));
     btn(ops, '重启', false, () => {
@@ -331,9 +338,18 @@ $('runGo').onclick = async () => {
 $('closeRun').onclick = () => { runKey = null; $('runbox').hidden = true; };
 
 function openLogs(u) {
-  logKey = u.key;
   $('logName').textContent = u.name;
   $('logs').hidden = false;
+  if (u.outside_pid != null) {
+    // journald 里没有它的记录，轮询也是白轮，直接说明情况
+    logKey = null;
+    $('logBody').textContent =
+      `这个进程（pid ${u.outside_pid}）是在面板外启动的，输出没有进 journald，面板拿不到。\n\n`
+      + `点「接管…」选一个程序重新启动 —— 面板会先停掉它，再用 systemd-run 起一遍，\n`
+      + `之后日志就能在这里看了。`;
+    return;
+  }
+  logKey = u.key;
   $('logBody').textContent = '加载中…';
   loadLogs(true);
 }

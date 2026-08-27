@@ -64,6 +64,9 @@ struct Status {
     cur_args: Option<String>,
     /// true = 这是你自己写的 xxx.service，面板只做启停，不选 bin
     external: bool,
+    /// 面板外启动的进程 pid（终端里 cargo run 那种）。
+    /// 有值就说明它在跑，但日志不在 journald 里，看不到。
+    outside_pid: Option<u32>,
 }
 
 struct App {
@@ -255,6 +258,35 @@ async fn discover(dirs: &[String]) -> Vec<(String, PathBuf)> {
     out
 }
 
+/// 扫一遍 /proc 拿到所有进程的 exe 路径。每次刷新只扫一次，
+/// 再拿去跟各个项目目录比对，避免 N 个项目扫 N 遍 /proc。
+/// 非 Linux（或 /proc 读不到）时返回空表，功能自动退化成「看不见外部进程」。
+async fn proc_exes() -> Vec<(u32, PathBuf)> {
+    let mut v = Vec::new();
+    let Ok(mut rd) = tokio::fs::read_dir("/proc").await else {
+        return v;
+    };
+    while let Ok(Some(e)) = rd.next_entry().await {
+        // /proc 里除了 pid 还有 self、meminfo 之类，非数字的直接跳过
+        let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
+            continue;
+        };
+        if let Ok(exe) = tokio::fs::read_link(format!("/proc/{pid}/exe")).await {
+            v.push((pid, exe));
+        }
+    }
+    v
+}
+
+/// 你在终端里 cargo run 起来的进程，systemd 不认识它，只能靠 exe 路径认：
+/// 编出来的二进制一定在 <项目>/target/{debug,release}/ 下面。
+fn find_outside(exes: &[(u32, PathBuf)], dir: &std::path::Path) -> Option<u32> {
+    let target = dir.join("target");
+    exes.iter()
+        .find(|(_, exe)| exe.starts_with(&target))
+        .map(|(pid, _)| *pid)
+}
+
 /// 每个项目对应一个 transient unit，名字加 panel- 前缀避免撞上系统里的服务
 fn unit_of(project: &str) -> String {
     format!("panel-{project}.service")
@@ -396,9 +428,15 @@ async fn me() -> StatusCode {
 async fn units(State(app): State<Arc<App>>) -> Json<Vec<Status>> {
     let boot = boot_secs().await;
     let found = discover(&app.cfg.dirs).await;
+    // systemd 不知道的进程只能靠扫 /proc 找，一次刷新扫一遍就够
+    let exes = proc_exes().await;
     let mut v = Vec::with_capacity(found.len());
     for (name, dir) in found {
         let (unit, external, r) = pick_unit(&name).await;
+        // unit 存在就以 systemd 为准，不存在才去找面板外的裸进程
+        let outside_pid = (r.load != "loaded")
+            .then(|| find_outside(&exes, &dir))
+            .flatten();
         let uptime = (r.active == "active")
             .then(|| r.active_since_us.map(|u| (boot - u as f64 / 1e6).max(0.0)))
             .flatten();
@@ -421,11 +459,16 @@ async fn units(State(app): State<Arc<App>>) -> Json<Vec<Status>> {
             enabled: r.enabled == "enabled",
             active: r.active,
             sub: r.sub,
-            pid: r.pid,
+            pid: if r.pid > 0 {
+                r.pid
+            } else {
+                outside_pid.unwrap_or(0) as u64
+            },
             memory: r.memory,
             uptime,
             cur_bin,
             cur_args,
+            outside_pid,
         });
     }
     Json(v)
@@ -520,6 +563,12 @@ async fn action(
     };
     let (unit, external, raw) = pick_unit(&project).await;
     let req = body.map(|Json(b)| b).unwrap_or_default();
+    // unit 不存在时才去找面板外的裸进程
+    let outside = if raw.load == "loaded" {
+        None
+    } else {
+        find_outside(&proc_exes().await, &dir)
+    };
 
     // 没指定 bin 就沿用上次那个，重启按钮才能一键用
     let remembered = || app.last.lock().unwrap().get(&project).cloned();
@@ -531,8 +580,14 @@ async fn action(
         Ok((ok, out, err)) => (ok, if err.trim().is_empty() { out } else { err }),
         Err(e) => (false, e.to_string()),
     };
+    // 面板外的进程 systemd 管不了，只能直接发信号
+    let kill = async |pid: u32| match run("kill", &["-TERM", &pid.to_string()]).await {
+        Ok((ok, out, err)) => (ok, if err.trim().is_empty() { out } else { err }),
+        Err(e) => (false, e.to_string()),
+    };
 
     let (ok, msg) = match act.as_str() {
+        "stop" if outside.is_some() => kill(outside.unwrap()).await,
         // unit 压根不存在时 systemctl stop 会报错，但「停止一个没在跑的东西」
         // 本来就该是空操作，不该弹红字
         "stop" if raw.load != "loaded" => return StatusCode::NO_CONTENT.into_response(),
@@ -549,7 +604,19 @@ async fn action(
             if !ok_name(&bin) || !bins(&dir).await.contains(&bin) {
                 return (StatusCode::BAD_REQUEST, "这个项目里没有这个程序").into_response();
             }
-            if act == "restart" {
+            // 外面已经有一个在跑：先杀掉再起，否则会有两个实例抢同一个端口。
+            // TERM 之后给它一点时间放掉端口。
+            if let Some(pid) = outside {
+                let (ok, msg) = kill(pid).await;
+                if !ok {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("停止 pid {pid} 失败：{msg}"),
+                    )
+                        .into_response();
+                }
+                tokio::time::sleep(Duration::from_millis(600)).await;
+            } else if act == "restart" {
                 let _ = sysctl("stop").await;
             }
             spawn(&app, &project, &dir, &bin, &args).await
