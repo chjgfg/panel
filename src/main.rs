@@ -280,11 +280,61 @@ async fn proc_exes() -> Vec<(u32, PathBuf)> {
 
 /// 你在终端里 cargo run 起来的进程，systemd 不认识它，只能靠 exe 路径认：
 /// 编出来的二进制一定在 <项目>/target/{debug,release}/ 下面。
-fn find_outside(exes: &[(u32, PathBuf)], dir: &std::path::Path) -> Option<u32> {
+/// 返回全部匹配的 pid —— cargo run 可能留下不止一个进程，只杀第一个不够。
+fn find_outside(exes: &[(u32, PathBuf)], dir: &std::path::Path) -> Vec<u32> {
     let target = dir.join("target");
     exes.iter()
-        .find(|(_, exe)| exe.starts_with(&target))
+        .filter(|(_, exe)| exe.starts_with(&target))
         .map(|(pid, _)| *pid)
+        .collect()
+}
+
+/// 进程还活着吗。僵尸进程要算死的：它已经放掉端口了，
+/// 只是父进程还没回收，等它「消失」会白等 3 秒然后误报杀不掉。
+fn alive(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| alive_from_stat(&s))
+}
+
+/// /proc/<pid>/stat 格式是 `pid (comm) S ...`，comm 里可能有空格和括号
+/// （进程名就叫 `foo (bar)` 也是合法的），所以状态字段要从最后一个 ) 往后取。
+fn alive_from_stat(stat: &str) -> bool {
+    stat.rsplit_once(')')
+        .is_some_and(|(_, rest)| !rest.trim_start().starts_with('Z'))
+}
+
+/// 先 TERM，等它们真的退出（最多 3 秒），赖着不走的补一发 KILL。
+/// 必须等：端口是进程被回收之后才释放的，发完信号就返回会撞上 AddrInUse。
+async fn stop_pids(pids: &[u32]) -> (bool, String) {
+    if pids.is_empty() {
+        return (true, String::new());
+    }
+    let list: Vec<String> = pids.iter().map(u32::to_string).collect();
+    let signal = async |sig: &str| {
+        let mut argv = vec![sig];
+        argv.extend(list.iter().map(String::as_str));
+        let _ = run("kill", &argv).await;
+    };
+
+    signal("-TERM").await;
+    for _ in 0..30 {
+        if !pids.iter().any(|p| alive(*p)) {
+            return (true, String::new());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    signal("-KILL").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let left: Vec<String> = pids
+        .iter()
+        .filter(|p| alive(**p))
+        .map(u32::to_string)
+        .collect();
+    if left.is_empty() {
+        (true, String::new())
+    } else {
+        (false, format!("这些进程杀不掉：{}", left.join(", ")))
+    }
 }
 
 /// 每个项目对应一个 transient unit，名字加 panel- 前缀避免撞上系统里的服务
@@ -433,10 +483,14 @@ async fn units(State(app): State<Arc<App>>) -> Json<Vec<Status>> {
     let mut v = Vec::with_capacity(found.len());
     for (name, dir) in found {
         let (unit, external, r) = pick_unit(&name).await;
-        // unit 存在就以 systemd 为准，不存在才去找面板外的裸进程
-        let outside_pid = (r.load != "loaded")
-            .then(|| find_outside(&exes, &dir))
-            .flatten();
+        // 关键是「unit 有没有在跑」，不是「unit 存不存在」：
+        // 上次启动失败会留下一个 failed 的 unit，它不该屏蔽掉裸进程检测
+        let outside = if r.active == "active" {
+            Vec::new()
+        } else {
+            find_outside(&exes, &dir)
+        };
+        let outside_pid = outside.first().copied();
         let uptime = (r.active == "active")
             .then(|| r.active_since_us.map(|u| (boot - u as f64 / 1e6).max(0.0)))
             .flatten();
@@ -563,9 +617,9 @@ async fn action(
     };
     let (unit, external, raw) = pick_unit(&project).await;
     let req = body.map(|Json(b)| b).unwrap_or_default();
-    // unit 不存在时才去找面板外的裸进程
-    let outside = if raw.load == "loaded" {
-        None
+    // 同上：unit 只要没在跑，就得去看是不是有个面板外的裸进程占着
+    let outside = if raw.active == "active" {
+        Vec::new()
     } else {
         find_outside(&proc_exes().await, &dir)
     };
@@ -580,17 +634,13 @@ async fn action(
         Ok((ok, out, err)) => (ok, if err.trim().is_empty() { out } else { err }),
         Err(e) => (false, e.to_string()),
     };
-    // 面板外的进程 systemd 管不了，只能直接发信号
-    let kill = async |pid: u32| match run("kill", &["-TERM", &pid.to_string()]).await {
-        Ok((ok, out, err)) => (ok, if err.trim().is_empty() { out } else { err }),
-        Err(e) => (false, e.to_string()),
-    };
 
     let (ok, msg) = match act.as_str() {
-        "stop" if outside.is_some() => kill(outside.unwrap()).await,
-        // unit 压根不存在时 systemctl stop 会报错，但「停止一个没在跑的东西」
+        // 面板外的裸进程 systemd 管不了，只能直接发信号
+        "stop" if !outside.is_empty() => stop_pids(&outside).await,
+        // 什么都没在跑时 systemctl stop 会报 not loaded，但「停止一个没在跑的东西」
         // 本来就该是空操作，不该弹红字
-        "stop" if raw.load != "loaded" => return StatusCode::NO_CONTENT.into_response(),
+        "stop" if raw.active != "active" => return StatusCode::NO_CONTENT.into_response(),
         "stop" => sysctl("stop").await,
         // 你自己写的 unit，ExecStart 是你定的，面板不插手怎么起
         _ if external => match act.as_str() {
@@ -604,18 +654,12 @@ async fn action(
             if !ok_name(&bin) || !bins(&dir).await.contains(&bin) {
                 return (StatusCode::BAD_REQUEST, "这个项目里没有这个程序").into_response();
             }
-            // 外面已经有一个在跑：先杀掉再起，否则会有两个实例抢同一个端口。
-            // TERM 之后给它一点时间放掉端口。
-            if let Some(pid) = outside {
-                let (ok, msg) = kill(pid).await;
+            // 外面已经有一个在跑：必须等它真的退出再起，否则新进程会撞 AddrInUse
+            if !outside.is_empty() {
+                let (ok, msg) = stop_pids(&outside).await;
                 if !ok {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("停止 pid {pid} 失败：{msg}"),
-                    )
-                        .into_response();
+                    return (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response();
                 }
-                tokio::time::sleep(Duration::from_millis(600)).await;
             } else if act == "restart" {
                 let _ = sysctl("stop").await;
             }
@@ -855,6 +899,42 @@ mod tests {
                 "importer",
             ]
         );
+    }
+
+    #[test]
+    fn 僵尸进程算死的() {
+        assert!(alive_from_stat("69968 (xau) R 1 69968 69968 0 -1 4194560"));
+        assert!(alive_from_stat("69968 (xau) S 1 69968"));
+        assert!(!alive_from_stat("69968 (xau) Z 1 69968"));
+        // 进程名里带空格和括号是合法的，状态字段必须从最后一个 ) 往后取
+        assert!(alive_from_stat("42 (my (weird) app) R 1 42"));
+        assert!(!alive_from_stat("42 (my (weird) app) Z 1 42"));
+        // 名字里有 z 不该被当成僵尸
+        assert!(alive_from_stat("42 (zombie-hunter) S 1 42"));
+        assert!(!alive_from_stat("")); // 读不到就当死了
+    }
+
+    #[test]
+    fn 只认target目录下的进程() {
+        let exes = vec![
+            (
+                1u32,
+                PathBuf::from("/root/rust_project/xau/target/debug/xau"),
+            ),
+            (2, PathBuf::from("/root/.cargo/bin/cargo")),
+            (
+                3,
+                PathBuf::from("/root/rust_project/xau/target/release/shell"),
+            ),
+            (
+                4,
+                PathBuf::from("/root/rust_project/other/target/debug/other"),
+            ),
+            (5, PathBuf::from("/usr/bin/sshd")),
+        ];
+        let dir = PathBuf::from("/root/rust_project/xau");
+        assert_eq!(find_outside(&exes, &dir), vec![1, 3]);
+        assert!(find_outside(&exes, &PathBuf::from("/root/rust_project/nope")).is_empty());
     }
 
     #[test]
