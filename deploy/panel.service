@@ -12,7 +12,7 @@
 #
 # 面板自己的日志：journalctl -u panel -f
 # 某个项目的日志：journalctl -u panel-<项目文件夹名> -f
-# 放行端口：ufw allow 8080   （云服务器还要开安全组）
+# 放行端口：ufw allow 80   （云服务器还要开安全组）
 
 [Unit]
 Description=项目面板

@@ -54,7 +54,7 @@ button {
 button:disabled { opacity: .4; cursor: not-allowed; }
 button.ghost { background: transparent; color: var(--muted); border-color: var(--line); }
 
-#app { max-width: 950px; margin: 0 auto; }
+#app { max-width: min(1600px, 96vw); margin: 0 auto; }
 #app > header, #logs > header {
   display: flex; align-items: center; gap: .75rem; margin-bottom: .75rem;
 }
@@ -69,7 +69,9 @@ tbody tr:last-child td { border-bottom: 0; }
 tr.busy { opacity: .5; }
 td.name { white-space: normal; }
 td.name small { display: block; color: var(--muted); font-size: .75rem; }
-td.ops { display: flex; flex-wrap: wrap; gap: .35rem; }
+/* nowrap 让这一格的最小宽度等于所有按钮之和，表格布局就必须给足空间，
+   按钮不会被挤成一竖排。窄屏在下面的 media query 里再放开折行。 */
+td.ops { display: flex; flex-wrap: nowrap; gap: .4rem; }
 .dot {
   display: inline-block; width: .6rem; height: .6rem; margin-right: .45rem;
   border-radius: 50%; background: var(--off);
@@ -88,15 +90,18 @@ td.ops { display: flex; flex-wrap: wrap; gap: .35rem; }
 .runform input { min-width: 16rem; flex: 1; }
 #runErr { margin-bottom: 0; }
 #logBody {
-  margin: 0; max-height: 55vh; overflow: auto; padding: .7rem;
+  margin: 0; max-height: 60vh; overflow: auto; padding: .7rem;
   background: var(--card); border: 1px solid var(--line); border-radius: 10px;
   font: 12.5px/1.5 ui-monospace, Consolas, monospace;
-  white-space: pre-wrap; overflow-wrap: anywhere;
+  /* 不换行：一行日志就是一条记录，折行之后时间戳对不齐，很难扫。
+     太长的横向滚动看。 */
+  white-space: pre;
 }
 @media (max-width: 640px) {
   body { padding: .6rem; }
   th, td { padding: .5rem .45rem; font-size: .85rem; }
   th:nth-child(4), td:nth-child(4) { display: none; }
+  td.ops { flex-wrap: wrap; }   /* 手机上放开折行，否则会顶出横向滚动条 */
 }
 </style>
 </head>

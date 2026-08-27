@@ -24,7 +24,7 @@ const LOCK_SECS: u64 = 60;
 
 #[derive(Deserialize)]
 struct Config {
-    /// 直接监听公网口，浏览器访问 http://你的IP:8080
+    /// 直接监听公网口，浏览器访问 http://你的IP（80 端口不用写端口号）
     #[serde(default = "default_bind")]
     bind: String,
     /// 明文密码。配置文件记得 chmod 600
@@ -44,7 +44,7 @@ struct Config {
     cargo: Option<String>,
 }
 fn default_bind() -> String {
-    "0.0.0.0:8080".into()
+    "0.0.0.0:80".into()
 }
 fn default_dirs() -> Vec<String> {
     vec!["/opt/apps".into()]
