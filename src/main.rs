@@ -328,9 +328,25 @@ async fn require_auth(State(app): State<Arc<App>>, req: Request, next: Next) -> 
 }
 
 #[tokio::main]
-async fn main() -> Result<(), BoxErr> {
+async fn main() {
+    // 单独包一层：直接从 main 返回 Err 的话，输出是 Debug 格式
+    // （Os { code: 2, ... } 这种），看不出到底哪个文件不见了
+    if let Err(e) = start().await {
+        eprintln!("面板启动失败：{e}");
+        std::process::exit(1);
+    }
+}
+
+async fn start() -> Result<(), BoxErr> {
     let path = std::env::var("PANEL_CONFIG").unwrap_or_else(|_| "/etc/panel.toml".into());
-    let cfg: Config = toml::from_str(&std::fs::read_to_string(&path)?)?;
+    let text = std::fs::read_to_string(&path).map_err(|e| {
+        format!(
+            "读不到配置文件 {path}（{e}）\n\
+             照 panel.toml.example 建一个：cp panel.toml.example /etc/panel.toml && chmod 600 /etc/panel.toml\n\
+             想放别的位置就设环境变量 PANEL_CONFIG=/你的/路径"
+        )
+    })?;
+    let cfg: Config = toml::from_str(&text).map_err(|e| format!("配置文件 {path} 有问题：{e}"))?;
 
     if cfg.password.chars().count() < 12 {
         return Err(
@@ -369,7 +385,9 @@ async fn main() -> Result<(), BoxErr> {
         .merge(protected)
         .with_state(app);
 
-    let listener = tokio::net::TcpListener::bind(&bind).await?;
+    let listener = tokio::net::TcpListener::bind(&bind)
+        .await
+        .map_err(|e| format!("监听 {bind} 失败：{e}"))?;
     println!("面板已启动: http://{}", listener.local_addr()?);
     axum::serve(listener, router).await?;
     Ok(())
