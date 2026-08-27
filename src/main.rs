@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::extract::{Path, Query, Request, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -575,6 +575,15 @@ async fn main() {
     }
 }
 
+/// 页面和接口都不许缓存。网页是 include_str! 编译进二进制的，
+/// 面板升级后浏览器还拿着旧页面的话，症状会非常难查（后端新、前端旧）。
+async fn no_cache(req: Request, next: Next) -> Response {
+    let mut res = next.run(req).await;
+    res.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    res
+}
+
 /// 找配置文件，按这个顺序：
 ///   1. 环境变量 PANEL_CONFIG
 ///   2. 当前目录下的 panel.toml       —— 在源码目录里 cargo run / ./target/debug/panel
@@ -668,6 +677,7 @@ async fn start() -> Result<(), BoxErr> {
         .route("/", get(index))
         .route("/api/login", post(login))
         .merge(protected)
+        .layer(middleware::from_fn(no_cache))
         .with_state(app);
 
     let listener = tokio::net::TcpListener::bind(&bind)
