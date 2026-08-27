@@ -1,0 +1,25 @@
+# 让面板本身也开机自启。装法：
+#
+#   install -m 755 target/release/panel /usr/local/bin/panel
+#   install -m 600 panel.toml /etc/panel.toml
+#   cp deploy/panel.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now panel
+#
+# 别忘了放行端口：ufw allow 8080   （或云厂商控制台的安全组）
+
+[Unit]
+Description=项目面板
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+# 用 root 跑，这样面板直接调 systemctl 就行，不用额外配 sudo 授权
+User=root
+Environment=PANEL_CONFIG=/etc/panel.toml
+ExecStart=/usr/local/bin/panel
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

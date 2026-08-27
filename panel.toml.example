@@ -1,0 +1,24 @@
+# 复制成 /etc/panel.toml，然后 chmod 600（里面是明文密码）
+# 想换位置就设环境变量 PANEL_CONFIG
+
+# 直接监听公网口，浏览器打开 http://你的服务器IP:8080
+bind = "0.0.0.0:8080"
+
+# 明文密码，至少 12 位。面板是裸挂在公网上的，
+# 设成 123456 这种几小时内就会被扫到并试出来。生成一个随机的：
+#   openssl rand -base64 24
+password = "换成你自己的长随机密码"
+
+# 每个项目一段：
+#   key  = 内部标识，只用英文和数字，网页上看不到
+#   name = 网页上显示的名字
+#   unit = systemd 服务名，只有列在这里的服务能被面板操作
+[[projects]]
+key = "blog"
+name = "博客"
+unit = "blog.service"
+
+[[projects]]
+key = "api"
+name = "API 服务"
+unit = "myapi.service"

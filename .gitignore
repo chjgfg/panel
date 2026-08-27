@@ -1,0 +1,4 @@
+/target
+
+# 真实配置里有密码哈希，别进仓库；示例见 panel.toml.example
+/panel.toml
