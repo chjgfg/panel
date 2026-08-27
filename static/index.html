@@ -9,13 +9,16 @@
 :root {
   --bg: #16181d; --card: #1e2128; --line: #2c3038;
   --fg: #e6e8eb; --muted: #8b93a1; --accent: #4c8dff;
-  --on: #3fb950; --off: #6e7681; --bad: #f85149;
+  /* 表格状态点 + 仪表严重度。--warn 是按 CVD 可分辨性选的：
+     深色下 #e3b341 与 #f85149 的 deutan ΔE 12.3，浅色下 #bf8700 与 #cf222e 为 11.0，
+     都过了 8 这条线（#d29922 只有 5.8，红黄在红绿色盲眼里会糊成一片）。 */
+  --on: #3fb950; --off: #6e7681; --bad: #f85149; --warn: #e3b341;
 }
 @media (prefers-color-scheme: light) {
   :root {
     --bg: #f4f5f7; --card: #fff; --line: #e2e5ea;
     --fg: #1b1f24; --muted: #6b7280;
-    --on: #1a7f37; --off: #9aa0a6; --bad: #cf222e;
+    --on: #1a7f37; --off: #9aa0a6; --bad: #cf222e; --warn: #bf8700;
   }
 }
 * { box-sizing: border-box; }
@@ -55,6 +58,30 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 button.ghost { background: transparent; color: var(--muted); border-color: var(--line); }
 
 #app { max-width: min(1600px, 96vw); margin: 0 auto; }
+
+/* ---------- 整机资源：一排 stat tile，每个是一个「占比对上限」的仪表 ---------- */
+.stats {
+  display: grid; gap: .6rem; margin-bottom: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+}
+.tile {
+  padding: .6rem .7rem; background: var(--card);
+  border: 1px solid var(--line); border-radius: 10px;
+}
+.tile b { display: block; font-weight: 400; font-size: .78rem; color: var(--muted); }
+/* 数值每 3 秒重绘一次，用等宽数字免得位数变化时左右抖动 */
+.tile strong {
+  display: block; margin: .15rem 0 .25rem; font-size: 1.25rem; font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.tile small { color: var(--muted); font-size: .75rem; }
+/* 轨道取填充色的浅一档（同色相），这样整条都在表达状态，而不是一半灰一半彩 */
+.meter {
+  height: 6px; margin-top: .45rem; border-radius: 3px; overflow: hidden;
+  background: var(--line);
+  background: color-mix(in oklab, var(--m) 22%, transparent);
+}
+.meter i { display: block; height: 100%; border-radius: 3px; background: var(--m); }
 #app > header, #logs > header {
   display: flex; align-items: center; gap: .75rem; margin-bottom: .75rem;
 }
@@ -123,6 +150,8 @@ td.ops { display: flex; flex-wrap: nowrap; gap: .4rem; }
   </header>
 
   <p id="banner" class="err" hidden></p>
+
+  <div class="stats" id="stats"></div>
 
   <table>
     <thead>
@@ -199,10 +228,67 @@ function fmtDur(s) {
 
 function fmtMem(b) {
   if (b == null) return '—';
-  const u = ['B', 'KB', 'MB', 'GB'];
+  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
   let i = 0;
-  while (b >= 1024 && i < 3) { b /= 1024; i++; }
+  while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
   return b.toFixed(i ? 1 : 0) + u[i];
+}
+
+// ---------- 整机资源 ----------
+
+function ratio(used, total) {
+  return total > 0 ? (used / total) * 100 : null;
+}
+
+/// 仪表填充色按严重度走：正常 → 注意 → 危险。
+/// 颜色只是辅助，数值本身就在旁边，所以不靠颜色单独传达信息。
+function severity(p) {
+  return p >= 90 ? 'var(--bad)' : p >= 70 ? 'var(--warn)' : 'var(--accent)';
+}
+
+function tile(label, value, sub, p) {
+  const d = document.createElement('div');
+  d.className = 'tile';
+  const b = document.createElement('b');
+  b.textContent = label;
+  const v = document.createElement('strong');
+  v.textContent = value;
+  const s = document.createElement('small');
+  s.textContent = sub || '';
+  d.append(b, v, s);
+  if (p != null) {
+    const m = document.createElement('div');
+    m.className = 'meter';
+    m.style.setProperty('--m', severity(p));
+    const i = document.createElement('i');
+    i.style.width = Math.min(100, Math.max(0, p)) + '%';
+    m.appendChild(i);
+    d.appendChild(m);
+  }
+  return d;
+}
+
+function renderHost(h) {
+  const t = [
+    tile('CPU', h.cpu == null ? '—' : h.cpu.toFixed(1) + '%', `${h.cores} 核`, h.cpu),
+  ];
+  const mp = ratio(h.mem_used, h.mem_total);
+  t.push(tile('内存', mp == null ? '—' : mp.toFixed(0) + '%',
+    `${fmtMem(h.mem_used)} / ${fmtMem(h.mem_total)}`, mp));
+  for (const d of h.disks) {
+    const dp = ratio(d.used, d.total);
+    t.push(tile('磁盘 ' + d.mount, dp == null ? '—' : dp.toFixed(0) + '%',
+      `${fmtMem(d.used)} / ${fmtMem(d.total)}`, dp));
+  }
+  if (h.swap_total > 0) {
+    const sp = ratio(h.swap_used, h.swap_total);
+    t.push(tile('Swap', sp.toFixed(0) + '%',
+      `${fmtMem(h.swap_used)} / ${fmtMem(h.swap_total)}`, sp));
+  }
+  t.push(tile('负载', h.load[0].toFixed(2),
+    `5 分 ${h.load[1].toFixed(2)} · 15 分 ${h.load[2].toFixed(2)}`));
+  t.push(tile('已开机', fmtDur(h.uptime)));
+  $('stats').replaceChildren(...t);
 }
 
 // 全程用 textContent 建 DOM，不拼 innerHTML，就不用操心转义
@@ -385,6 +471,10 @@ async function refresh() {
   } catch (e) {
     if (e.message !== '未登录') banner('刷新失败: ' + e.message);
   }
+  // 整机资源单独一个 try：读不到（比如不是 Linux）也不该影响项目列表
+  try {
+    renderHost(await (await req('/api/host')).json());
+  } catch { /* 401 已由 req() 处理 */ }
 }
 
 $('loginForm').onsubmit = async e => {
