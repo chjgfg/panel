@@ -19,6 +19,11 @@
   }
 }
 * { box-sizing: border-box; }
+
+/* 必须 !important：浏览器让 hidden 生效靠的是自带样式表里的 [hidden]{display:none}，
+   而下面 #login{display:flex} 是作者样式表里的 id 选择器，优先级更高会把它顶掉，
+   结果就是 hidden 属性加上了、元素照样显示。 */
+[hidden] { display: none !important; }
 body {
   margin: 0; padding: 1rem; background: var(--bg); color: var(--fg);
   font: 15px/1.5 system-ui, "Microsoft YaHei", sans-serif;
