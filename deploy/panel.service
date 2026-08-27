@@ -1,19 +1,18 @@
-# 让面板本身也开机自启。二进制和配置放一个目录，互不干扰：
+# 让面板本身开机自启。装法：
 #
 #   mkdir -p /opt/panel /opt/apps
-#   install -m 755 panel            /opt/panel/panel
-#   install -m 600 panel.toml       /opt/panel/panel.toml
+#   install -m 755 target/release/panel /opt/panel/panel
+#   install -m 600 panel.toml           /opt/panel/panel.toml
 #   cp deploy/panel.service /etc/systemd/system/
 #   systemctl daemon-reload && systemctl enable --now panel
 #
-# /opt/apps 就是放项目的地方（配置里的 dirs）。以后加项目：
-#   mkdir /opt/apps/blog                     # 文件夹名 = 服务名
-#   vi /etc/systemd/system/blog.service      # 写好这个项目怎么启动
-#   systemctl daemon-reload
-# 然后刷新网页就能看到 blog，不用动面板。
+# /opt/apps 就是放项目的地方（配置里的 dirs）。以后加项目就一句：
+#   cd /opt/apps && git clone <你的仓库>
+# 刷新网页就能看到它，点「运行…」选一个 bin 填上参数就跑起来了。
 #
-# 看面板自己的日志：journalctl -u panel -f
-# 别忘了放行端口：ufw allow 8080   （或云厂商控制台的安全组）
+# 面板自己的日志：journalctl -u panel -f
+# 某个项目的日志：journalctl -u panel-<项目文件夹名> -f
+# 放行端口：ufw allow 8080   （云服务器还要开安全组）
 
 [Unit]
 Description=项目面板
@@ -22,7 +21,7 @@ Wants=network-online.target
 
 [Service]
 Type=exec
-# 用 root 跑，这样面板直接调 systemctl 就行，不用额外配 sudo 授权
+# 用 root 跑，这样面板直接调 systemd-run / systemctl，不用额外配 sudo 授权
 User=root
 # 配置不用在这里指定：panel 会自动找自己旁边的 panel.toml
 ExecStart=/opt/panel/panel

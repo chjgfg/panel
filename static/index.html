@@ -34,12 +34,13 @@ h2 { font-size: .95rem; margin: 0; }
   border: 1px solid var(--line); border-radius: 10px;
 }
 #loginForm h1 { margin-bottom: 1rem; }
-input, button {
+input, button, select {
   font: inherit; border-radius: 6px; border: 1px solid var(--line);
 }
-input {
-  width: 100%; padding: .55rem .7rem; background: var(--bg); color: var(--fg);
+input, select {
+  padding: .45rem .6rem; background: var(--bg); color: var(--fg);
 }
+#loginForm input { width: 100%; padding: .55rem .7rem; }
 button {
   padding: .4rem .75rem; background: var(--accent); color: #fff;
   border-color: transparent; cursor: pointer;
@@ -72,6 +73,15 @@ td.ops { display: flex; flex-wrap: wrap; gap: .35rem; }
 .dot.bad { background: var(--bad); }
 
 #logs { margin-top: 1.25rem; }
+#runbox {
+  margin-top: 1.25rem; padding: .9rem; background: var(--card);
+  border: 1px solid var(--line); border-radius: 10px;
+}
+#runbox > header { margin-bottom: .75rem; }
+.runform { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; }
+.runform label { display: flex; align-items: center; gap: .4rem; color: var(--muted); font-size: .85rem; }
+.runform input { min-width: 16rem; flex: 1; }
+#runErr { margin-bottom: 0; }
 #logBody {
   margin: 0; max-height: 55vh; overflow: auto; padding: .7rem;
   background: var(--card); border: 1px solid var(--line); border-radius: 10px;
@@ -111,6 +121,19 @@ td.ops { display: flex; flex-wrap: wrap; gap: .35rem; }
     <tbody id="rows"></tbody>
   </table>
 
+  <section id="runbox" hidden>
+    <header>
+      <h2>运行 · <span id="runName"></span></h2>
+      <button id="closeRun" class="ghost">取消</button>
+    </header>
+    <div class="runform">
+      <label>程序 <select id="runBin"></select></label>
+      <label>参数 <input type="text" id="runArgs" placeholder="可留空，多个参数用空格分隔"></label>
+      <button id="runGo">启动</button>
+    </div>
+    <p id="runErr" class="err"></p>
+  </section>
+
   <section id="logs" hidden>
     <header>
       <h2>日志 · <span id="logName"></span></h2>
@@ -123,7 +146,7 @@ td.ops { display: flex; flex-wrap: wrap; gap: .35rem; }
 <script>
 const $ = id => document.getElementById(id);
 const POLL = 3000;
-let timer = null, logKey = null;
+let timer = null, logKey = null, runKey = null;
 
 async function req(path, opts) {
   const r = await fetch(path, { credentials: 'same-origin', ...opts });
@@ -141,8 +164,10 @@ function showLogin() {
   clearInterval(timer);
   timer = null;
   logKey = null;
+  runKey = null;
   banner('');
   $('logs').hidden = true;
+  $('runbox').hidden = true;
   $('app').hidden = true;
   $('login').hidden = false;
   $('pw').focus();
@@ -178,6 +203,15 @@ function cell(tr, text) {
   return td;
 }
 
+function btn(ops, label, disabled, onclick, ghost) {
+  const b = document.createElement('button');
+  b.textContent = label;
+  b.disabled = disabled;
+  b.onclick = onclick;
+  if (ghost) b.className = 'ghost';
+  ops.appendChild(b);
+}
+
 function render(list) {
   $('rows').replaceChildren(...list.map(u => {
     const running = u.active === 'active';
@@ -186,11 +220,14 @@ function render(list) {
     const name = cell(tr, u.name);
     name.className = 'name';
     const small = document.createElement('small');
-    small.textContent = [u.unit, u.pid ? 'pid ' + u.pid : '', u.enabled ? '开机自启' : '']
-      .filter(Boolean).join(' · ');
+    small.textContent = [
+      u.cur_bin ? '▶ ' + u.cur_bin + (u.cur_args ? ' ' + u.cur_args : '') : null,
+      u.pid ? 'pid ' + u.pid : null,
+    ].filter(Boolean).join(' · ') || `${u.bins.length} 个可运行程序`;
+    small.title = u.unit;     // journalctl -u 用的就是这个名字
     name.appendChild(small);
 
-    const st = cell(tr, !u.loaded ? '未创建服务'
+    const st = cell(tr, !u.loaded ? '未运行'
       : running ? '运行中' : u.active === 'failed' ? '失败' : '已停止');
     const dot = document.createElement('span');
     dot.className = 'dot ' + (running ? 'on' : u.active === 'failed' ? 'bad' : 'off');
@@ -203,35 +240,84 @@ function render(list) {
 
     const ops = cell(tr, '');
     ops.className = 'ops';
-    for (const [act, label] of [['start', '启动'], ['stop', '停止'], ['restart', '重启']]) {
-      const b = document.createElement('button');
-      b.textContent = label;
-      b.disabled = !u.loaded || (act === 'start' && running) || (act === 'stop' && !running);
-      b.onclick = () => doAction(u, act, label, tr);
-      ops.appendChild(b);
-    }
-    const lb = document.createElement('button');
-    lb.textContent = '日志';
-    lb.className = 'ghost';
-    lb.onclick = () => openLogs(u);
-    ops.appendChild(lb);
+    btn(ops, running ? '切换程序…' : '运行…', false, () => openRun(u));
+    btn(ops, '停止', !running, () => doAction(u, 'stop', '停止', tr));
+    btn(ops, '重启', !running || !u.cur_bin, () => doAction(u, 'restart', '重启', tr));
+    btn(ops, '日志', false, () => openLogs(u), true);
 
     return tr;
   }));
 }
 
 async function doAction(u, act, label, tr) {
-  if (act !== 'start' && !confirm(`确认${label}「${u.name}」?`)) return;
+  if (!confirm(`确认${label}「${u.name}」?`)) return;
   tr.classList.add('busy');
   tr.querySelectorAll('button').forEach(b => b.disabled = true);
   try {
-    await req(`/api/units/${u.key}/${act}`, { method: 'POST' });
+    // 不带 bin，服务端沿用上次那个
+    await req(`/api/units/${u.key}/${act}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
     banner('');
   } catch (e) {
     if (e.message !== '未登录') banner(`${label}「${u.name}」失败: ${e.message}`);
   }
   refresh();
 }
+
+// ---------- 选程序 + 填参数 ----------
+
+function openRun(u) {
+  runKey = u.key;
+  $('runName').textContent = u.name;
+  $('runErr').textContent = '';
+  const sel = $('runBin');
+  sel.replaceChildren(...u.bins.map(b => {
+    const o = document.createElement('option');
+    o.value = b;
+    o.textContent = b;
+    return o;
+  }));
+  const empty = u.bins.length === 0;
+  if (empty) {
+    const o = document.createElement('option');
+    o.textContent = '没找到 src/main.rs 或 src/bin/*.rs';
+    sel.appendChild(o);
+  }
+  if (u.cur_bin) sel.value = u.cur_bin;
+  $('runArgs').value = u.cur_args || '';
+  const go = $('runGo');
+  go.disabled = empty;
+  go.textContent = u.active === 'active' ? '切换并重启' : '启动';
+  go.dataset.act = u.active === 'active' ? 'restart' : 'start';
+  $('runbox').hidden = false;
+  $('runArgs').focus();
+}
+
+$('runGo').onclick = async () => {
+  if (!runKey) return;
+  const go = $('runGo');
+  go.disabled = true;
+  $('runErr').textContent = '';
+  try {
+    await req(`/api/units/${runKey}/${go.dataset.act || 'start'}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bin: $('runBin').value, args: $('runArgs').value }),
+    });
+    $('runbox').hidden = true;
+    runKey = null;
+  } catch (e) {
+    if (e.message !== '未登录') $('runErr').textContent = e.message;
+  } finally {
+    go.disabled = false;
+    refresh();
+  }
+};
+
+$('closeRun').onclick = () => { runKey = null; $('runbox').hidden = true; };
 
 function openLogs(u) {
   logKey = u.key;

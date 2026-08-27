@@ -1,6 +1,7 @@
 // 一个只做四件事的小面板：看状态、看日志、启动、停止/重启。
 // 全部逻辑就这一个文件，网页是 static/index.html，编译时直接嵌进二进制。
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -28,10 +29,13 @@ struct Config {
     bind: String,
     /// 明文密码。配置文件记得 chmod 600
     password: String,
-    /// 放项目的目录。里面每个子文件夹算一个项目，
-    /// 文件夹叫 blog 就对应 blog.service，加项目不用改这里
+    /// 放项目的目录。里面每个子文件夹算一个项目，加项目不用改这里
     #[serde(default = "default_dirs")]
     dirs: Vec<String>,
+    /// cargo 的绝对路径。留空自动探测——systemd 起进程时 PATH 里
+    /// 通常没有 ~/.cargo/bin，所以不能直接写 "cargo"
+    #[serde(default)]
+    cargo: Option<String>,
 }
 fn default_bind() -> String {
     "0.0.0.0:8080".into()
@@ -53,16 +57,25 @@ struct Status {
     memory: Option<u64>,
     cpu: Option<f64>,
     uptime: Option<f64>,
+    /// 这个项目里所有能 cargo run --bin 的名字
+    bins: Vec<String>,
+    /// 上次是用哪个 bin、哪些参数起来的（面板重启后会丢，只影响界面回显）
+    cur_bin: Option<String>,
+    cur_args: Option<String>,
 }
 
 struct App {
     cfg: Config,
+    /// cargo 的绝对路径，启动时定好
+    cargo: String,
     /// token -> 过期时刻
     sessions: Mutex<HashMap<String, Instant>>,
     /// (连续失败次数, 最后一次失败时刻)
     fails: Mutex<(u32, Instant)>,
     /// unit -> (上次读到的 CPU 累计纳秒, 采样时刻)
     cpu_prev: Mutex<HashMap<String, (u64, Instant)>>,
+    /// 项目名 -> (bin, 参数)，「重启」要用它重新拼命令
+    last: Mutex<HashMap<String, (String, String)>>,
 }
 
 impl App {
@@ -209,10 +222,10 @@ fn ok_name(n: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || "._@-".contains(c))
 }
 
-/// 扫配置里的目录，每个子文件夹算一个项目。
+/// 扫配置里的目录，每个子文件夹算一个项目，返回 (项目名, 绝对路径)。
 /// 每次请求都重新扫，所以新建文件夹后刷新网页就能看到，不用重启面板。
-async fn discover(dirs: &[String]) -> Vec<String> {
-    let mut names = Vec::new();
+async fn discover(dirs: &[String]) -> Vec<(String, PathBuf)> {
+    let mut out = Vec::new();
     for d in dirs {
         let Ok(mut rd) = tokio::fs::read_dir(d).await else {
             continue; // 目录不存在就跳过，不影响其它目录
@@ -221,13 +234,88 @@ async fn discover(dirs: &[String]) -> Vec<String> {
             let is_dir = e.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
             let name = e.file_name().to_string_lossy().into_owned();
             if is_dir && ok_name(&name) {
-                names.push(name);
+                out.push((name, e.path()));
             }
         }
     }
-    names.sort();
-    names.dedup();
-    names
+    out.sort();
+    out.dedup_by(|a, b| a.0 == b.0);
+    out
+}
+
+/// 每个项目对应一个 transient unit，名字加 panel- 前缀避免撞上系统里的服务
+fn unit_of(project: &str) -> String {
+    format!("panel-{project}.service")
+}
+
+#[derive(Deserialize)]
+struct CargoToml {
+    package: Option<CargoPkg>,
+}
+#[derive(Deserialize)]
+struct CargoPkg {
+    name: String,
+}
+
+/// 列出项目里所有能 `cargo run --bin X` 的 X：
+///   src/main.rs        -> Cargo.toml 里的包名（cargo 就是这么命名默认 bin 的）
+///   src/bin/foo.rs     -> foo
+///   src/bin/foo/main.rs -> foo
+async fn bins(dir: &std::path::Path) -> Vec<String> {
+    let mut v = Vec::new();
+
+    if dir.join("src/main.rs").is_file()
+        && let Ok(t) = tokio::fs::read_to_string(dir.join("Cargo.toml")).await
+        && let Ok(ct) = toml::from_str::<CargoToml>(&t)
+        && let Some(pkg) = ct.package
+        && ok_name(&pkg.name)
+    {
+        v.push(pkg.name);
+    }
+
+    if let Ok(mut rd) = tokio::fs::read_dir(dir.join("src/bin")).await {
+        while let Ok(Some(e)) = rd.next_entry().await {
+            let p = e.path();
+            let name = if p.extension().is_some_and(|x| x == "rs") {
+                p.file_stem()
+            } else if p.join("main.rs").is_file() {
+                p.file_name()
+            } else {
+                None
+            };
+            if let Some(n) = name.map(|n| n.to_string_lossy().into_owned())
+                && ok_name(&n)
+            {
+                v.push(n);
+            }
+        }
+    }
+
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// systemd 起的进程 PATH 里没有 ~/.cargo/bin，所以要拿到 cargo 的绝对路径
+fn find_cargo(explicit: Option<&str>) -> Option<String> {
+    if let Some(p) = explicit {
+        return std::path::Path::new(p).is_file().then(|| p.to_string());
+    }
+    let mut cands = Vec::new();
+    if let Ok(h) = std::env::var("HOME") {
+        cands.push(format!("{h}/.cargo/bin/cargo"));
+    }
+    for p in [
+        "/root/.cargo/bin/cargo",
+        "/usr/local/cargo/bin/cargo",
+        "/usr/local/bin/cargo",
+        "/usr/bin/cargo",
+    ] {
+        cands.push(p.into());
+    }
+    cands
+        .into_iter()
+        .find(|p| std::path::Path::new(p).is_file())
 }
 
 // ---------- 接口 ----------
@@ -277,16 +365,21 @@ async fn me() -> StatusCode {
 
 async fn units(State(app): State<Arc<App>>) -> Json<Vec<Status>> {
     let boot = boot_secs().await;
-    let names = discover(&app.cfg.dirs).await;
-    let mut v = Vec::with_capacity(names.len());
-    for name in names {
-        let unit = format!("{name}.service");
+    let found = discover(&app.cfg.dirs).await;
+    let mut v = Vec::with_capacity(found.len());
+    for (name, dir) in found {
+        let unit = unit_of(&name);
         let r = show(&unit).await;
         let uptime = (r.active == "active")
             .then(|| r.active_since_us.map(|u| (boot - u as f64 / 1e6).max(0.0)))
             .flatten();
+        let (cur_bin, cur_args) = match app.last.lock().unwrap().get(&name) {
+            Some((b, a)) => (Some(b.clone()), Some(a.clone())),
+            None => (None, None),
+        };
         v.push(Status {
             key: name.clone(),
+            bins: bins(&dir).await,
             name,
             cpu: app.cpu(&unit, r.cpu_nsec),
             unit,
@@ -297,37 +390,136 @@ async fn units(State(app): State<Arc<App>>) -> Json<Vec<Status>> {
             pid: r.pid,
             memory: r.memory,
             uptime,
+            cur_bin,
+            cur_args,
         });
     }
     Json(v)
 }
 
 /// 前端传来的名字一律重新扫目录核对，绝不直接拼进命令行
-async fn resolve(app: &App, key: &str) -> Option<String> {
+async fn resolve(app: &App, key: &str) -> Option<(String, PathBuf)> {
     if !ok_name(key) {
         return None;
     }
     discover(&app.cfg.dirs)
         .await
-        .iter()
-        .any(|n| n == key)
-        .then(|| format!("{key}.service"))
+        .into_iter()
+        .find(|(n, _)| n == key)
 }
 
-async fn action(State(app): State<Arc<App>>, Path((key, act)): Path<(String, String)>) -> Response {
-    if !matches!(act.as_str(), "start" | "stop" | "restart") {
-        return (StatusCode::BAD_REQUEST, "非法操作").into_response();
+#[derive(Deserialize, Default)]
+struct ActionReq {
+    /// 要跑哪个 bin。stop 用不到；start/restart 不给就沿用上次的
+    #[serde(default)]
+    bin: Option<String>,
+    /// 附加参数，空格分隔，原样传给程序（不过 shell，所以不用担心引号）
+    #[serde(default)]
+    args: Option<String>,
+}
+
+/// 拼 systemd-run 的参数。抽成纯函数是为了能单测——真正跑起来只有 Linux 上能验。
+fn systemd_run_argv(cargo: &str, unit: &str, dir: &str, bin: &str, args: &str) -> Vec<String> {
+    let cargo_dir = std::path::Path::new(cargo)
+        .parent()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    let mut v = vec![
+        format!("--unit={unit}"),
+        format!("--working-directory={dir}"),
+        // systemd 起的进程 PATH 很干净，cargo 自己还要找 rustc，得把它的目录带上
+        format!("--setenv=PATH={cargo_dir}:/usr/local/bin:/usr/bin:/bin"),
+        cargo.to_string(),
+        "run".into(),
+        "--bin".into(),
+        bin.into(),
+    ];
+    // -- 之后的都是你程序自己的参数，cargo 不解释；不过 shell，所以引号空格都不用转义
+    let extra: Vec<String> = args.split_whitespace().map(str::to_string).collect();
+    if !extra.is_empty() {
+        v.push("--".into());
+        v.extend(extra);
     }
-    let Some(unit) = resolve(&app, &key).await else {
-        return (StatusCode::NOT_FOUND, "未知项目").into_response();
-    };
-    match run("systemctl", &[act.as_str(), "--", unit.as_str()]).await {
-        Ok((true, ..)) => StatusCode::NO_CONTENT.into_response(),
+    v
+}
+
+/// 用 systemd-run 起一个 transient unit，等于临时造了个 systemd 服务。
+/// 这样状态、运行时长、CPU、内存、日志全都沿用现成那套，
+/// 面板不用自己管子进程和日志收集。
+async fn spawn(
+    app: &App,
+    project: &str,
+    dir: &std::path::Path,
+    bin: &str,
+    args: &str,
+) -> (bool, String) {
+    let unit = unit_of(project);
+    // 上一次跑完/跑挂的同名 unit 还挂在那儿的话，systemd-run 会拒绝创建
+    let _ = run("systemctl", &["reset-failed", "--", unit.as_str()]).await;
+
+    let argv = systemd_run_argv(&app.cargo, &unit, &dir.display().to_string(), bin, args);
+    let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+
+    match run("systemd-run", &refs).await {
+        Ok((true, ..)) => {
+            app.last
+                .lock()
+                .unwrap()
+                .insert(project.to_string(), (bin.to_string(), args.to_string()));
+            (true, String::new())
+        }
         Ok((false, out, err)) => {
             let msg = if err.trim().is_empty() { out } else { err };
-            (StatusCode::INTERNAL_SERVER_ERROR, msg.trim().to_string()).into_response()
+            (false, msg.trim().to_string())
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => (false, e.to_string()),
+    }
+}
+
+async fn action(
+    State(app): State<Arc<App>>,
+    Path((key, act)): Path<(String, String)>,
+    body: Option<Json<ActionReq>>,
+) -> Response {
+    let Some((project, dir)) = resolve(&app, &key).await else {
+        return (StatusCode::NOT_FOUND, "未知项目").into_response();
+    };
+    let unit = unit_of(&project);
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+
+    // 没指定 bin 就沿用上次那个，重启按钮才能一键用
+    let remembered = || app.last.lock().unwrap().get(&project).cloned();
+    let pick = || match req.bin.clone() {
+        Some(b) => Some((b, req.args.clone().unwrap_or_default())),
+        None => remembered(),
+    };
+
+    let (ok, msg) = match act.as_str() {
+        "stop" => match run("systemctl", &["stop", "--", unit.as_str()]).await {
+            Ok((ok, out, err)) => (ok, if err.trim().is_empty() { out } else { err }),
+            Err(e) => (false, e.to_string()),
+        },
+        "start" | "restart" => {
+            let Some((bin, args)) = pick() else {
+                return (StatusCode::BAD_REQUEST, "请先选一个要运行的程序").into_response();
+            };
+            if !ok_name(&bin) || !bins(&dir).await.contains(&bin) {
+                return (StatusCode::BAD_REQUEST, "这个项目里没有这个程序").into_response();
+            }
+            if act == "restart" {
+                let _ = run("systemctl", &["stop", "--", unit.as_str()]).await;
+            }
+            spawn(&app, &project, &dir, &bin, &args).await
+        }
+        _ => return (StatusCode::BAD_REQUEST, "非法操作").into_response(),
+    };
+
+    if ok {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        let msg = msg.trim();
+        let msg = if msg.is_empty() { "操作失败" } else { msg };
+        (StatusCode::INTERNAL_SERVER_ERROR, msg.to_string()).into_response()
     }
 }
 
@@ -341,9 +533,10 @@ async fn logs(
     Path(key): Path<String>,
     Query(q): Query<LogQuery>,
 ) -> Response {
-    let Some(unit) = resolve(&app, &key).await else {
+    let Some((project, _)) = resolve(&app, &key).await else {
         return (StatusCode::NOT_FOUND, "未知项目").into_response();
     };
+    let unit = unit_of(&project);
     let n = q.lines.unwrap_or(300).clamp(1, 2000).to_string();
     let args = [
         "-u",
@@ -442,14 +635,24 @@ async fn start() -> Result<(), BoxErr> {
             eprintln!("提示：目录 {d} 目前不存在，扫描时会跳过");
         }
     }
+    let cargo = match find_cargo(cfg.cargo.as_deref()) {
+        Some(c) => c,
+        None => {
+            return Err("找不到 cargo。在 panel.toml 里加一行指明路径，\
+                        比如 cargo = \"/root/.cargo/bin/cargo\"（用 which cargo 查）"
+                .into());
+        }
+    };
     let bind = cfg.bind.clone();
     let dirs = cfg.dirs.clone();
 
     let app = Arc::new(App {
         cfg,
+        cargo: cargo.clone(),
         sessions: Mutex::new(HashMap::new()),
         fails: Mutex::new((0, Instant::now())),
         cpu_prev: Mutex::new(HashMap::new()),
+        last: Mutex::new(HashMap::new()),
     });
 
     // 除了首页和登录接口，其它一律要带有效 cookie
@@ -471,13 +674,78 @@ async fn start() -> Result<(), BoxErr> {
         .await
         .map_err(|e| format!("监听 {bind} 失败：{e}"))?;
     println!("配置: {}", path.display());
+    println!("cargo: {cargo}");
     println!("扫描目录: {}", dirs.join(", "));
     // 只是启动时打一眼方便对账，真正的列表是每次请求现扫的
     match discover(&dirs).await {
         v if v.is_empty() => println!("当前扫到的项目: (无)"),
-        v => println!("当前扫到的项目: {}", v.join(", ")),
+        v => {
+            for (name, dir) in v {
+                let b = bins(&dir).await;
+                let b = if b.is_empty() {
+                    "没找到可运行的 bin".to_string()
+                } else {
+                    b.join(" / ")
+                };
+                println!("  {name}: {b}");
+            }
+        }
     }
     println!("面板已启动: http://{}", listener.local_addr()?);
     axum::serve(listener, router).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 文件夹名只放行安全字符() {
+        assert!(ok_name("blog"));
+        assert!(ok_name("my-api_2.0"));
+        assert!(ok_name("tpl@inst"));
+        assert!(!ok_name(""));
+        assert!(!ok_name(".git")); // 隐藏目录
+        assert!(!ok_name("-rf")); // 会被当成命令行选项
+        assert!(!ok_name("a b")); // 空格
+        assert!(!ok_name("../etc")); // 路径穿越
+        assert!(!ok_name("naïve")); // 非 ASCII
+        assert!(!ok_name(&"x".repeat(101)));
+    }
+
+    #[test]
+    fn 不带参数时不加双横线() {
+        let v = systemd_run_argv(
+            "/root/.cargo/bin/cargo",
+            "panel-blog.service",
+            "/opt/apps/blog",
+            "importer",
+            "   ",
+        );
+        assert_eq!(
+            v,
+            vec![
+                "--unit=panel-blog.service",
+                "--working-directory=/opt/apps/blog",
+                "--setenv=PATH=/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin",
+                "/root/.cargo/bin/cargo",
+                "run",
+                "--bin",
+                "importer",
+            ]
+        );
+    }
+
+    #[test]
+    fn 参数按空格拆成独立参数() {
+        let v = systemd_run_argv(
+            "/usr/bin/cargo",
+            "panel-a.service",
+            "/srv/a",
+            "worker",
+            "--port 8080  -v",
+        );
+        assert_eq!(&v[v.len() - 5..], &["worker", "--", "--port", "8080", "-v"]);
+    }
 }
