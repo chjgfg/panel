@@ -518,7 +518,7 @@ async fn action(
     let Some((project, dir)) = resolve(&app, &key).await else {
         return (StatusCode::NOT_FOUND, "未知项目").into_response();
     };
-    let (unit, external, _) = pick_unit(&project).await;
+    let (unit, external, raw) = pick_unit(&project).await;
     let req = body.map(|Json(b)| b).unwrap_or_default();
 
     // 没指定 bin 就沿用上次那个，重启按钮才能一键用
@@ -533,6 +533,9 @@ async fn action(
     };
 
     let (ok, msg) = match act.as_str() {
+        // unit 压根不存在时 systemctl stop 会报错，但「停止一个没在跑的东西」
+        // 本来就该是空操作，不该弹红字
+        "stop" if raw.load != "loaded" => return StatusCode::NO_CONTENT.into_response(),
         "stop" => sysctl("stop").await,
         // 你自己写的 unit，ExecStart 是你定的，面板不插手怎么起
         _ if external => match act.as_str() {

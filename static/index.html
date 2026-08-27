@@ -242,15 +242,18 @@ function render(list) {
 
     const ops = cell(tr, '');
     ops.className = 'ops';
+    // 按钮一律可点：停止对没在跑的项目是空操作，重启不知道跑哪个 bin 就弹选择框
     if (u.external) {
       // 你自己写的 unit，ExecStart 是你定的，面板不掺和选 bin
-      btn(ops, '启动', running, () => doAction(u, 'start', '启动', tr));
+      btn(ops, '启动', false, () => doAction(u, 'start', '启动', tr));
     } else {
       btn(ops, running ? '切换程序…' : '运行…', false, () => openRun(u));
     }
-    btn(ops, '停止', !running, () => doAction(u, 'stop', '停止', tr));
-    btn(ops, '重启', !running || (!u.external && !u.cur_bin),
-        () => doAction(u, 'restart', '重启', tr));
+    btn(ops, '停止', false, () => doAction(u, 'stop', '停止', tr));
+    btn(ops, '重启', false, () => {
+      if (!u.external && !u.cur_bin) openRun(u);
+      else doAction(u, 'restart', '重启', tr);
+    });
     btn(ops, '日志', false, () => openLogs(u), true);
 
     return tr;
