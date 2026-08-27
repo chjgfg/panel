@@ -382,22 +382,29 @@ async fn main() {
     }
 }
 
-/// 找配置文件：PANEL_CONFIG > panel 自己旁边的 panel.toml > /etc/panel.toml
+/// 找配置文件，按这个顺序：
+///   1. 环境变量 PANEL_CONFIG
+///   2. 当前目录下的 panel.toml       —— 在源码目录里 cargo run / ./target/debug/panel
+///   3. 可执行文件旁边的 panel.toml   —— 部署成 /opt/panel/{panel, panel.toml}
+///   4. /etc/panel.toml
 ///
-/// 故意不看「当前工作目录」：systemd 启动服务时工作目录是 /，
-/// 写 ./panel.toml 会跑去找 /panel.toml，手动跑好使、开机自启就失败。
-/// current_exe() 拿到的是绝对路径，不受这个影响。
+/// 2 和 3 缺一不可：cargo run 时可执行文件在 target/debug/ 里，跟你放配置的
+/// 项目根目录不是一个地方；而 systemd 启动服务时工作目录是 /，第 2 条又指不到。
 fn config_path() -> Result<std::path::PathBuf, BoxErr> {
     if let Ok(p) = std::env::var("PANEL_CONFIG") {
         return Ok(p.into());
     }
     let mut tried = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        tried.push(cwd.join("panel.toml"));
+    }
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
     {
         tried.push(dir.join("panel.toml"));
     }
     tried.push("/etc/panel.toml".into());
+    tried.dedup(); // 直接在部署目录里跑的时候，前两条是同一个路径
 
     if let Some(found) = tried.iter().find(|p| p.is_file()) {
         return Ok(found.clone());
@@ -405,7 +412,7 @@ fn config_path() -> Result<std::path::PathBuf, BoxErr> {
     let list: Vec<String> = tried.iter().map(|p| format!("  {}", p.display())).collect();
     Err(format!(
         "找不到配置文件，这几个位置都看过了：\n{}\n\
-         照 panel.toml.example 改一份，放到 panel 旁边就行；\
+         照 panel.toml.example 改一份，放到上面任意一个位置；\
          或者用 PANEL_CONFIG=/你的/路径 指定",
         list.join("\n")
     )
