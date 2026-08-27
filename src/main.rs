@@ -62,6 +62,8 @@ struct Status {
     /// 上次是用哪个 bin、哪些参数起来的（面板重启后会丢，只影响界面回显）
     cur_bin: Option<String>,
     cur_args: Option<String>,
+    /// true = 这是你自己写的 xxx.service，面板只做启停，不选 bin
+    external: bool,
 }
 
 struct App {
@@ -222,6 +224,16 @@ fn ok_name(n: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || "._@-".contains(c))
 }
 
+/// 面板自己的项目目录要排掉：它往往就在扫描目录里，
+/// 但从面板里重启面板等于自杀，列出来只会误点。
+/// 二进制在 <项目>/target/{debug,release}/panel，所以看 exe 是否在这个目录之下。
+fn is_self(dir: &std::path::Path) -> bool {
+    let Ok(exe) = std::env::current_exe().and_then(|p| p.canonicalize()) else {
+        return false;
+    };
+    dir.canonicalize().is_ok_and(|d| exe.starts_with(d))
+}
+
 /// 扫配置里的目录，每个子文件夹算一个项目，返回 (项目名, 绝对路径)。
 /// 每次请求都重新扫，所以新建文件夹后刷新网页就能看到，不用重启面板。
 async fn discover(dirs: &[String]) -> Vec<(String, PathBuf)> {
@@ -233,7 +245,7 @@ async fn discover(dirs: &[String]) -> Vec<(String, PathBuf)> {
         while let Ok(Some(e)) = rd.next_entry().await {
             let is_dir = e.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
             let name = e.file_name().to_string_lossy().into_owned();
-            if is_dir && ok_name(&name) {
+            if is_dir && ok_name(&name) && !is_self(&e.path()) {
                 out.push((name, e.path()));
             }
         }
@@ -246,6 +258,24 @@ async fn discover(dirs: &[String]) -> Vec<(String, PathBuf)> {
 /// 每个项目对应一个 transient unit，名字加 panel- 前缀避免撞上系统里的服务
 fn unit_of(project: &str) -> String {
     format!("panel-{project}.service")
+}
+
+/// 一个项目可能对应两个 unit：面板用 systemd-run 起的 panel-xxx.service，
+/// 以及你可能自己写过的 xxx.service。取真实存在的那个，
+/// 这样你手写的服务在面板里也能看到状态和日志。
+/// 返回的 bool 表示「这是你自己的 unit」，面板对它只做启停，不管选 bin。
+async fn pick_unit(project: &str) -> (String, bool, Raw) {
+    let own = unit_of(project);
+    let r = show(&own).await;
+    if r.load == "loaded" {
+        return (own, false, r);
+    }
+    let theirs = format!("{project}.service");
+    let r2 = show(&theirs).await;
+    if r2.load == "loaded" {
+        return (theirs, true, r2);
+    }
+    (own, false, r) // 两个都不存在，按面板自己的名字报「未运行」
 }
 
 #[derive(Deserialize)]
@@ -368,8 +398,7 @@ async fn units(State(app): State<Arc<App>>) -> Json<Vec<Status>> {
     let found = discover(&app.cfg.dirs).await;
     let mut v = Vec::with_capacity(found.len());
     for (name, dir) in found {
-        let unit = unit_of(&name);
-        let r = show(&unit).await;
+        let (unit, external, r) = pick_unit(&name).await;
         let uptime = (r.active == "active")
             .then(|| r.active_since_us.map(|u| (boot - u as f64 / 1e6).max(0.0)))
             .flatten();
@@ -379,10 +408,15 @@ async fn units(State(app): State<Arc<App>>) -> Json<Vec<Status>> {
         };
         v.push(Status {
             key: name.clone(),
-            bins: bins(&dir).await,
+            bins: if external {
+                Vec::new()
+            } else {
+                bins(&dir).await
+            },
             name,
             cpu: app.cpu(&unit, r.cpu_nsec),
             unit,
+            external,
             loaded: r.load == "loaded",
             enabled: r.enabled == "enabled",
             active: r.active,
@@ -484,7 +518,7 @@ async fn action(
     let Some((project, dir)) = resolve(&app, &key).await else {
         return (StatusCode::NOT_FOUND, "未知项目").into_response();
     };
-    let unit = unit_of(&project);
+    let (unit, external, _) = pick_unit(&project).await;
     let req = body.map(|Json(b)| b).unwrap_or_default();
 
     // 没指定 bin 就沿用上次那个，重启按钮才能一键用
@@ -493,11 +527,17 @@ async fn action(
         Some(b) => Some((b, req.args.clone().unwrap_or_default())),
         None => remembered(),
     };
+    let sysctl = async |act: &str| match run("systemctl", &[act, "--", unit.as_str()]).await {
+        Ok((ok, out, err)) => (ok, if err.trim().is_empty() { out } else { err }),
+        Err(e) => (false, e.to_string()),
+    };
 
     let (ok, msg) = match act.as_str() {
-        "stop" => match run("systemctl", &["stop", "--", unit.as_str()]).await {
-            Ok((ok, out, err)) => (ok, if err.trim().is_empty() { out } else { err }),
-            Err(e) => (false, e.to_string()),
+        "stop" => sysctl("stop").await,
+        // 你自己写的 unit，ExecStart 是你定的，面板不插手怎么起
+        _ if external => match act.as_str() {
+            "start" | "restart" => sysctl(&act).await,
+            _ => return (StatusCode::BAD_REQUEST, "非法操作").into_response(),
         },
         "start" | "restart" => {
             let Some((bin, args)) = pick() else {
@@ -507,7 +547,7 @@ async fn action(
                 return (StatusCode::BAD_REQUEST, "这个项目里没有这个程序").into_response();
             }
             if act == "restart" {
-                let _ = run("systemctl", &["stop", "--", unit.as_str()]).await;
+                let _ = sysctl("stop").await;
             }
             spawn(&app, &project, &dir, &bin, &args).await
         }
@@ -536,7 +576,7 @@ async fn logs(
     let Some((project, _)) = resolve(&app, &key).await else {
         return (StatusCode::NOT_FOUND, "未知项目").into_response();
     };
-    let unit = unit_of(&project);
+    let (unit, ..) = pick_unit(&project).await;
     let n = q.lines.unwrap_or(300).clamp(1, 2000).to_string();
     let args = [
         "-u",

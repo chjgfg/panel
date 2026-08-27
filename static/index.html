@@ -220,10 +220,12 @@ function render(list) {
     const name = cell(tr, u.name);
     name.className = 'name';
     const small = document.createElement('small');
-    small.textContent = [
-      u.cur_bin ? '▶ ' + u.cur_bin + (u.cur_args ? ' ' + u.cur_args : '') : null,
-      u.pid ? 'pid ' + u.pid : null,
-    ].filter(Boolean).join(' · ') || `${u.bins.length} 个可运行程序`;
+    small.textContent = u.external
+      ? u.unit + '（你自己的 service）'
+      : [
+          u.cur_bin ? '▶ ' + u.cur_bin + (u.cur_args ? ' ' + u.cur_args : '') : null,
+          u.pid ? 'pid ' + u.pid : null,
+        ].filter(Boolean).join(' · ') || `${u.bins.length} 个可运行程序`;
     small.title = u.unit;     // journalctl -u 用的就是这个名字
     name.appendChild(small);
 
@@ -240,9 +242,15 @@ function render(list) {
 
     const ops = cell(tr, '');
     ops.className = 'ops';
-    btn(ops, running ? '切换程序…' : '运行…', false, () => openRun(u));
+    if (u.external) {
+      // 你自己写的 unit，ExecStart 是你定的，面板不掺和选 bin
+      btn(ops, '启动', running, () => doAction(u, 'start', '启动', tr));
+    } else {
+      btn(ops, running ? '切换程序…' : '运行…', false, () => openRun(u));
+    }
     btn(ops, '停止', !running, () => doAction(u, 'stop', '停止', tr));
-    btn(ops, '重启', !running || !u.cur_bin, () => doAction(u, 'restart', '重启', tr));
+    btn(ops, '重启', !running || (!u.external && !u.cur_bin),
+        () => doAction(u, 'restart', '重启', tr));
     btn(ops, '日志', false, () => openLogs(u), true);
 
     return tr;
