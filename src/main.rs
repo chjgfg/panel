@@ -75,7 +75,7 @@ struct Status {
     outside_pid: Option<u32>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct Disk {
     mount: String,
     used: u64,
@@ -110,6 +110,8 @@ struct App {
     last: Mutex<HashMap<String, (String, String)>>,
     /// 整机 CPU 的上次采样 (忙碌时间片, 总时间片)
     host_cpu: Mutex<Option<(u64, u64)>>,
+    /// df 的结果缓存。磁盘占用变化很慢，没必要每 3 秒 fork 一个 df
+    disks: Mutex<Option<(Instant, Vec<Disk>)>>,
 }
 
 impl App {
@@ -179,7 +181,7 @@ fn cookie_token(headers: &HeaderMap) -> Option<&str> {
 
 // ---------- systemctl / journalctl ----------
 
-const PROPS: &str = "LoadState,ActiveState,SubState,UnitFileState,MainPID,\
+const PROPS: &str = "Id,LoadState,ActiveState,SubState,UnitFileState,MainPID,\
                      MemoryCurrent,CPUUsageNSec,ActiveEnterTimestampMonotonic";
 
 #[derive(Default)]
@@ -216,12 +218,9 @@ async fn run(cmd: &str, args: &[&str]) -> std::io::Result<(bool, String, String)
     ))
 }
 
-async fn show(unit: &str) -> Raw {
-    let args = ["show", "--no-pager", "--property", PROPS, "--", unit];
-    let Ok((_, stdout, _)) = run("systemctl", &args).await else {
-        return Raw::default();
-    };
-    let m: HashMap<&str, &str> = stdout.lines().filter_map(|l| l.split_once('=')).collect();
+/// 把 `systemctl show` 的一段输出解析成 Raw
+fn parse_show(block: &str) -> Raw {
+    let m: HashMap<&str, &str> = block.lines().filter_map(|l| l.split_once('=')).collect();
     let g = |k: &str| m.get(k).copied().unwrap_or("");
     Raw {
         load: g("LoadState").into(),
@@ -233,6 +232,35 @@ async fn show(unit: &str) -> Raw {
         cpu_nsec: num(g("CPUUsageNSec")),
         active_since_us: num(g("ActiveEnterTimestampMonotonic")).filter(|&n| n > 0),
     }
+}
+
+/// 一次 `systemctl show` 能查多个 unit，输出按空行分段，靠 Id= 认回是谁。
+/// 这很重要：单核机器上每次刷新原来要 fork 十几个 systemctl，现在只要 1 个。
+async fn show_many(units: &[String]) -> HashMap<String, Raw> {
+    let mut out = HashMap::new();
+    if units.is_empty() {
+        return out;
+    }
+    let mut args = vec!["show", "--no-pager", "--property", PROPS, "--"];
+    args.extend(units.iter().map(String::as_str));
+    let Ok((_, stdout, _)) = run("systemctl", &args).await else {
+        return out;
+    };
+    for block in stdout.split("\n\n") {
+        if block.trim().is_empty() {
+            continue;
+        }
+        let raw = parse_show(block);
+        let id = block
+            .lines()
+            .filter_map(|l| l.split_once('='))
+            .find(|(k, _)| *k == "Id")
+            .map(|(_, v)| v.trim().to_string());
+        if let Some(id) = id {
+            out.insert(id, raw);
+        }
+    }
+    out
 }
 
 /// systemd 给的是 monotonic 时间戳，要配 /proc/uptime 才能换算成「运行了多久」
@@ -339,12 +367,26 @@ async fn host_stats(app: &App) -> Host {
             .unwrap_or_default(),
     );
 
-    // 只查关心的路径，省得把 tmpfs 和 snap 的 loop 设备全列出来
-    let mut args = vec!["-kP", "--", "/"];
-    args.extend(app.cfg.dirs.iter().map(String::as_str));
-    let disks = match run("df", &args).await {
-        Ok((_, out, _)) => parse_df(&out),
-        Err(_) => Vec::new(),
+    // 只查关心的路径，省得把 tmpfs 和 snap 的 loop 设备全列出来。
+    // 结果缓存 30 秒：磁盘占用变化很慢，不值得每次刷新都 fork 一个 df
+    let cached = {
+        let c = app.disks.lock().unwrap();
+        c.as_ref()
+            .filter(|(t, _)| t.elapsed() < Duration::from_secs(30))
+            .map(|(_, d)| d.clone())
+    };
+    let disks = match cached {
+        Some(d) => d,
+        None => {
+            let mut args = vec!["-kP", "--", "/"];
+            args.extend(app.cfg.dirs.iter().map(String::as_str));
+            let d = match run("df", &args).await {
+                Ok((_, out, _)) => parse_df(&out),
+                Err(_) => Vec::new(),
+            };
+            *app.disks.lock().unwrap() = Some((Instant::now(), d.clone()));
+            d
+        }
     };
 
     Host {
@@ -534,18 +576,29 @@ fn unit_of(project: &str) -> String {
 /// 以及你可能自己写过的 xxx.service。取真实存在的那个，
 /// 这样你手写的服务在面板里也能看到状态和日志。
 /// 返回的 bool 表示「这是你自己的 unit」，面板对它只做启停，不管选 bin。
-async fn pick_unit(project: &str) -> (String, bool, Raw) {
+/// 从 show_many 的结果里挑：优先面板自己起的 panel-X，其次你手写的 X。
+/// 返回的 bool 表示「这是你自己的 unit」，面板对它只做启停，不管选 bin。
+fn pick_from(shown: &mut HashMap<String, Raw>, project: &str) -> (String, bool, Raw) {
     let own = unit_of(project);
-    let r = show(&own).await;
-    if r.load == "loaded" {
+    let theirs = format!("{project}.service");
+    if shown.get(&own).is_some_and(|r| r.load == "loaded") {
+        let r = shown.remove(&own).unwrap();
         return (own, false, r);
     }
-    let theirs = format!("{project}.service");
-    let r2 = show(&theirs).await;
-    if r2.load == "loaded" {
-        return (theirs, true, r2);
+    if shown.get(&theirs).is_some_and(|r| r.load == "loaded") {
+        let r = shown.remove(&theirs).unwrap();
+        return (theirs, true, r);
     }
-    (own, false, r) // 两个都不存在，按面板自己的名字报「未运行」
+    // 两个都不存在，按面板自己的名字报「未运行」
+    let r = shown.remove(&own).unwrap_or_default();
+    (own, false, r)
+}
+
+/// 单个项目用的版本：一次 systemctl show 查两个候选名，一个进程搞定
+async fn pick_unit(project: &str) -> (String, bool, Raw) {
+    let cands = vec![unit_of(project), format!("{project}.service")];
+    let mut shown = show_many(&cands).await;
+    pick_from(&mut shown, project)
 }
 
 #[derive(Deserialize)]
@@ -670,11 +723,28 @@ async fn host(State(app): State<Arc<App>>) -> Json<Host> {
 async fn units(State(app): State<Arc<App>>) -> Json<Vec<Status>> {
     let boot = boot_secs().await;
     let found = discover(&app.cfg.dirs, &app.cfg.exclude).await;
-    // systemd 不知道的进程只能靠扫 /proc 找，一次刷新扫一遍就够
-    let exes = proc_exes().await;
+
+    // 所有项目的两个候选 unit 名一次问完 —— 原来是每个项目 fork 两次 systemctl
+    let cands: Vec<String> = found
+        .iter()
+        .flat_map(|(n, _)| [unit_of(n), format!("{n}.service")])
+        .collect();
+    let mut shown = show_many(&cands).await;
+    let picked: Vec<(String, bool, Raw)> = found
+        .iter()
+        .map(|(n, _)| pick_from(&mut shown, n))
+        .collect();
+
+    // 只有存在「unit 没在跑」的项目时才去扫 /proc —— 那一趟是几百次 readlink，
+    // 单核机器上不该每 3 秒白跑一遍
+    let exes = if picked.iter().any(|(_, _, r)| r.active != "active") {
+        proc_exes().await
+    } else {
+        Vec::new()
+    };
+
     let mut v = Vec::with_capacity(found.len());
-    for (name, dir) in found {
-        let (unit, external, r) = pick_unit(&name).await;
+    for ((name, dir), (unit, external, r)) in found.into_iter().zip(picked) {
         // 关键是「unit 有没有在跑」，不是「unit 存不存在」：
         // 上次启动失败会留下一个 failed 的 unit，它不该屏蔽掉裸进程检测
         let outside = if r.active == "active" {
@@ -1010,6 +1080,7 @@ async fn start() -> Result<(), BoxErr> {
         cpu_prev: Mutex::new(HashMap::new()),
         last: Mutex::new(HashMap::new()),
         host_cpu: Mutex::new(None),
+        disks: Mutex::new(None),
     });
 
     // 除了首页和登录接口，其它一律要带有效 cookie
@@ -1233,6 +1304,68 @@ mod tests {
         assert_eq!(d[0].total, (18_000_000 + 29_000_000) * 1024);
         assert_eq!(d[1].mount, "/dev/shm");
         assert!(parse_df("只有表头\n").is_empty());
+    }
+
+    #[test]
+    fn 一次show多个unit按id分段() {
+        // systemctl show 多个 unit 时，每段之间是一个空行
+        let out = "Id=panel-xau.service\nLoadState=not-found\nActiveState=inactive\n\
+                   SubState=dead\nUnitFileState=\nMainPID=0\nMemoryCurrent=[not set]\n\
+                   CPUUsageNSec=[not set]\nActiveEnterTimestampMonotonic=0\n\
+                   \n\
+                   Id=xau.service\nLoadState=loaded\nActiveState=active\nSubState=running\n\
+                   UnitFileState=enabled\nMainPID=4242\nMemoryCurrent=52428800\n\
+                   CPUUsageNSec=1500000000\nActiveEnterTimestampMonotonic=9000000\n";
+        let mut m: HashMap<String, Raw> = HashMap::new();
+        for block in out.split("\n\n") {
+            if block.trim().is_empty() {
+                continue;
+            }
+            let id = block
+                .lines()
+                .filter_map(|l| l.split_once('='))
+                .find(|(k, _)| *k == "Id")
+                .map(|(_, v)| v.trim().to_string())
+                .unwrap();
+            m.insert(id, parse_show(block));
+        }
+        assert_eq!(m.len(), 2);
+        assert_eq!(m["panel-xau.service"].load, "not-found");
+        assert_eq!(m["xau.service"].active, "active");
+        assert_eq!(m["xau.service"].pid, 4242);
+        assert_eq!(m["xau.service"].memory, Some(52428800));
+        // [not set] 要当 None，不能 panic
+        assert_eq!(m["panel-xau.service"].memory, None);
+        assert_eq!(m["panel-xau.service"].active_since_us, None);
+
+        // 手写的 xau.service 在跑，就该选它，并标成 external
+        let (unit, external, r) = pick_from(&mut m, "xau");
+        assert_eq!(unit, "xau.service");
+        assert!(external);
+        assert_eq!(r.pid, 4242);
+    }
+
+    #[test]
+    fn 面板自己的unit优先于手写的() {
+        let mk = |load: &str, active: &str| Raw {
+            load: load.into(),
+            active: active.into(),
+            ..Raw::default()
+        };
+        let mut m = HashMap::from([
+            ("panel-xau.service".to_string(), mk("loaded", "active")),
+            ("xau.service".to_string(), mk("loaded", "active")),
+        ]);
+        let (unit, external, _) = pick_from(&mut m, "xau");
+        assert_eq!(unit, "panel-xau.service");
+        assert!(!external);
+
+        // 两个都不存在时，按面板自己的名字报，且不算 external
+        let mut empty: HashMap<String, Raw> = HashMap::new();
+        let (unit, external, r) = pick_from(&mut empty, "xau");
+        assert_eq!(unit, "panel-xau.service");
+        assert!(!external);
+        assert_eq!(r.load, "");
     }
 
     #[test]
