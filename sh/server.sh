@@ -1,10 +1,26 @@
 #!/bin/bash
-# server.sh — OCI A1 闲置回收自查
+# server.sh - OCI A1 闲置回收自查
 # 用法: ./server.sh        查看报告
 #       ./server.sh --log  记录一次采样（给 systemd timer 用）
 
-IFACE=enp0s6
-BW_MBPS=1000                 # A1: 每 OCPU 1 Gbps，按实际 OCPU 数改
+set -uo pipefail
+
+# 网卡名不同机器不一样。原来写死 enp0s6，名字不对时 awk 匹配不到，
+# 会静默算出 0.000 Mbps —— 报错好过给假数据，所以这里先校验，
+# 再退一步自动挑一张已 up 的非 lo 网卡。
+IFACE="${IFACE:-enp0s6}"
+if [ ! -d "/sys/class/net/$IFACE" ]; then
+    GUESS=$(ls /sys/class/net | grep -v '^lo$' | head -1)
+    if [ -n "$GUESS" ]; then
+        echo "⚠️ 网卡 $IFACE 不存在，改用 $GUESS（用 IFACE=xxx 指定）" >&2
+        IFACE="$GUESS"
+    else
+        echo "找不到任何网卡" >&2
+        exit 1
+    fi
+fi
+
+BW_MBPS="${BW_MBPS:-1000}"   # A1: 每 OCPU 1 Gbps，按实际 OCPU 数改
 LOG=/var/log/oci-idle.csv
 
 # ---------- 采样（CPU / 网络都需要 1 秒做差）----------
@@ -26,8 +42,13 @@ NET_MBPS=$(awk -v r=$((RX2-RX1)) -v x=$((TX2-TX1)) 'BEGIN{printf "%.3f", (r+x)*8
 NET_PCT=$(awk -v m="$NET_MBPS" -v b="$BW_MBPS" 'BEGIN{printf "%.3f", m*100/b}')
 
 # ---------- --log 模式：只追加一行就退出 ----------
-if [ "$1" = "--log" ]; then
+if [ "${1:-}" = "--log" ]; then
     echo "$(date +%s),$CPU_PCT,$MEM_PCT,$NET_PCT" >> "$LOG"
+    # 一分钟一条，一年 50 万行。只留最近 8 天（判定看 7 天，多留一天缓冲）
+    if [ "$(wc -l <"$LOG")" -gt 12000 ]; then
+        CUT=$(( $(date +%s) - 8*86400 ))
+        awk -F, -v cut="$CUT" '$1>=cut' "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
+    fi
     exit 0
 fi
 
@@ -40,6 +61,7 @@ echo -e "\n===== 磁盘根分区 ====="; df -h /
 
 echo -e "\n===== CPU ====="; uptime
 echo "CPU 瞬时使用率: ${CPU_PCT}%   阈值 <20%（注意 1 核: load 1.00 = 满载）"
+echo "（这里把 iowait 算作「忙」；面板里的 CPU% 把 iowait 算作「不忙」，两个数不会完全一致）"
 
 echo -e "\n===== 网络 $IFACE ====="
 echo "瞬时吞吐: ${NET_MBPS} Mbps (rx+tx)   利用率: ${NET_PCT}% / ${BW_MBPS} Mbps   阈值 <20%"

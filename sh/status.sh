@@ -1,26 +1,21 @@
 #!/bin/bash
-SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
-PROJECT_ROOT="$SCRIPT_DIR/.."
-cd "$PROJECT_ROOT" || exit 1
+source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
-PID_FILE="./app.pid"
-echo "==== xau status ===="
-if [ -f "$PID_FILE" ];then
-    PID=$(cat "$PID_FILE")
-    if ps -p "$PID" >/dev/null;then
-        echo "✅ 正在运行 pid: $PID"
-    else
-        echo "⚠️ pid文件存在，但进程已死亡"
-    fi
+echo "==== $APP status ===="
+pids=$(running_pids)
+if [ -n "$pids" ]; then
+    echo "✅ 正在运行，pid: $(echo "$pids" | tr '\n' ' ')"
+    # ps 拿不到详情就算了（有些精简镜像的 ps 不支持这些字段），上面那行已经够用
+    ps -o pid,pcpu,rss,etime,args -p "$(echo "$pids" | paste -sd, -)" 2>/dev/null |
+        awk 'NR==1{print "  " $0; next} {$3=int($3/1024)"M"; print "  " $0}' || true
 else
-    PID=$(pgrep -f "target/release/xau")
-    if [ -n "$PID" ];then
-        echo "✅ 正在运行 pid: $PID (无pid文件)"
-    else
-        echo "❌ 未运行"
-    fi
+    echo "❌ 未运行"
 fi
 
-echo ""
-echo "---- last 15 log lines ----"
-tail -n15 app.log
+echo
+if [ -f "$LOG" ]; then
+    echo "---- $LOG 最后 15 行（共 $(wc -l <"$LOG") 行，$(du -h "$LOG" | cut -f1)）----"
+    tail -n 15 "$LOG"
+else
+    echo "---- 还没有日志文件 $LOG ----"
+fi
