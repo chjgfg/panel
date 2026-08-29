@@ -944,6 +944,22 @@ struct LogQuery {
     lines: Option<u32>,
 }
 
+/// PID 1 自己关于 unit 说的话也归在这个 unit 名下，所以会混进项目日志里。
+/// transient unit 一停，/run/systemd/transient 下的文件就被删了，之后 PID 1
+/// 每次再去加载这个名字都会打一行 open 失败——它不代表任何故障，只会把日志
+/// 刷满，所以丢掉。PID 1 别的话要留着：进程崩了、退出码是几，全靠它们看出来。
+fn drop_noise(out: &str) -> String {
+    let mut s = String::with_capacity(out.len());
+    for line in out.lines() {
+        if line.contains("/run/systemd/transient/") {
+            continue;
+        }
+        s.push_str(line);
+        s.push('\n');
+    }
+    s
+}
+
 async fn logs(
     State(app): State<Arc<App>>,
     Path(key): Path<String>,
@@ -965,7 +981,11 @@ async fn logs(
     ];
     match run("journalctl", &args).await {
         Ok((ok, out, err)) => {
-            let body = if ok { out } else { format!("{out}{err}") };
+            let body = if ok {
+                drop_noise(&out)
+            } else {
+                format!("{out}{err}")
+            };
             ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -1378,5 +1398,23 @@ mod tests {
             "--port 8080  -v",
         );
         assert_eq!(&v[v.len() - 5..], &["worker", "--", "--port", "8080", "-v"]);
+    }
+
+    #[test]
+    fn transient文件没了的噪声行不进日志() {
+        let out = "2026-08-29T09:34:09+00:00 h systemd[1]: panel-xau.service: \
+                   Failed to open /run/systemd/transient/panel-xau.service: \
+                   No such file or directory\n\
+                   2026-08-29T09:37:23+00:00 h systemd[1]: Started panel-xau.service - cargo run.\n\
+                   2026-08-29T09:37:24+00:00 h xau[123]: listening on 8080\n\
+                   2026-08-29T09:38:00+00:00 h systemd[1]: panel-xau.service: \
+                   Main process exited, code=exited, status=101/n/a\n";
+        let got = drop_noise(out);
+        assert!(!got.contains("Failed to open"));
+        // 启停和崩溃这几行是有用的，不能跟着一起丢
+        assert!(got.contains("Started panel-xau.service"));
+        assert!(got.contains("listening on 8080"));
+        assert!(got.contains("status=101"));
+        assert_eq!(got.lines().count(), 3);
     }
 }
