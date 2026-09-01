@@ -65,6 +65,8 @@ struct Status {
     uptime: Option<f64>,
     /// 这个项目里所有能 cargo run --bin 的名字
     bins: Vec<String>,
+    /// 每个可运行 bin 一条实例明细（名称/状态/pid/资源），前端展开项目行时逐行显示
+    instances: Vec<BinInst>,
     /// 当前由面板起着（active）的 bin 名，前端靠它回显勾选
     running_bins: Vec<String>,
     /// 上次是用哪个 bin、哪些参数起来的（面板重启后会丢，只影响界面回显）
@@ -75,6 +77,20 @@ struct Status {
     /// 面板外启动的进程 pid（终端里 cargo run 那种）。
     /// 有值就说明它在跑，但日志不在 journald 里，看不到。
     outside_pid: Option<u32>,
+}
+
+/// 一个项目下某个 bin 的实例明细。面板让每个 bin 独立成 unit，
+/// 所以这里对着该 bin 的 unit 报它自己的状态、资源。
+#[derive(Serialize)]
+struct BinInst {
+    bin: String,
+    /// active / failed / inactive（该 bin 没跑）
+    active: String,
+    running: bool,
+    pid: u64,
+    memory: Option<u64>,
+    cpu: Option<f64>,
+    uptime: Option<f64>,
 }
 
 #[derive(Serialize, Clone)]
@@ -615,16 +631,16 @@ struct Picked {
     running_bins: Vec<String>,
 }
 
-/// 从 show_many 的结果里把一个项目的全部 unit 收拢。
+/// 从 show_many 的结果里把一个项目的全部 unit 收拢（只读，不改动 shown）。
 /// 主 unit 挑选：面板的 bin unit 里谁在跑取谁；没在跑再退回你手写的 unit；
 /// 都没有就按第一个面板 unit 报「未运行」。
-fn pick_project(shown: &mut HashMap<String, Raw>, project: &str, bins: &[String]) -> Picked {
+fn pick_project(shown: &HashMap<String, Raw>, project: &str, bins: &[String]) -> Picked {
     let theirs = format!("{project}.service");
 
     let mut rows: Vec<(String, Raw)> = project_units(project, bins)
         .into_iter()
         .map(|u| {
-            let r = shown.remove(&u).unwrap_or_default();
+            let r = shown.get(&u).cloned().unwrap_or_default();
             (u, r)
         })
         .collect();
@@ -661,8 +677,8 @@ async fn pick_project_checked(
     bins: &[String],
 ) -> Picked {
     let cands = project_units(project, bins);
-    let mut shown = show_many(&cands).await;
-    pick_project(&mut shown, project, bins)
+    let shown = show_many(&cands).await;
+    pick_project(&shown, project, bins)
 }
 
 #[derive(Deserialize)]
@@ -797,7 +813,7 @@ async fn units(State(app): State<Arc<App>>) -> Json<Vec<Status>> {
         found_bins.push((n.clone(), b));
     }
     // 所有项目的全部候选 unit 一次问完 —— 原来是每个项目 fork 两次 systemctl
-    let mut shown = show_many(&cands).await;
+    let shown = show_many(&cands).await;
     let picked: Vec<Picked> = found
         .iter()
         .map(|(n, _)| {
@@ -806,7 +822,7 @@ async fn units(State(app): State<Arc<App>>) -> Json<Vec<Status>> {
                 .find(|(bn, _)| bn == n)
                 .map(|(_, b)| b.clone())
                 .unwrap_or_default();
-            pick_project(&mut shown, n, &b)
+            pick_project(&shown, n, &b)
         })
         .collect();
 
@@ -837,9 +853,34 @@ async fn units(State(app): State<Arc<App>>) -> Json<Vec<Status>> {
             .find(|(bn, _)| bn == &name)
             .map(|(_, b)| b.clone())
             .unwrap_or_default();
+        // 每个 bin 一条实例：对着该 bin 的 unit 报状态和资源
+        let instances = bins
+            .iter()
+            .map(|b| {
+                let raw = shown.get(&unit_of(&name, b));
+                let active = raw.map(|r| r.active.as_str()).unwrap_or("");
+                let running = active == "active";
+                let uptime = if running {
+                    raw.and_then(|r| r.active_since_us)
+                        .map(|u| (boot - u as f64 / 1e6).max(0.0))
+                } else {
+                    None
+                };
+                BinInst {
+                    bin: b.clone(),
+                    active: active.to_string(),
+                    running,
+                    pid: raw.map(|r| r.pid).unwrap_or(0),
+                    memory: raw.and_then(|r| r.memory),
+                    cpu: raw.and_then(|r| app.cpu(&unit_of(&name, b), r.cpu_nsec)),
+                    uptime,
+                }
+            })
+            .collect();
         v.push(Status {
             key: name.clone(),
             bins,
+            instances,
             name,
             cpu: app.cpu(&p.unit, p.raw.cpu_nsec),
             unit: p.unit,
@@ -1093,6 +1134,61 @@ async fn action(
     }
 }
 
+/// 单个 bin 的启停：项目下每个 bin 独立成 unit，所以能单独停/重启某一个，
+/// 不影响同项目其它在跑的 bin。前端 bin 条目的停止/重启按钮都走这里。
+async fn bin_action(
+    State(app): State<Arc<App>>,
+    Path((key, bin, act)): Path<(String, String, String)>,
+) -> Response {
+    let Some((project, dir)) = resolve(&app, &key).await else {
+        return (StatusCode::NOT_FOUND, "未知项目").into_response();
+    };
+    if !ok_name(&bin) || !bins(&dir).await.contains(&bin) {
+        return (StatusCode::BAD_REQUEST, "这个项目里没有这个程序").into_response();
+    }
+    let unit = unit_of(&project, &bin);
+
+    let sysctl = || async {
+        match run("systemctl", &["stop", "--", unit.as_str()]).await {
+            Ok((ok, out, err)) => (ok, if err.trim().is_empty() { out } else { err }),
+            Err(e) => (false, e.to_string()),
+        }
+    };
+
+    let (ok, msg) = match act.as_str() {
+        // 单个 bin 的 unit 停掉；没在跑时 systemctl 报 not loaded，按空操作放行、不弹红字
+        "stop" => {
+            let (ok, msg) = sysctl().await;
+            (ok || msg.contains("not loaded"), msg)
+        }
+        // 重启这一个 bin：停掉它的 unit 再按上次参数（或空参数）重新拉起
+        "restart" => {
+            let _ = sysctl().await;   // 已在跑的话先停，否则 systemd-run 同名会拒绝
+            let args = app
+                .last
+                .lock()
+                .unwrap()
+                .get(&project)
+                .cloned()
+                .and_then(|g| g.into_iter().find(|(b, _)| b == &bin))
+                .map(|(_, a)| a)
+                .unwrap_or_default();
+            spawn(&app, &project, &dir, &bin, &args).await
+        }
+        _ => {
+            return (StatusCode::BAD_REQUEST, "非法操作").into_response();
+        }
+    };
+
+    if ok {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        let msg = msg.trim();
+        let msg = if msg.is_empty() { "操作失败" } else { msg };
+        (StatusCode::INTERNAL_SERVER_ERROR, msg.to_string()).into_response()
+    }
+}
+
 #[derive(Deserialize)]
 struct LogQuery {
     lines: Option<u32>,
@@ -1282,6 +1378,7 @@ async fn start() -> Result<(), BoxErr> {
         .route("/api/units", get(units))
         .route("/api/host", get(host))
         .route("/api/units/{key}/logs", get(logs))
+        .route("/api/units/{key}/bins/{bin}/{action}", post(bin_action))
         .route("/api/units/{key}/{action}", post(action))
         .layer(middleware::from_fn_with_state(app.clone(), require_auth));
 
@@ -1532,8 +1629,8 @@ mod tests {
 
         // 手写的 xau.service 在跑 —— 但面板自己的 bin unit 在跑时优先作为主子 unit，
         // 手写的只算备选；这里只有手写的在跑，所以选它并标成 external
-        let mut m2 = m.clone();
-        let picked = pick_project(&mut m2, "xau", &["web".to_string()]);
+        let m2 = m.clone();
+        let picked = pick_project(&m2, "xau", &["web".to_string()]);
         assert_eq!(picked.unit, "xau.service");
         assert!(picked.external);
         assert_eq!(picked.raw.pid, 4242);
@@ -1550,13 +1647,13 @@ mod tests {
             ..Raw::default()
         };
         // 项目 xau 两个 bin 同时起着，你手写的 xau.service 也在跑
-        let mut m = HashMap::from([
+        let m = HashMap::from([
             ("panel-xau-web.service".to_string(), mk("loaded", "active")),
             ("panel-xau-api.service".to_string(), mk("loaded", "active")),
             ("xau.service".to_string(), mk("loaded", "active")),
         ]);
         let bins = vec!["web".to_string(), "api".to_string()];
-        let p = pick_project(&mut m, "xau", &bins);
+        let p = pick_project(&m, "xau", &bins);
         // 主 unit 优先面板里在跑的 bin unit（具体是哪个 bin 无关紧要）
         assert!(!p.external);
         assert!(p.unit.starts_with("panel-xau-"));
@@ -1566,8 +1663,8 @@ mod tests {
         assert!(p.running_bins.contains(&"api".to_string()));
 
         // 一个都没跑时：按某个面板 unit 报未运行，主 unit 算面板的、不算 external
-        let mut empty: HashMap<String, Raw> = HashMap::new();
-        let p2 = pick_project(&mut empty, "xau", &bins);
+        let empty: HashMap<String, Raw> = HashMap::new();
+        let p2 = pick_project(&empty, "xau", &bins);
         assert!(!p2.external);
         assert!(p2.unit.starts_with("panel-xau-"));
         assert_eq!(p2.raw.load, "");

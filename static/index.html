@@ -103,6 +103,13 @@ td.name small { display: block; color: var(--muted); font-size: .75rem; }
 td.ops { white-space: nowrap; }
 td.ops button { margin-right: .4rem; vertical-align: middle; }
 td.ops button:last-child { margin-right: 0; }
+/* 项目行展开箭头 */
+td.name .caret { cursor: pointer; user-select: none; margin-right: .4rem; color: var(--muted); }
+/* bin 子行：纵向缩进，跟上层项目清晰区分 */
+tr.bin-sub td { background: color-mix(in oklab, var(--card) 96%, transparent); }
+tr.bin-sub td:first-child { padding-left: 1.8rem; }
+tr.bin-sub .bin-name { font-size: .88rem; }
+td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
 .dot {
   display: inline-block; width: .6rem; height: .6rem; margin-right: .45rem;
   border-radius: 50%; background: var(--off);
@@ -332,67 +339,136 @@ function btn(ops, label, disabled, onclick, ghost) {
   ops.appendChild(b);
 }
 
+let lastList = null;              // 最近一次拿到的项目列表，展开/折叠重绘用
+const expanded = new Set();       // 已展开（显示 bin 子行）的项目 key
+
 function render(list) {
-  $('rows').replaceChildren(...list.map(u => {
-    const running = u.active === 'active';
-    const outside = u.outside_pid != null;      // 面板外启动的裸进程
-    const alive = running || outside;
-    const tr = document.createElement('tr');
-
-    const name = cell(tr, u.name);
-    name.className = 'name';
-    const small = document.createElement('small');
-    small.textContent = outside
-      ? `面板外启动 · pid ${u.outside_pid} · 日志看不到`
-      : u.external
-        ? u.unit + '（你自己的 service）'
-        : [
-            u.cur_bin ? '▶ ' + u.cur_bin + (u.cur_args ? ' ' + u.cur_args : '') : null,
-            u.pid ? 'pid ' + u.pid : null,
-          ].filter(Boolean).join(' · ') || `${u.bins.length} 个可运行程序`;
-    small.title = u.unit;     // journalctl -u 用的就是这个名字
-    name.appendChild(small);
-
-    const st = cell(tr, outside ? '运行中（面板外）'
-      : !u.loaded ? '未运行'
-      : running ? '运行中' : u.active === 'failed' ? '失败' : '已停止');
-    const dot = document.createElement('span');
-    dot.className = 'dot ' + (alive ? 'on' : u.active === 'failed' ? 'bad' : 'off');
-    st.prepend(dot);
-    st.title = outside ? '这个进程不是面板起的，systemd 不认识它'
-                       : `${u.active} / ${u.sub}`;
-
-    cell(tr, fmtDur(u.uptime));
-    cell(tr, u.cpu == null ? '—' : u.cpu.toFixed(1) + '%');
-    cell(tr, fmtMem(u.memory));
-
-    const ops = cell(tr, '');
-    ops.className = 'ops';
-    // 按钮一律可点：停止对没在跑的项目是空操作，重启不知道跑哪个 bin 就弹选择框
-    if (u.external) {
-      // 你自己写的 unit，ExecStart 是你定的，面板不掺和选 bin
-      btn(ops, '启动', false, () => doAction(u, 'start', '启动', tr));
-    } else {
-      btn(ops, outside ? '接管…' : running ? '切换程序…' : '运行…',
-          false, () => openRun(u));
+  lastList = list;
+  const frag = document.createDocumentFragment();
+  for (const u of list) {
+    frag.appendChild(projectRow(u));
+    if (!u.external && expanded.has(u.key)) {
+      for (const inst of u.instances || []) frag.appendChild(binRow(u, inst));
     }
-    btn(ops, '停止', false, () => doAction(u, 'stop', '停止', tr));
-    btn(ops, '重启', false, () => {
-      if (!u.external && !u.cur_bin) openRun(u);
-      else doAction(u, 'restart', '重启', tr);
-    });
-    btn(ops, '日志', false, () => openLogs(u), true);
-
-    return tr;
-  }));
+  }
+  $('rows').replaceChildren(frag);
 }
 
+/// 项目一级的行：名称（带展开箭头）、汇总状态、资源、仅【运行】。
+/// 停止/重启/日志都下沉到展开后的每个 bin 子行，避免「点到项目还是点到 bin」混淆。
+function projectRow(u) {
+  const running = u.active === 'active';
+  const outside = u.outside_pid != null;
+  const alive = running || outside;
+  const tr = document.createElement('tr');
+
+  const name = cell(tr, '');
+  name.className = 'name';
+  const expandable = !u.external && (u.instances || []).length > 0;
+  if (expandable) {
+    const caret = document.createElement('span');
+    caret.className = 'caret';
+    caret.textContent = expanded.has(u.key) ? '▾' : '▸';
+    caret.onclick = () => {
+      expanded.has(u.key) ? expanded.delete(u.key) : expanded.add(u.key);
+      if (lastList) render(lastList);
+    };
+    name.appendChild(caret);
+  }
+  name.appendChild(document.createTextNode(u.name));
+  const small = document.createElement('small');
+  if (outside) {
+    small.textContent = `面板外启动 · pid ${u.outside_pid} · 日志看不到`;
+  } else if (u.external) {
+    small.textContent = u.unit + '（你自己的 service）';
+  } else if ((u.running_bins || []).length || u.pid) {
+    const parts = [];
+    if (u.running_bins && u.running_bins.length) parts.push(`运行 ${u.running_bins.length} 个 bin`);
+    if (u.pid) parts.push('pid ' + u.pid);
+    small.textContent = parts.join(' · ');
+  } else {
+    small.textContent = `${(u.bins || []).length} 个可运行程序，点 ▸ 展开`;
+  }
+  small.className = 'subline';
+  name.appendChild(small);
+
+  let statusText;
+  if (outside) statusText = '运行中（面板外）';
+  else if (!u.loaded) statusText = '未运行';
+  else if (running) statusText = '运行中';
+  else if (u.active === 'failed') statusText = '失败';
+  else statusText = '已停止';
+  const st = cell(tr, statusText);
+  const dot = document.createElement('span');
+  dot.className = 'dot ' + (alive ? 'on' : u.active === 'failed' ? 'bad' : 'off');
+  st.prepend(dot);
+
+  cell(tr, fmtDur(u.uptime));
+  cell(tr, u.cpu == null ? '—' : u.cpu.toFixed(1) + '%');
+  cell(tr, fmtMem(u.memory));
+
+  const ops = cell(tr, '');
+  ops.className = 'ops';
+  if (u.external) {
+    // 自写的 unit 没有 bin 子行可展开，对它来说「项目就是这一个 unit」，不存在
+    // 选哪个 bin 的歧义，所以停止/重启/日志直接留在项目行
+    btn(ops, '启动', false, () => doAction(u, 'start', '启动', tr));
+    btn(ops, '停止', false, () => doAction(u, 'stop', '停止', tr));
+    btn(ops, '重启', false, () => doAction(u, 'restart', '重启', tr));
+    btn(ops, '日志', false, () => openLogs(u), true);
+  } else {
+    // 普通项目：项目行只留「运行」批量入口 + 展开，停止/重启/日志沉到 bin 子行
+    btn(ops, outside ? '接管…' : '运行…', false, () => openRun(u));
+    if (expandable) btn(ops, expanded.has(u.key) ? '收起' : '展开', false, () => {
+      expanded.has(u.key) ? expanded.delete(u.key) : expanded.add(u.key);
+      if (lastList) render(lastList);
+    });
+  }
+  return tr;
+}
+
+/// bin 子行：与项目行同列对齐，展示该 bin 自己的状态/资源，操作只动这一个 bin。
+function binRow(u, inst) {
+  const tr = document.createElement('tr');
+  tr.className = 'bin-sub';
+
+  const name = cell(tr, '');
+  name.className = 'name';
+  const nm = document.createElement('span');
+  nm.className = 'bin-name';
+  nm.textContent = inst.bin;
+  const small = document.createElement('small');
+  small.className = 'subline';
+  small.textContent = (
+    inst.running && inst.pid ? `pid ${inst.pid}` :
+    inst.running ? '运行中' : inst.active === 'failed' ? '上次失败' : '未运行'
+  ) + (inst.active === 'failed' ? '（failed）' : '');
+  name.append(nm, small);
+
+  const st = cell(tr, inst.running ? '运行中' : inst.active === 'failed' ? '失败' : '未运行');
+  const dot = document.createElement('span');
+  dot.className = 'dot ' + (inst.running ? 'on' : inst.active === 'failed' ? 'bad' : 'off');
+  st.prepend(dot);
+  st.title = inst.active + ' / ' + inst.bin;
+
+  cell(tr, fmtDur(inst.uptime));
+  cell(tr, inst.cpu == null ? '—' : inst.cpu.toFixed(1) + '%');
+  cell(tr, fmtMem(inst.memory));
+
+  const ops = cell(tr, '');
+  ops.className = 'ops';
+  btn(ops, '停止', false, () => binAction(u, inst, 'stop', tr));
+  btn(ops, '重启', false, () => binAction(u, inst, 'restart', tr));
+  btn(ops, '日志', false, () => openLogs(u, inst.bin), true);
+  return tr;
+}
+
+/// 项目一级的通用操作（目前只有外部 unit 的「启动」用它）
 async function doAction(u, act, label, tr) {
   if (!confirm(`确认${label}「${u.name}」?`)) return;
   tr.classList.add('busy');
   tr.querySelectorAll('button').forEach(b => b.disabled = true);
   try {
-    // 不带 bin，服务端沿用上次那个
     await req(`/api/units/${u.key}/${act}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -401,6 +477,25 @@ async function doAction(u, act, label, tr) {
     banner('');
   } catch (e) {
     if (e.message !== '未登录') banner(`${label}「${u.name}」失败: ${e.message}`);
+  }
+  refresh();
+}
+
+/// 单个 bin 的停止/重启：只动这一个 bin 的 unit，同项目其它 bin 不受影响
+async function binAction(u, inst, act, tr) {
+  const label = act === 'stop' ? '停止' : '重启';
+  if (!confirm(`确认${label}「${u.name} · ${inst.bin}」?`)) return;
+  tr.classList.add('busy');
+  tr.querySelectorAll('button').forEach(b => b.disabled = true);
+  try {
+    await req(`/api/units/${u.key}/bins/${encodeURIComponent(inst.bin)}/${act}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    banner('');
+  } catch (e) {
+    if (e.message !== '未登录') banner(`${label}「${inst.bin}」失败: ${e.message}`);
   }
   refresh();
 }
@@ -493,7 +588,7 @@ $('runGo').onclick = async () => {
 
 $('closeRun').onclick = () => { runKey = null; $('runbox').hidden = true; };
 
-function openLogs(u) {
+function openLogs(u, preselBin) {
   $('logName').textContent = u.name;
   $('logs').hidden = false;
   if (u.outside_pid != null) {
@@ -520,6 +615,8 @@ function openLogs(u) {
     o.textContent = b;
     sel.appendChild(o);
   }
+  // 从单个 bin 的日志按钮进来时，自动把筛选切到这个 bin
+  if (preselBin && u.bins && u.bins.includes(preselBin)) sel.value = preselBin;
   $('logBody').textContent = '加载中…';
   loadLogs(true);
 }
