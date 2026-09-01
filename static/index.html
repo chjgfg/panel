@@ -82,10 +82,10 @@ button.ghost { background: transparent; color: var(--muted); border-color: var(-
   background: color-mix(in oklab, var(--m) 22%, transparent);
 }
 .meter i { display: block; height: 100%; border-radius: 3px; background: var(--m); }
-#app > header, #logs > header {
+#app > header {
   display: flex; align-items: center; gap: .75rem; margin-bottom: .75rem;
 }
-#refresh, #closeLogs { margin-left: auto; }
+#refresh { margin-left: auto; }
 table {
   width: 100%; border-collapse: collapse; background: var(--card);
   border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
@@ -137,7 +137,7 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
 .dot.on { background: var(--on); }
 .dot.bad { background: var(--bad); }
 
-#logs { margin-top: 1.25rem; }
+#projList { margin-top: .4rem; }
 /* 运行弹窗：模态遮罩 + 居中卡片，遮罩不拦截点击（点击遮罩不关闭弹窗） */
 .overlay {
   position: fixed; inset: 0; z-index: 50;
@@ -177,14 +177,15 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
 .run-bin-name { font-size: .95rem; color: var(--fg); font-weight: 600; }
 .run-single textarea.arg { width: 100%; resize: vertical; padding: .5rem .6rem; font-size: .85rem; font-family: inherit; line-height: 1.4; min-height: 6rem; }
 #runErr { margin: .5rem 0 0; }
-/* 日志筛选下拉：放在标题后面，关闭按钮仍靠 margin-left:auto 推到最右 */
-#logs header select { padding: .3rem .5rem; font-size: .85rem; }
-#logs header label { display: flex; align-items: center; gap: .4rem; color: var(--muted); font-size: .85rem; }
+/* 日志弹窗：宽一点；来源下拉放在标题右侧、X 再靠最右 */
+.modal-log { width: min(760px, 95vw); }
+.modal-head .log-src { display: inline-flex; align-items: center; gap: .4rem; color: var(--muted); font-size: .85rem; }
+.modal-head .log-src select { padding: .3rem .5rem; font-size: .85rem; }
 /* 每条日志标来源 bin，用不同于正文的 muted 色，一眼分清归属 */
 #logBody .src { color: var(--accent); font-weight: 600; }
 #logBody {
-  margin: 0; max-height: 60vh; overflow: auto; padding: .7rem;
-  background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+  margin: 0; height: 58vh; overflow: auto; padding: .7rem;
+  background: var(--card); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
   font: 12.5px/1.5 ui-monospace, Consolas, monospace;
   /* 不换行：一行日志就是一条记录，折行之后时间戳对不齐，很难扫。
      太长的横向滚动看。 */
@@ -263,14 +264,20 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
     </div>
   </div>
 
-  <section id="logs" hidden>
-    <header>
-      <h2>日志 · <span id="logName"></span></h2>
-      <label>来源 <select id="logFilter"></select></label>
-      <button id="closeLogs" class="ghost">关闭</button>
-    </header>
-    <pre id="logBody"></pre>
-  </section>
+  <!-- 日志模态弹窗，与其它弹窗同一套 modal 样式 -->
+  <div id="logBox" class="overlay" hidden>
+    <div class="modal modal-log">
+      <div class="modal-head">
+        <h2>日志 · <span id="logName"></span></h2>
+        <label class="log-src">来源 <select id="logFilter"></select></label>
+        <button id="logCloseX" class="close-x" aria-label="关闭" title="关闭">×</button>
+      </div>
+      <pre id="logBody"></pre>
+      <div class="modal-foot">
+        <button id="logClose" class="ghost">关闭</button>
+      </div>
+    </div>
+  </div>
 </main>
 
 <script>
@@ -296,8 +303,9 @@ function showLogin() {
   logKey = null;
   runKey = null;
   banner('');
-  $('logs').hidden = true;
+  $('logBox').hidden = true;
   $('runbox').hidden = true;
+  $('confirmBox').hidden = true;
   $('app').hidden = true;
   $('login').hidden = false;
   $('pw').focus();
@@ -681,17 +689,7 @@ $('closeRun').onclick = closeRunBox;
 
 function openLogs(u, preselBin) {
   $('logName').textContent = u.name;
-  $('logs').hidden = false;
-  if (u.outside_pid != null) {
-    // journald 里没有它的记录，轮询也是白轮，直接说明情况
-    logKey = null;
-    $('logFilter').replaceChildren();
-    $('logBody').textContent =
-      `这个进程（pid ${u.outside_pid}）是在面板外启动的，输出没有进 journald，面板拿不到。\n\n`
-      + `点「接管…」选一个程序重新启动 —— 面板会先停掉它，再用 systemd-run 起一遍，\n`
-      + `之后日志就能在这里看了。`;
-    return;
-  }
+  $('logBox').hidden = false;
   logKey = u.key;
   // 筛选项：全部 + 每个 bin。多 bin 同时跑时能只看某一个，或全部按时间混合看
   const sel = $('logFilter');
@@ -801,7 +799,15 @@ $('refresh').onclick = () => refresh();
 // 切换日志源筛选：用上一次拉到的数据直接重渲染，不用重新请求
 $('logFilter').onchange = () => { if (logCache) renderLogs(true); };
 
-$('closeLogs').onclick = () => { logKey = null; $('logs').hidden = true; };
+// 关闭日志弹窗：清空日志内容，下次再点日志按钮重新拉取
+function closeLogBox() {
+  logKey = null;
+  logCache = null;
+  $('logBody').replaceChildren();
+  $('logBox').hidden = true;
+}
+$('logCloseX').onclick = closeLogBox;
+$('logClose').onclick = closeLogBox;
 
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 
