@@ -115,6 +115,8 @@ td.ops { display: flex; flex-wrap: nowrap; gap: .4rem; }
 .runform { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; }
 .runform label { display: flex; align-items: center; gap: .4rem; color: var(--muted); font-size: .85rem; }
 .runform input { min-width: 16rem; flex: 1; }
+/* 「取消」放进输入操作这一行，用 margin-left:auto 推到这一行最右侧 */
+.runform button.cancel { margin-left: auto; }
 #runErr { margin-bottom: 0; }
 #logBody {
   margin: 0; max-height: 60vh; overflow: auto; padding: .7rem;
@@ -163,12 +165,12 @@ td.ops { display: flex; flex-wrap: nowrap; gap: .4rem; }
   <section id="runbox" hidden>
     <header>
       <h2>运行 · <span id="runName"></span></h2>
-      <button id="closeRun" class="ghost">取消</button>
     </header>
     <div class="runform">
       <label>程序 <select id="runBin"></select></label>
       <label>参数 <input type="text" id="runArgs" placeholder="可留空，多个参数用空格分隔"></label>
       <button id="runGo">启动</button>
+      <button id="closeRun" class="ghost cancel">取消</button>
     </div>
     <p id="runErr" class="err"></p>
   </section>
