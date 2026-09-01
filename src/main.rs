@@ -854,7 +854,7 @@ async fn units(State(app): State<Arc<App>>) -> Json<Vec<Status>> {
             .map(|(_, b)| b.clone())
             .unwrap_or_default();
         // 每个 bin 一条实例：对着该 bin 的 unit 报状态和资源
-        let instances = bins
+        let instances: Vec<BinInst> = bins
             .iter()
             .map(|b| {
                 let raw = shown.get(&unit_of(&name, b));
@@ -877,12 +877,34 @@ async fn units(State(app): State<Arc<App>>) -> Json<Vec<Status>> {
                 }
             })
             .collect();
+
+        // 项目一级行的资源，聚合该项目下所有「正在运行」的 bin：
+        //   运行时长 = 取运行 bin 里最长那个；CPU = 运行 bin 百分比累加；内存 = 运行 bin 累加。
+        // 一个 bin 都没在跑就显示 '-'（三种都置 None，前端统一画短横线）。
+        // 外部 unit（external，你手写的 service）没有 bin 面板，项目行就是那一个 unit，
+        // 所以保持主 unit 自己的数据，不套聚合。
+        let (agg_cpu, agg_mem, agg_uptime) = if !p.external {
+            let running: Vec<&BinInst> = instances.iter().filter(|i| i.running).collect();
+            if running.is_empty() {
+                (None, None, None)
+            } else {
+                let cpu = Some(running.iter().filter_map(|i| i.cpu).sum::<f64>());
+                let memory = Some(running.iter().filter_map(|i| i.memory).sum::<u64>());
+                // 运行中 bin 的 uptime 几乎都有值（active 就有 ActiveEnter 时刻），
+                // 防一手全部采样失败的情况，取不到就别硬编一个
+                let uptime = running.iter().filter_map(|i| i.uptime).reduce(f64::max);
+                (cpu, memory, uptime)
+            }
+        } else {
+            (app.cpu(&p.unit, p.raw.cpu_nsec), p.raw.memory, uptime)
+        };
+
         v.push(Status {
             key: name.clone(),
             bins,
             instances,
             name,
-            cpu: app.cpu(&p.unit, p.raw.cpu_nsec),
+            cpu: agg_cpu,
             unit: p.unit,
             external: p.external,
             loaded: p.raw.load == "loaded",
@@ -894,8 +916,8 @@ async fn units(State(app): State<Arc<App>>) -> Json<Vec<Status>> {
             } else {
                 outside_pid.unwrap_or(0) as u64
             },
-            memory: p.raw.memory,
-            uptime,
+            memory: agg_mem,
+            uptime: agg_uptime,
             cur_bin,
             cur_args,
             running_bins: p.running_bins,

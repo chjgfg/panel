@@ -333,6 +333,13 @@ function fmtMem(b) {
   return b.toFixed(i ? 1 : 0) + u[i];
 }
 
+// 项目一级行的聚合内存，统一用 MB 展示（需求：内存单位统一为 MB）。
+// 聚合值是若干 bin 内存求和，通常已够大，MB 一档正好，不再自动升 GB。
+function fmtMemMB(b) {
+  if (b == null) return '—';
+  return (b / (1024 * 1024)).toFixed(1) + 'MB';
+}
+
 // ---------- 整机资源 ----------
 
 function ratio(used, total) {
@@ -487,7 +494,7 @@ function projectRow(u) {
 
   cell(tr, fmtDur(u.uptime));
   cell(tr, u.cpu == null ? '—' : u.cpu.toFixed(1) + '%');
-  cell(tr, fmtMem(u.memory));
+  cell(tr, fmtMemMB(u.memory));
 
   const ops = cell(tr, '');
   ops.className = 'ops';
