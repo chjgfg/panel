@@ -109,6 +109,15 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
 /* 项目块：每个项目 = 一张项目行表（放表格里）+ 下方表格外的 bin 独立面板 */
 #projList { display: flex; flex-direction: column; gap: .4rem; margin-top: .4rem; }
 .proj-block > table { margin: 0; }
+/* 主表格（表头 + 每个项目行）列宽统一钉死：table-layout:fixed 让每一列都按下面
+   的百分比走，表头和各项目行表格列宽完全一致，绝不因内容长度漂移错位。 */
+.stack-table { table-layout: fixed; width: 100%; }
+.stack-table th:nth-child(1), .stack-table td:nth-child(1) { width: 30%; }
+.stack-table th:nth-child(2), .stack-table td:nth-child(2) { width: 16%; }
+.stack-table th:nth-child(3), .stack-table td:nth-child(3) { width: 14%; }
+.stack-table th:nth-child(4), .stack-table td:nth-child(4) { width: 10%; }
+.stack-table th:nth-child(5), .stack-table td:nth-child(5) { width: 15%; }
+.stack-table th:nth-child(6), .stack-table td:nth-child(6) { width: 15%; }
 /* bin 独立面板：缩进一点，跟上方项目行区分开；内部列表，行数多时自己滚，不碰外层表格 */
 .bin-panel {
   margin: .35rem 0 0 1.6rem;
@@ -194,7 +203,7 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
 
   <div class="stats" id="stats"></div>
 
-  <table>
+  <table class="stack-table">
     <thead>
       <tr><th>项目</th><th>状态</th><th>运行时长</th><th>CPU</th><th>内存</th><th>操作</th></tr>
     </thead>
@@ -360,8 +369,10 @@ function render(list) {
     const block = document.createElement('div');
     block.className = 'proj-block';
 
-    // 项目行：一张自身的表格，行内容保留表格语义（名称/状态/时长/CPU/内存/操作）
+    // 项目行：一张自身的表格，行内容保留表格语义（名称/状态/时长/CPU/内存/操作）。
+    // 样式类跟表头表格一致，列宽被 table-layout:fixed 钉死，多行永不错位
     const tbl = document.createElement('table');
+    tbl.className = 'stack-table';
     const tb = document.createElement('tbody');
     tb.appendChild(projectRow(u));
     tbl.appendChild(tb);
@@ -510,15 +521,12 @@ function binRow(u, inst) {
 
   const ops = cell(tr, '');
   ops.className = 'ops';
-  if (inst.running || inst.active === 'failed') {
-    // 运行中（或上次失败）：可停止/重启/看日志
-    btn(ops, '停止', false, () => binAction(u, inst, 'stop', tr));
-    btn(ops, '重启', false, () => binAction(u, inst, 'restart', tr));
-    btn(ops, '日志', false, () => openLogs(u, inst.bin), true);
-  } else {
-    // 未运行：弹运行框，默认预勾当前这一个 bin，可再勾别的批量启动
-    btn(ops, '启动', false, () => openRun(u, inst.bin));
-  }
+  // 四个按钮永远都在，按运行态做可用性控制：
+  //   未运行：启动🉑、停止/重启灰；运行中：启动灰、停止/重启🉑；日志恒🉑
+  btn(ops, '启动', inst.running, () => openRun(u, inst.bin));
+  btn(ops, '停止', !inst.running, () => binAction(u, inst, 'stop', tr));
+  btn(ops, '重启', !inst.running, () => binAction(u, inst, 'restart', tr));
+  btn(ops, '日志', false, () => openLogs(u, inst.bin), true);
   return tr;
 }
 

@@ -1251,7 +1251,7 @@ async fn logs(
         let unit = unit_of(&project, b);
         let args = ["-u", unit.as_str(), "-n", &n, "--no-pager", "-o", "short-iso"];
         let body = match run("journalctl", &args).await {
-            Ok((ok, out, err)) if ok => drop_noise(&out),
+            Ok((ok, out, _err)) if ok => drop_noise(&out),
             Ok((_, out, err)) => format!("{out}{err}"),
             Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
         };
