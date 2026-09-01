@@ -90,7 +90,7 @@ table {
   width: 100%; border-collapse: collapse; background: var(--card);
   border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
 }
-th, td { padding: .6rem .7rem; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th, td { padding: .6rem .7rem; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; vertical-align: middle; }
 th { font-size: .78rem; color: var(--muted); }
 tbody tr:last-child td { border-bottom: 0; }
 tr.busy { opacity: .5; }
@@ -98,7 +98,7 @@ td.name { white-space: normal; }
 td.name small { display: block; color: var(--muted); font-size: .75rem; }
 /* nowrap 让这一格的最小宽度等于所有按钮之和，表格布局就必须给足空间，
    按钮不会被挤成一竖排。窄屏在下面的 media query 里再放开折行。 */
-td.ops { display: flex; flex-wrap: nowrap; gap: .4rem; }
+td.ops { display: flex; flex-wrap: nowrap; gap: .4rem; align-items: center; }
 .dot {
   display: inline-block; width: .6rem; height: .6rem; margin-right: .45rem;
   border-radius: 50%; background: var(--off);
