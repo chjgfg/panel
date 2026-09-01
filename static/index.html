@@ -105,11 +105,22 @@ td.ops button { margin-right: .4rem; vertical-align: middle; }
 td.ops button:last-child { margin-right: 0; }
 /* 项目行展开箭头 */
 td.name .caret { cursor: pointer; user-select: none; margin-right: .4rem; color: var(--muted); }
-/* bin 子行：纵向缩进，跟上层项目清晰区分 */
-tr.bin-sub td { background: color-mix(in oklab, var(--card) 96%, transparent); }
-tr.bin-sub td:first-child { padding-left: 1.8rem; }
-tr.bin-sub .bin-name { font-size: .88rem; }
 td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
+/* 项目块：每个项目 = 一张项目行表（放表格里）+ 下方表格外的 bin 独立面板 */
+#projList { display: flex; flex-direction: column; gap: .4rem; margin-top: .4rem; }
+.proj-block > table { margin: 0; }
+/* bin 独立面板：缩进一点，跟上方项目行区分开；内部列表，行数多时自己滚，不碰外层表格 */
+.bin-panel {
+  margin: .35rem 0 0 1.6rem;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: color-mix(in oklab, var(--card) 92%, transparent);
+  overflow: auto; max-height: 46vh;
+}
+.bin-panel table { border: 0; border-radius: 0; }
+.bin-panel th { font-size: .72rem; }
+.bin-panel td { padding: .4rem .7rem; }
+.bin-panel .ops { white-space: nowrap; }
+.bin-panel .ops button { padding: .25rem .6rem; font-size: .8rem; }
 .dot {
   display: inline-block; width: .6rem; height: .6rem; margin-right: .45rem;
   border-radius: 50%; background: var(--off);
@@ -187,8 +198,8 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
     <thead>
       <tr><th>项目</th><th>状态</th><th>运行时长</th><th>CPU</th><th>内存</th><th>操作</th></tr>
     </thead>
-    <tbody id="rows"></tbody>
   </table>
+  <div id="projList"></div>
 
   <section id="runbox" hidden>
     <header>
@@ -346,16 +357,31 @@ function render(list) {
   lastList = list;
   const frag = document.createDocumentFragment();
   for (const u of list) {
-    frag.appendChild(projectRow(u));
-    if (!u.external && expanded.has(u.key)) {
-      for (const inst of u.instances || []) frag.appendChild(binRow(u, inst));
+    const block = document.createElement('div');
+    block.className = 'proj-block';
+
+    // 项目行：一张自身的表格，行内容保留表格语义（名称/状态/时长/CPU/内存/操作）
+    const tbl = document.createElement('table');
+    const tb = document.createElement('tbody');
+    tb.appendChild(projectRow(u));
+    tbl.appendChild(tb);
+    block.appendChild(tbl);
+
+    // bin 独立面板：在表格之外、项目行下方；只有展开时显示
+    if (!u.external) {
+      const panel = document.createElement('div');
+      panel.className = 'bin-panel';
+      panel.hidden = !expanded.has(u.key);
+      panel.appendChild(binPanel(u));
+      block.appendChild(panel);
     }
+    frag.appendChild(block);
   }
-  $('rows').replaceChildren(frag);
+  $('projList').replaceChildren(frag);
 }
 
-/// 项目一级的行：名称（带展开箭头）、汇总状态、资源、仅【运行】。
-/// 停止/重启/日志都下沉到展开后的每个 bin 子行，避免「点到项目还是点到 bin」混淆。
+/// 项目一级的行：名称（带展开箭头）、汇总状态、资源、仅【运行…】和【展开/收起】。
+/// 停止/重启/日志都在下方独立的 bin 面板里，不在项目行放，避免「点到项目还是点到 bin」混淆。
 function projectRow(u) {
   const running = u.active === 'active';
   const outside = u.outside_pid != null;
@@ -369,14 +395,12 @@ function projectRow(u) {
     const caret = document.createElement('span');
     caret.className = 'caret';
     caret.textContent = expanded.has(u.key) ? '▾' : '▸';
-    caret.onclick = () => {
-      expanded.has(u.key) ? expanded.delete(u.key) : expanded.add(u.key);
-      if (lastList) render(lastList);
-    };
+    caret.onclick = toggleExpand;
     name.appendChild(caret);
   }
   name.appendChild(document.createTextNode(u.name));
   const small = document.createElement('small');
+  small.classList.add('subline');
   if (outside) {
     small.textContent = `面板外启动 · pid ${u.outside_pid} · 日志看不到`;
   } else if (u.external) {
@@ -387,9 +411,8 @@ function projectRow(u) {
     if (u.pid) parts.push('pid ' + u.pid);
     small.textContent = parts.join(' · ');
   } else {
-    small.textContent = `${(u.bins || []).length} 个可运行程序，点 ▸ 展开`;
+    small.textContent = `${(u.bins || []).length} 个可运行程序`;
   }
-  small.className = 'subline';
   name.appendChild(small);
 
   let statusText;
@@ -410,46 +433,76 @@ function projectRow(u) {
   const ops = cell(tr, '');
   ops.className = 'ops';
   if (u.external) {
-    // 自写的 unit 没有 bin 子行可展开，对它来说「项目就是这一个 unit」，不存在
-    // 选哪个 bin 的歧义，所以停止/重启/日志直接留在项目行
+    // 自写的 unit 没有 bin 面板，对它来说「项目就是这一个 unit」，不存在选择歧义，
+    // 启动/停止/重启/日志直接留在项目行
     btn(ops, '启动', false, () => doAction(u, 'start', '启动', tr));
     btn(ops, '停止', false, () => doAction(u, 'stop', '停止', tr));
     btn(ops, '重启', false, () => doAction(u, 'restart', '重启', tr));
     btn(ops, '日志', false, () => openLogs(u), true);
   } else {
-    // 普通项目：项目行只留「运行」批量入口 + 展开，停止/重启/日志沉到 bin 子行
     btn(ops, outside ? '接管…' : '运行…', false, () => openRun(u));
-    if (expandable) btn(ops, expanded.has(u.key) ? '收起' : '展开', false, () => {
-      expanded.has(u.key) ? expanded.delete(u.key) : expanded.add(u.key);
-      if (lastList) render(lastList);
-    });
+    if (expandable) btn(ops, expanded.has(u.key) ? '收起' : '展开', false, toggleExpand);
   }
   return tr;
+
+  // 展开/收起：切换 key 的展开态并整表重绘
+  function toggleExpand() {
+    expanded.has(u.key) ? expanded.delete(u.key) : expanded.add(u.key);
+    if (lastList) render(lastList);
+  }
 }
 
-/// bin 子行：与项目行同列对齐，展示该 bin 自己的状态/资源，操作只动这一个 bin。
+/// bin 独立面板内容：一张自己的表，列 = bin/状态/时长/CPU/内存/操作。
+/// 每行一个 bin，带独立的停止/重启/日志，只作用于这一个 bin。
+function binPanel(u) {
+  const tbl = document.createElement('table');
+  const thead = document.createElement('thead');
+  const htr = document.createElement('tr');
+  for (const t of ['bin', '状态', '运行时长', 'CPU', '内存', '操作']) {
+    const th = document.createElement('th');
+    th.textContent = t;
+    htr.appendChild(th);
+  }
+  thead.appendChild(htr);
+  tbl.appendChild(thead);
+
+  const tb = document.createElement('tbody');
+  const insts = u.instances || [];
+  if (insts.length === 0) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 6;
+    td.textContent = '这个项目没有可运行的 bin';
+    tr.appendChild(td);
+    tb.appendChild(tr);
+    tbl.appendChild(tb);
+    return tbl;
+  }
+  for (const inst of insts) tb.appendChild(binRow(u, inst));
+  tbl.appendChild(tb);
+  return tbl;
+}
+
+/// bin 行：显示该 bin 自己的状态/资源，操作只动这一个 bin
 function binRow(u, inst) {
   const tr = document.createElement('tr');
-  tr.className = 'bin-sub';
 
   const name = cell(tr, '');
   name.className = 'name';
   const nm = document.createElement('span');
-  nm.className = 'bin-name';
   nm.textContent = inst.bin;
   const small = document.createElement('small');
-  small.className = 'subline';
+  small.classList.add('subline');
   small.textContent = (
-    inst.running && inst.pid ? `pid ${inst.pid}` :
-    inst.running ? '运行中' : inst.active === 'failed' ? '上次失败' : '未运行'
-  ) + (inst.active === 'failed' ? '（failed）' : '');
+    inst.running ? (inst.pid ? `pid ${inst.pid}` : '运行中') :
+    inst.active === 'failed' ? '上次失败' : '未运行'
+  );
   name.append(nm, small);
 
   const st = cell(tr, inst.running ? '运行中' : inst.active === 'failed' ? '失败' : '未运行');
   const dot = document.createElement('span');
   dot.className = 'dot ' + (inst.running ? 'on' : inst.active === 'failed' ? 'bad' : 'off');
   st.prepend(dot);
-  st.title = inst.active + ' / ' + inst.bin;
 
   cell(tr, fmtDur(inst.uptime));
   cell(tr, inst.cpu == null ? '—' : inst.cpu.toFixed(1) + '%');
