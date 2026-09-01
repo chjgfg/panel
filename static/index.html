@@ -167,19 +167,11 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
   display: flex; justify-content: flex-end; gap: .6rem;
   padding: .8rem 1rem; border-top: 1px solid var(--line);
 }
-/* bin 多选：垂直列表，每行一个 bin（勾选框 / 名称 / 该 bin 专属参数文本域）。
-   列表自带滚动，bin 再多不会把按钮挤出弹窗。 */
-#runSel { width: 100%; margin: 0 0 .4rem; color: var(--muted); font-size: .8rem; }
-#runBins { width: 100%; max-height: 40vh; overflow: auto; border: 1px solid var(--line); border-radius: 8px; padding: .35rem .5rem; margin-bottom: .6rem; }
-.bin-row { display: flex; align-items: flex-start; gap: .6rem; padding: .32rem .2rem; }
-.bin-row + .bin-row { border-top: 1px solid var(--line); }
-.bin-row input[type=checkbox] { margin: .35rem 0 0; accent-color: var(--accent); flex: none; }
-.bin-row .bin-name { min-width: 7rem; font-size: .88rem; color: var(--fg); padding-top: .3rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-/* 参数用文本域：多行原样透传，不做空格切割 */
-.bin-row textarea.arg { flex: 1; min-width: 8rem; min-height: 3.2rem; resize: vertical; padding: .35rem .5rem; font-size: .85rem; font-family: inherit; line-height: 1.4; }
-.bin-row textarea.arg:disabled { color: var(--muted); background: transparent; cursor: not-allowed; }
-.bin-row .tip { color: var(--muted); font-size: .8rem; }
-#runErr { margin: 0 0 .4rem; }
+/* 运行弹窗内容（单 bin）：bin 名 + 参数文本域，原样透传 */
+.run-single { display: flex; flex-direction: column; gap: .5rem; }
+.run-bin-name { font-size: .95rem; color: var(--fg); font-weight: 600; }
+.run-single textarea.arg { width: 100%; resize: vertical; padding: .5rem .6rem; font-size: .85rem; font-family: inherit; line-height: 1.4; min-height: 6rem; }
+#runErr { margin: .5rem 0 0; }
 /* 日志筛选下拉：放在标题后面，关闭按钮仍靠 margin-left:auto 推到最右 */
 #logs header select { padding: .3rem .5rem; font-size: .85rem; }
 #logs header label { display: flex; align-items: center; gap: .4rem; color: var(--muted); font-size: .85rem; }
@@ -237,8 +229,10 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
         <button id="closeRunX" class="close-x" aria-label="关闭" title="关闭">×</button>
       </div>
       <div class="modal-body">
-        <p id="runSel">未选择任何 bin</p>
-        <div id="runBins"></div>
+        <div class="run-single">
+          <div class="run-bin-name" id="runBinName"></div>
+          <textarea id="runArgs" class="arg" rows="4" placeholder="启动参数（原样透传，支持多行）\n回车、空格都原样作为参数传过去"></textarea>
+        </div>
         <p id="runErr" class="err"></p>
       </div>
       <div class="modal-foot">
@@ -594,85 +588,36 @@ async function binAction(u, inst, act, tr) {
 
 // ---------- 选程序（多选，每行独立参数）+ 填参数 ----------
 
-/// 汇总当前勾选的 bin：更新摘要行，没勾就禁掉运行按钮；每行参数框跟着勾选态走
-/// （没勾的 bin 参数框置灰不可编辑，避免填了却不起作用误导人）
-function syncRunSel() {
-  const rows = [...$('runBins').querySelectorAll('.bin-row')];
-  const checked = rows.filter(r => r.querySelector('input[type=checkbox]').checked);
-  for (const r of rows) {
-    const on = r.querySelector('input[type=checkbox]').checked;
-    r.querySelector('.arg').disabled = !on;
-  }
-  const sel = $('runSel');
-  if (checked.length === 0) {
-    sel.textContent = '未选择任何 bin';
-  } else {
-    sel.textContent = `已选 ${checked.length} 个：${checked.map(r => r.dataset.bin).join('、')}`;
-  }
-  $('runGo').disabled = checked.length === 0;
-}
+/// 弹窗一次只针对一个 bin：点哪个 bin 的「启动」就弹哪个，只显示它+参数文本域。
+let runBin = null;   // 当前弹窗要运行的 bin
 
-function openRun(u, preselectBin) {
+function openRun(u, bin) {
   runKey = u.key;
+  runBin = bin;
   $('runName').textContent = u.name;
+  $('runBinName').textContent = '▶ ' + bin;
+  $('runArgs').value = '';
   $('runErr').textContent = '';
-  const box = $('runBins');
-  box.replaceChildren();
-  if (u.bins.length === 0) {
-    const tip = document.createElement('div');
-    tip.className = 'tip';
-    tip.textContent = '没找到 src/main.rs 或 src/bin/*.rs';
-    box.appendChild(tip);
-  } else {
-    // 预勾当前由面板起着（active）的那几个 bin，方便「接着跑」；
-    // 从某个 bin 的「启动」进来时，额外默认勾上那一个
-    const running = new Set(u.running_bins || []);
-    for (const b of u.bins) {
-      const row = document.createElement('div');
-      row.className = 'bin-row';
-      row.dataset.bin = b;
-      const cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.checked = running.has(b) || b === preselectBin;
-      cb.onchange = syncRunSel;
-      const name = document.createElement('span');
-      name.className = 'bin-name';
-      name.textContent = b;
-      const arg = document.createElement('textarea');
-      arg.className = 'arg';
-      arg.placeholder = '启动参数（原样透传，支持多行）\n每行一个参数更清晰，回车不会被拆开';
-      arg.rows = 2;
-      arg.spellcheck = false;
-      row.append(cb, name, arg);
-      box.appendChild(row);
-    }
-  }
-  syncRunSel();
+  $('runGo').disabled = false;
   $('runbox').hidden = false;
+  $('runArgs').focus();
 }
 
 $('runGo').onclick = async () => {
-  if (!runKey) return;
+  if (!runKey || !runBin) return;
   const go = $('runGo');
   go.disabled = true;
   $('runErr').textContent = '';
-  // 收集勾选的每个 bin 及其行内文本域填写的专属参数（原样透传，不做空格分割）
-  const bins = [...$('runBins').querySelectorAll('.bin-row')]
-    .filter(r => r.querySelector('input[type=checkbox]').checked)
-    .map(r => ({ bin: r.dataset.bin, args: r.querySelector('.arg').value }));
-  if (bins.length === 0) {
-    go.disabled = false;
-    return;
-  }
   try {
+    // 只提交当前这个 bin；参数原样透传（空格、换行都不拆）
     await req(`/api/units/${runKey}/start`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ bins }),
+      body: JSON.stringify({ bins: [{ bin: runBin, args: $('runArgs').value }] }),
     });
     // 执行完成自动关闭弹窗
     $('runbox').hidden = true;
-    runKey = null;
+    runKey = null; runBin = null;
   } catch (e) {
     if (e.message !== '未登录') $('runErr').textContent = e.message;
   } finally {
@@ -684,6 +629,7 @@ $('runGo').onclick = async () => {
 // 关闭方式仅三种：右上角 X、取消按钮、点「运行」执行完成后。遮罩点击不关闭。
 function closeRunBox() {
   runKey = null;
+  runBin = null;
   $('runbox').hidden = true;
   $('runErr').textContent = '';
 }
