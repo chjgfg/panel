@@ -594,8 +594,9 @@ let runBin = null;   // 当前弹窗要运行的 bin
 function openRun(u, bin) {
   runKey = u.key;
   runBin = bin;
-  $('runName').textContent = u.name;
-  $('runBinName').textContent = '▶ ' + bin;
+  // 标题和内容都用这个 bin 名，跟随点击动态变化
+  $('runName').textContent = bin;
+  $('runBinName').textContent = bin;
   $('runArgs').value = '';
   $('runErr').textContent = '';
   $('runGo').disabled = false;
