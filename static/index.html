@@ -440,7 +440,7 @@ function projectRow(u) {
     btn(ops, '重启', false, () => doAction(u, 'restart', '重启', tr));
     btn(ops, '日志', false, () => openLogs(u), true);
   } else {
-    btn(ops, outside ? '接管…' : '运行…', false, () => openRun(u));
+    // 普通项目：项目顶层只留「展开/收起」，启动动作下移到 bin 面板各行
     if (expandable) btn(ops, expanded.has(u.key) ? '收起' : '展开', false, toggleExpand);
   }
   return tr;
@@ -510,9 +510,15 @@ function binRow(u, inst) {
 
   const ops = cell(tr, '');
   ops.className = 'ops';
-  btn(ops, '停止', false, () => binAction(u, inst, 'stop', tr));
-  btn(ops, '重启', false, () => binAction(u, inst, 'restart', tr));
-  btn(ops, '日志', false, () => openLogs(u, inst.bin), true);
+  if (inst.running || inst.active === 'failed') {
+    // 运行中（或上次失败）：可停止/重启/看日志
+    btn(ops, '停止', false, () => binAction(u, inst, 'stop', tr));
+    btn(ops, '重启', false, () => binAction(u, inst, 'restart', tr));
+    btn(ops, '日志', false, () => openLogs(u, inst.bin), true);
+  } else {
+    // 未运行：弹运行框，默认预勾当前这一个 bin，可再勾别的批量启动
+    btn(ops, '启动', false, () => openRun(u, inst.bin));
+  }
   return tr;
 }
 
@@ -573,7 +579,7 @@ function syncRunSel() {
   $('runGo').disabled = checked.length === 0;
 }
 
-function openRun(u) {
+function openRun(u, preselectBin) {
   runKey = u.key;
   $('runName').textContent = u.name;
   $('runErr').textContent = '';
@@ -585,7 +591,8 @@ function openRun(u) {
     tip.textContent = '没找到 src/main.rs 或 src/bin/*.rs';
     box.appendChild(tip);
   } else {
-    // 预勾当前由面板起着（active）的那几个 bin，方便「接着跑」
+    // 预勾当前由面板起着（active）的那几个 bin，方便「接着跑」；
+    // 从某个 bin 的「启动」进来时，额外默认勾上那一个
     const running = new Set(u.running_bins || []);
     for (const b of u.bins) {
       const row = document.createElement('div');
@@ -593,7 +600,7 @@ function openRun(u) {
       row.dataset.bin = b;
       const cb = document.createElement('input');
       cb.type = 'checkbox';
-      cb.checked = running.has(b);
+      cb.checked = running.has(b) || b === preselectBin;
       cb.onchange = syncRunSel;
       const name = document.createElement('span');
       name.className = 'bin-name';
