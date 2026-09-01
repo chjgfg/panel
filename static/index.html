@@ -138,28 +138,48 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
 .dot.bad { background: var(--bad); }
 
 #logs { margin-top: 1.25rem; }
-#runbox {
-  margin-top: 1.25rem; padding: .9rem; background: var(--card);
-  border: 1px solid var(--line); border-radius: 10px;
+/* 运行弹窗：模态遮罩 + 居中卡片，遮罩不拦截点击（点击遮罩不关闭弹窗） */
+.overlay {
+  position: fixed; inset: 0; z-index: 50;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, .45);
 }
-#runbox > header { margin-bottom: .75rem; }
-.runform { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; }
-.runform label { display: flex; align-items: center; gap: .4rem; color: var(--muted); font-size: .85rem; }
-/* 「取消」放进输入操作这一行，用 margin-left:auto 推到这一行最右侧 */
-.runform button.cancel { margin-left: auto; }
-/* bin 多选：垂直列表，每行一个 bin（勾选框 / 名称 / 该 bin 专属参数框）。列表自带滚动，
-   bin 再多也不会把参数行和按钮挤出屏幕。 */
+.modal {
+  width: min(520px, 94vw); max-height: 84vh;
+  display: flex; flex-direction: column;
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: 12px; box-shadow: 0 12px 40px rgba(0, 0, 0, .35);
+  overflow: hidden;
+}
+.modal-head {
+  display: flex; align-items: center; gap: .75rem;
+  padding: .9rem 1rem; border-bottom: 1px solid var(--line);
+}
+.modal-head h2 { margin: 0; font-size: 1rem; }
+.modal-head .close-x {
+  margin-left: auto; background: transparent; color: var(--muted);
+  border: 0; font-size: 1.4rem; line-height: 1; padding: .2rem .5rem;
+  cursor: pointer;
+}
+.modal-head .close-x:hover { color: var(--fg); }
+.modal-body { padding: .9rem 1rem; overflow: auto; }
+.modal-foot {
+  display: flex; justify-content: flex-end; gap: .6rem;
+  padding: .8rem 1rem; border-top: 1px solid var(--line);
+}
+/* bin 多选：垂直列表，每行一个 bin（勾选框 / 名称 / 该 bin 专属参数文本域）。
+   列表自带滚动，bin 再多不会把按钮挤出弹窗。 */
 #runSel { width: 100%; margin: 0 0 .4rem; color: var(--muted); font-size: .8rem; }
-#runBins { width: 100%; max-height: 44vh; overflow: auto; border: 1px solid var(--line); border-radius: 8px; padding: .35rem .5rem; margin-bottom: .6rem; }
-.bin-row { display: flex; align-items: center; gap: .6rem; padding: .28rem .2rem; }
+#runBins { width: 100%; max-height: 40vh; overflow: auto; border: 1px solid var(--line); border-radius: 8px; padding: .35rem .5rem; margin-bottom: .6rem; }
+.bin-row { display: flex; align-items: flex-start; gap: .6rem; padding: .32rem .2rem; }
 .bin-row + .bin-row { border-top: 1px solid var(--line); }
-.bin-row input[type=checkbox] { margin: 0; accent-color: var(--accent); flex: none; }
-.bin-row .bin-name { min-width: 7rem; font-size: .88rem; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.bin-row input.arg { flex: 1; min-width: 8rem; padding: .3rem .5rem; font-size: .85rem; }
-/* 没勾选对应的 bin 时，它的参数框置灰不可编辑 */
-.bin-row input.arg:disabled { color: var(--muted); background: transparent; cursor: not-allowed; }
+.bin-row input[type=checkbox] { margin: .35rem 0 0; accent-color: var(--accent); flex: none; }
+.bin-row .bin-name { min-width: 7rem; font-size: .88rem; color: var(--fg); padding-top: .3rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 参数用文本域：多行原样透传，不做空格切割 */
+.bin-row textarea.arg { flex: 1; min-width: 8rem; min-height: 3.2rem; resize: vertical; padding: .35rem .5rem; font-size: .85rem; font-family: inherit; line-height: 1.4; }
+.bin-row textarea.arg:disabled { color: var(--muted); background: transparent; cursor: not-allowed; }
 .bin-row .tip { color: var(--muted); font-size: .8rem; }
-#runErr { margin-bottom: 0; }
+#runErr { margin: 0 0 .4rem; }
 /* 日志筛选下拉：放在标题后面，关闭按钮仍靠 margin-left:auto 推到最右 */
 #logs header select { padding: .3rem .5rem; font-size: .85rem; }
 #logs header label { display: flex; align-items: center; gap: .4rem; color: var(--muted); font-size: .85rem; }
@@ -210,18 +230,23 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
   </table>
   <div id="projList"></div>
 
-  <section id="runbox" hidden>
-    <header>
-      <h2>运行 · <span id="runName"></span></h2>
-    </header>
-    <div class="runform">
-      <p id="runSel">未选择任何 bin</p>
-      <div id="runBins"></div>
-      <button id="runGo" disabled>运行选中</button>
-      <button id="closeRun" class="ghost cancel">取消</button>
+  <div id="runbox" class="overlay" hidden>
+    <div class="modal">
+      <div class="modal-head">
+        <h2>运行 · <span id="runName"></span></h2>
+        <button id="closeRunX" class="close-x" aria-label="关闭" title="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <p id="runSel">未选择任何 bin</p>
+        <div id="runBins"></div>
+        <p id="runErr" class="err"></p>
+      </div>
+      <div class="modal-foot">
+        <button id="runGo" disabled>运行</button>
+        <button id="closeRun" class="ghost cancel">取消</button>
+      </div>
     </div>
-    <p id="runErr" class="err"></p>
-  </section>
+  </div>
 
   <section id="logs" hidden>
     <header>
@@ -576,7 +601,7 @@ function syncRunSel() {
   const checked = rows.filter(r => r.querySelector('input[type=checkbox]').checked);
   for (const r of rows) {
     const on = r.querySelector('input[type=checkbox]').checked;
-    r.querySelector('input.arg').disabled = !on;
+    r.querySelector('.arg').disabled = !on;
   }
   const sel = $('runSel');
   if (checked.length === 0) {
@@ -613,10 +638,11 @@ function openRun(u, preselectBin) {
       const name = document.createElement('span');
       name.className = 'bin-name';
       name.textContent = b;
-      const arg = document.createElement('input');
-      arg.type = 'text';
+      const arg = document.createElement('textarea');
       arg.className = 'arg';
-      arg.placeholder = '启动参数（原样透传）';
+      arg.placeholder = '启动参数（原样透传，支持多行）\n每行一个参数更清晰，回车不会被拆开';
+      arg.rows = 2;
+      arg.spellcheck = false;
       row.append(cb, name, arg);
       box.appendChild(row);
     }
@@ -630,10 +656,10 @@ $('runGo').onclick = async () => {
   const go = $('runGo');
   go.disabled = true;
   $('runErr').textContent = '';
-  // 收集勾选的每个 bin 及其行内填写的专属参数（原样透传，不做空格分割）
+  // 收集勾选的每个 bin 及其行内文本域填写的专属参数（原样透传，不做空格分割）
   const bins = [...$('runBins').querySelectorAll('.bin-row')]
     .filter(r => r.querySelector('input[type=checkbox]').checked)
-    .map(r => ({ bin: r.dataset.bin, args: r.querySelector('input.arg').value }));
+    .map(r => ({ bin: r.dataset.bin, args: r.querySelector('.arg').value }));
   if (bins.length === 0) {
     go.disabled = false;
     return;
@@ -644,6 +670,7 @@ $('runGo').onclick = async () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ bins }),
     });
+    // 执行完成自动关闭弹窗
     $('runbox').hidden = true;
     runKey = null;
   } catch (e) {
@@ -654,7 +681,14 @@ $('runGo').onclick = async () => {
   }
 };
 
-$('closeRun').onclick = () => { runKey = null; $('runbox').hidden = true; };
+// 关闭方式仅三种：右上角 X、取消按钮、点「运行」执行完成后。遮罩点击不关闭。
+function closeRunBox() {
+  runKey = null;
+  $('runbox').hidden = true;
+  $('runErr').textContent = '';
+}
+$('closeRunX').onclick = closeRunBox;
+$('closeRun').onclick = closeRunBox;
 
 function openLogs(u, preselBin) {
   $('logName').textContent = u.name;
