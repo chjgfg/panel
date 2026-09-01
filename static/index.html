@@ -167,6 +167,11 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
   display: flex; justify-content: flex-end; gap: .6rem;
   padding: .8rem 1rem; border-top: 1px solid var(--line);
 }
+/* 确认弹窗：比运行弹窗窄一点，提示文案略大 */
+.modal-sm { width: min(420px, 94vw); }
+.confirm-msg { margin: 0; font-size: .92rem; line-height: 1.6; color: var(--fg); }
+/* 确定按钮用主色调（默认 button 已是 accent 蓝，这里显式声明语义一致） */
+.modal-foot button.primary { background: var(--accent); color: #fff; border-color: transparent; }
 /* 运行弹窗内容（单 bin）：bin 名 + 参数文本域，原样透传 */
 .run-single { display: flex; flex-direction: column; gap: .5rem; }
 .run-bin-name { font-size: .95rem; color: var(--fg); font-weight: 600; }
@@ -230,14 +235,30 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
       </div>
       <div class="modal-body">
         <div class="run-single">
-          <div class="run-bin-name" id="runBinName"></div>
-          <textarea id="runArgs" class="arg" rows="4" placeholder="启动参数（原样透传，支持多行）\n回车、空格都原样作为参数传过去"></textarea>
+          <textarea id="runArgs" class="arg" rows="4" placeholder="启动参数（原样透传，支持多行）\n回车、空格都原样作为参数传过去" spellcheck="false"></textarea>
         </div>
         <p id="runErr" class="err"></p>
       </div>
       <div class="modal-foot">
         <button id="runGo" disabled>运行</button>
         <button id="closeRun" class="ghost cancel">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 确认操作弹窗（停止/重启），与运行弹窗同一套 modal 样式 -->
+  <div id="confirmBox" class="overlay" hidden>
+    <div class="modal modal-sm">
+      <div class="modal-head">
+        <h2 id="confirmTitle"></h2>
+        <button id="confirmCloseX" class="close-x" aria-label="关闭" title="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <p id="confirmMsg" class="confirm-msg"></p>
+      </div>
+      <div class="modal-foot">
+        <button id="confirmOk" class="primary">确定</button>
+        <button id="confirmCancel" class="ghost">取消</button>
       </div>
     </div>
   </div>
@@ -465,9 +486,9 @@ function projectRow(u) {
   if (u.external) {
     // 自写的 unit 没有 bin 面板，对它来说「项目就是这一个 unit」，不存在选择歧义，
     // 启动/停止/重启/日志直接留在项目行
-    btn(ops, '启动', false, () => doAction(u, 'start', '启动', tr));
-    btn(ops, '停止', false, () => doAction(u, 'stop', '停止', tr));
-    btn(ops, '重启', false, () => doAction(u, 'restart', '重启', tr));
+    btn(ops, '启动', false, () => doAction(u, 'start', '启动'));
+    btn(ops, '停止', false, () => doAction(u, 'stop', '停止'));
+    btn(ops, '重启', false, () => doAction(u, 'restart', '重启'));
     btn(ops, '日志', false, () => openLogs(u), true);
   } else {
     // 普通项目：项目顶层只留「展开/收起」，启动动作下移到 bin 面板各行
@@ -543,47 +564,69 @@ function binRow(u, inst) {
   // 四个按钮永远都在，按运行态做可用性控制：
   //   未运行：启动🉑、停止/重启灰；运行中：启动灰、停止/重启🉑；日志恒🉑
   btn(ops, '启动', inst.running, () => openRun(u, inst.bin));
-  btn(ops, '停止', !inst.running, () => binAction(u, inst, 'stop', tr));
-  btn(ops, '重启', !inst.running, () => binAction(u, inst, 'restart', tr));
+  btn(ops, '停止', !inst.running, () => binAction(u, inst, 'stop'));
+  btn(ops, '重启', !inst.running, () => binAction(u, inst, 'restart'));
   btn(ops, '日志', false, () => openLogs(u, inst.bin), true);
   return tr;
 }
 
-/// 项目一级的通用操作（目前只有外部 unit 的「启动」用它）
-async function doAction(u, act, label, tr) {
-  if (!confirm(`确认${label}「${u.name}」?`)) return;
-  tr.classList.add('busy');
-  tr.querySelectorAll('button').forEach(b => b.disabled = true);
-  try {
-    await req(`/api/units/${u.key}/${act}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: '{}',
-    });
-    banner('');
-  } catch (e) {
-    if (e.message !== '未登录') banner(`${label}「${u.name}」失败: ${e.message}`);
-  }
-  refresh();
+/// 项目一级的通用操作（外部 unit 的启动/停止/重启），走自定义确认弹窗
+function doAction(u, act, label) {
+  openConfirm(`确认${label}`, `确认${label}该程序「${u.name}」吗？`, async () => {
+    try {
+      await req(`/api/units/${u.key}/${act}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      banner('');
+    } catch (e) {
+      if (e.message !== '未登录') banner(`${label}「${u.name}」失败: ${e.message}`);
+    }
+    refresh();
+  });
 }
 
-/// 单个 bin 的停止/重启：只动这一个 bin 的 unit，同项目其它 bin 不受影响
-async function binAction(u, inst, act, tr) {
+// ---------- 自定义确认弹窗（替换原生 confirm）----------
+let confirmCb = null;
+
+/// 打开确认弹窗：设标题/文案，确定时执行 onOk（可 async），执行完自动关。
+/// 关闭仅三种：右上角 X、取消按钮、确定执行完成后。
+function openConfirm(title, msg, onOk) {
+  confirmCb = onOk;
+  $('confirmTitle').textContent = title;
+  $('confirmMsg').textContent = msg;
+  $('confirmBox').hidden = false;
+}
+function closeConfirm() {
+  confirmCb = null;
+  $('confirmBox').hidden = true;
+}
+$('confirmCloseX').onclick = closeConfirm;      // X 不执行操作
+$('confirmCancel').onclick = closeConfirm;      // 取消不执行操作
+$('confirmOk').onclick = async () => {          // 确定：执行完毕后关闭
+  const cb = confirmCb;
+  if (!cb) return closeConfirm();
+  await cb();
+  closeConfirm();
+};
+
+/// 单个 bin 的停止/重启：先弹自定义确认，确定后才执行，只动这一个 bin 的 unit
+function binAction(u, inst, act) {
   const label = act === 'stop' ? '停止' : '重启';
-  if (!confirm(`确认${label}「${u.name} · ${inst.bin}」?`)) return;
-  tr.classList.add('busy');
-  tr.querySelectorAll('button').forEach(b => b.disabled = true);
-  try {
-    await req(`/api/units/${u.key}/bins/${encodeURIComponent(inst.bin)}/${act}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: '{}',
-    });
-    banner('');
-  } catch (e) {
-    if (e.message !== '未登录') banner(`${label}「${inst.bin}」失败: ${e.message}`);
-  }
-  refresh();
+  openConfirm(`确认${label}`, `确认${label}该 bin 程序「${inst.bin}」吗？`, async () => {
+    try {
+      await req(`/api/units/${u.key}/bins/${encodeURIComponent(inst.bin)}/${act}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      banner('');
+    } catch (e) {
+      if (e.message !== '未登录') banner(`${label}「${inst.bin}」失败: ${e.message}`);
+    }
+    refresh();
+  });
 }
 
 // ---------- 选程序（多选，每行独立参数）+ 填参数 ----------
@@ -594,9 +637,8 @@ let runBin = null;   // 当前弹窗要运行的 bin
 function openRun(u, bin) {
   runKey = u.key;
   runBin = bin;
-  // 标题和内容都用这个 bin 名，跟随点击动态变化
+  // 标题跟随点击的 bin 动态变化；弹窗内部只剩参数文本域
   $('runName').textContent = bin;
-  $('runBinName').textContent = bin;
   $('runArgs').value = '';
   $('runErr').textContent = '';
   $('runGo').disabled = false;
