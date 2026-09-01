@@ -118,15 +118,26 @@ td.ops button:last-child { margin-right: 0; }
 #runbox > header { margin-bottom: .75rem; }
 .runform { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; }
 .runform label { display: flex; align-items: center; gap: .4rem; color: var(--muted); font-size: .85rem; }
-.runform input { min-width: 16rem; flex: 1; }
 /* 「取消」放进输入操作这一行，用 margin-left:auto 推到这一行最右侧 */
 .runform button.cancel { margin-left: auto; }
-/* bin 多选：一排排 checkbox，勾选态本身就在表达「选了哪些」，旁边再补一行汇总 */
-#runBins { display: flex; flex-wrap: wrap; gap: .4rem 1rem; width: 100%; margin-bottom: .5rem; }
-#runBins label { display: inline-flex; align-items: center; gap: .35rem; color: var(--fg); font-size: .88rem; cursor: pointer; }
-#runBins input[type=checkbox] { margin: 0; accent-color: var(--accent); }
-#runSel { width: 100%; margin: 0 0 .5rem; color: var(--muted); font-size: .8rem; }
+/* bin 多选：垂直列表，每行一个 bin（勾选框 / 名称 / 该 bin 专属参数框）。列表自带滚动，
+   bin 再多也不会把参数行和按钮挤出屏幕。 */
+#runSel { width: 100%; margin: 0 0 .4rem; color: var(--muted); font-size: .8rem; }
+#runBins { width: 100%; max-height: 44vh; overflow: auto; border: 1px solid var(--line); border-radius: 8px; padding: .35rem .5rem; margin-bottom: .6rem; }
+.bin-row { display: flex; align-items: center; gap: .6rem; padding: .28rem .2rem; }
+.bin-row + .bin-row { border-top: 1px solid var(--line); }
+.bin-row input[type=checkbox] { margin: 0; accent-color: var(--accent); flex: none; }
+.bin-row .bin-name { min-width: 7rem; font-size: .88rem; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bin-row input.arg { flex: 1; min-width: 8rem; padding: .3rem .5rem; font-size: .85rem; }
+/* 没勾选对应的 bin 时，它的参数框置灰不可编辑 */
+.bin-row input.arg:disabled { color: var(--muted); background: transparent; cursor: not-allowed; }
+.bin-row .tip { color: var(--muted); font-size: .8rem; }
 #runErr { margin-bottom: 0; }
+/* 日志筛选下拉：放在标题后面，关闭按钮仍靠 margin-left:auto 推到最右 */
+#logs header select { padding: .3rem .5rem; font-size: .85rem; }
+#logs header label { display: flex; align-items: center; gap: .4rem; color: var(--muted); font-size: .85rem; }
+/* 每条日志标来源 bin，用不同于正文的 muted 色，一眼分清归属 */
+#logBody .src { color: var(--accent); font-weight: 600; }
 #logBody {
   margin: 0; max-height: 60vh; overflow: auto; padding: .7rem;
   background: var(--card); border: 1px solid var(--line); border-radius: 10px;
@@ -179,7 +190,6 @@ td.ops button:last-child { margin-right: 0; }
     <div class="runform">
       <p id="runSel">未选择任何 bin</p>
       <div id="runBins"></div>
-      <label>参数 <input type="text" id="runArgs" placeholder="可留空，多个参数用空格分隔"></label>
       <button id="runGo" disabled>运行选中</button>
       <button id="closeRun" class="ghost cancel">取消</button>
     </div>
@@ -189,6 +199,7 @@ td.ops button:last-child { margin-right: 0; }
   <section id="logs" hidden>
     <header>
       <h2>日志 · <span id="logName"></span></h2>
+      <label>来源 <select id="logFilter"></select></label>
       <button id="closeLogs" class="ghost">关闭</button>
     </header>
     <pre id="logBody"></pre>
@@ -394,16 +405,22 @@ async function doAction(u, act, label, tr) {
   refresh();
 }
 
-// ---------- 选程序（多选）+ 填参数 ----------
+// ---------- 选程序（多选，每行独立参数）+ 填参数 ----------
 
-/// 汇总当前勾选的 bin：更新摘要行，没勾就禁掉运行按钮
+/// 汇总当前勾选的 bin：更新摘要行，没勾就禁掉运行按钮；每行参数框跟着勾选态走
+/// （没勾的 bin 参数框置灰不可编辑，避免填了却不起作用误导人）
 function syncRunSel() {
-  const checked = [...$('runBins').querySelectorAll('input:checked')].map(i => i.value);
+  const rows = [...$('runBins').querySelectorAll('.bin-row')];
+  const checked = rows.filter(r => r.querySelector('input[type=checkbox]').checked);
+  for (const r of rows) {
+    const on = r.querySelector('input[type=checkbox]').checked;
+    r.querySelector('input.arg').disabled = !on;
+  }
   const sel = $('runSel');
   if (checked.length === 0) {
     sel.textContent = '未选择任何 bin';
   } else {
-    sel.textContent = `已选 ${checked.length} 个：${checked.join('、')}`;
+    sel.textContent = `已选 ${checked.length} 个：${checked.map(r => r.dataset.bin).join('、')}`;
   }
   $('runGo').disabled = checked.length === 0;
 }
@@ -415,29 +432,34 @@ function openRun(u) {
   const box = $('runBins');
   box.replaceChildren();
   if (u.bins.length === 0) {
-    // 一个可跑的 bin 都没有：给一句说明，不让勾
-    const tip = document.createElement('span');
-    tip.textContent = '没找到 src/main.rs 或 src/bin/*.rs';
+    const tip = document.createElement('div');
     tip.className = 'tip';
+    tip.textContent = '没找到 src/main.rs 或 src/bin/*.rs';
     box.appendChild(tip);
   } else {
     // 预勾当前由面板起着（active）的那几个 bin，方便「接着跑」
     const running = new Set(u.running_bins || []);
     for (const b of u.bins) {
-      const label = document.createElement('label');
+      const row = document.createElement('div');
+      row.className = 'bin-row';
+      row.dataset.bin = b;
       const cb = document.createElement('input');
       cb.type = 'checkbox';
-      cb.value = b;
       cb.checked = running.has(b);
       cb.onchange = syncRunSel;
-      label.append(cb, document.createTextNode(b));
-      box.appendChild(label);
+      const name = document.createElement('span');
+      name.className = 'bin-name';
+      name.textContent = b;
+      const arg = document.createElement('input');
+      arg.type = 'text';
+      arg.className = 'arg';
+      arg.placeholder = '启动参数（原样透传）';
+      row.append(cb, name, arg);
+      box.appendChild(row);
     }
   }
-  $('runArgs').value = u.cur_args || '';
   syncRunSel();
   $('runbox').hidden = false;
-  $('runArgs').focus();
 }
 
 $('runGo').onclick = async () => {
@@ -445,8 +467,10 @@ $('runGo').onclick = async () => {
   const go = $('runGo');
   go.disabled = true;
   $('runErr').textContent = '';
-  // 收集所有勾选的 bin；backend 对每个分别启动（累加式，已经在跑的同名 unit 会先重启）
-  const bins = [...$('runBins').querySelectorAll('input:checked')].map(i => i.value);
+  // 收集勾选的每个 bin 及其行内填写的专属参数（原样透传，不做空格分割）
+  const bins = [...$('runBins').querySelectorAll('.bin-row')]
+    .filter(r => r.querySelector('input[type=checkbox]').checked)
+    .map(r => ({ bin: r.dataset.bin, args: r.querySelector('input.arg').value }));
   if (bins.length === 0) {
     go.disabled = false;
     return;
@@ -455,7 +479,7 @@ $('runGo').onclick = async () => {
     await req(`/api/units/${runKey}/start`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ bins, args: $('runArgs').value }),
+      body: JSON.stringify({ bins }),
     });
     $('runbox').hidden = true;
     runKey = null;
@@ -475,6 +499,7 @@ function openLogs(u) {
   if (u.outside_pid != null) {
     // journald 里没有它的记录，轮询也是白轮，直接说明情况
     logKey = null;
+    $('logFilter').replaceChildren();
     $('logBody').textContent =
       `这个进程（pid ${u.outside_pid}）是在面板外启动的，输出没有进 journald，面板拿不到。\n\n`
       + `点「接管…」选一个程序重新启动 —— 面板会先停掉它，再用 systemd-run 起一遍，\n`
@@ -482,19 +507,64 @@ function openLogs(u) {
     return;
   }
   logKey = u.key;
+  // 筛选项：全部 + 每个 bin。多 bin 同时跑时能只看某一个，或全部按时间混合看
+  const sel = $('logFilter');
+  sel.replaceChildren();
+  const all = document.createElement('option');
+  all.value = '';
+  all.textContent = '全部';
+  sel.appendChild(all);
+  for (const b of u.bins || []) {
+    const o = document.createElement('option');
+    o.value = b;
+    o.textContent = b;
+    sel.appendChild(o);
+  }
   $('logBody').textContent = '加载中…';
   loadLogs(true);
 }
 
+let logCache = null;   // 最近一次拉到的 [{bin, log}]，切筛选时不用重拉
+
 async function loadLogs(jump) {
   if (!logKey) return;
   try {
-    const text = await (await req(`/api/units/${logKey}/logs?lines=300`)).text();
-    const p = $('logBody');
-    const atBottom = p.scrollHeight - p.scrollTop - p.clientHeight < 40;
-    p.textContent = text.trim() || '(暂无日志)';
-    if (jump || atBottom) p.scrollTop = p.scrollHeight;   // 只在贴着底部时才跟随
+    logCache = await (await req(`/api/units/${logKey}/logs?lines=300`)).json();
+    renderLogs(jump);
   } catch { /* 401 已由 req() 处理 */ }
+}
+
+/// 把拉到的各 bin 日志整到一块：全部模式按行首时间戳混合排序、每条标来源 bin；
+/// 单 bin 模式只看那一个。用 DOM 文本节点渲染，日志里再怪的字符也不怕被当成 HTML。
+function renderLogs(jump) {
+  const filter = $('logFilter').value;
+  const p = $('logBody');
+  // 保持在底部时才跟随滚动（轮询时定位不会被顶到底部打断）
+  const atBottom = p.scrollHeight - p.scrollTop - p.clientHeight < 40;
+  p.replaceChildren();
+  if (!logCache || logCache.length === 0) {
+    p.append('(暂无日志)');
+    return;
+  }
+  // 拆成 (时间戳, 来源, 正文) 三元组
+  const rows = [];
+  for (const one of logCache) {
+    for (const line of (one.log || '').split('\n')) {
+      if (line.trim() === '') continue;
+      rows.push({ time: line.slice(0, 25), src: one.bin, text: line });
+    }
+  }
+  const keep = filter ? rows.filter(r => r.src === filter) : rows;
+  if (keep.length === 0) { p.append('(暂无日志)'); return; }
+  // 全部模式按 ISO 时间戳字符串排序（行首都带，字符串序即时间序）；单 bin 模式不用排
+  if (!filter) keep.sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
+  for (const r of keep) {
+    const tag = document.createElement('span');
+    tag.className = 'src';
+    tag.textContent = `[${r.src}] `;
+    p.append(tag, document.createTextNode(r.text + '\n'));
+  }
+  if (jump || atBottom) p.scrollTop = p.scrollHeight;   // 首开/切筛选直接到底；轮询也跟随
 }
 
 async function refresh() {
@@ -539,6 +609,9 @@ $('logout').onclick = async () => {
 };
 
 $('refresh').onclick = () => refresh();
+
+// 切换日志源筛选：用上一次拉到的数据直接重渲染，不用重新请求
+$('logFilter').onchange = () => { if (logCache) renderLogs(true); };
 
 $('closeLogs').onclick = () => { logKey = null; $('logs').hidden = true; };
 

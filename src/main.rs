@@ -877,13 +877,18 @@ async fn resolve(app: &App, key: &str) -> Option<(String, PathBuf)> {
 
 #[derive(Deserialize, Default)]
 struct ActionReq {
-    /// 这次勾选要运行的 bin 集合。stop 用不到；start/restart 为空就沿用上次那组，
-    /// 重启按钮才能一键用。
+    /// 这次勾选要运行的 (bin, 该 bin 专属参数) 列表。stop 用不到；
+    /// start/restart 为空就沿用上次那组，重启按钮才能一键用。
     #[serde(default)]
-    bins: Vec<String>,
-    /// 附加参数，空格分隔，原样传给每一个选中的 bin（不过 shell，不用担心引号）
+    bins: Vec<BinArg>,
+}
+
+#[derive(Deserialize)]
+struct BinArg {
+    bin: String,
+    /// 该 bin 的启动参数，原样透传给程序，不做空格分割
     #[serde(default)]
-    args: Option<String>,
+    args: String,
 }
 
 /// 拼 systemd-run 的参数。抽成纯函数是为了能单测——真正跑起来只有 Linux 上能验。
@@ -902,11 +907,12 @@ fn systemd_run_argv(cargo: &str, unit: &str, dir: &str, bin: &str, args: &str) -
         "--bin".into(),
         bin.into(),
     ];
-    // -- 之后的都是你程序自己的参数，cargo 不解释；不过 shell，所以引号空格都不用转义
-    let extra: Vec<String> = args.split_whitespace().map(str::to_string).collect();
-    if !extra.is_empty() {
+    // -- 之后的都是你程序自己的参数。不过 shell，所以引号空格都不用转义。
+    // 需求：参数「原样透传」，不对空格做分割解析 —— 用户在这一行输入框里敲什么，
+    // 就整串作为一个启动参数传给这个 bin。纯空白/空输入不加 `--`。
+    if !args.trim().is_empty() {
         v.push("--".into());
-        v.extend(extra);
+        v.push(args.to_string());
     }
     v
 }
@@ -969,14 +975,16 @@ async fn action(
         find_outside(&proc_exes().await, &dir)
     };
 
-    // 现在就决定这组 bin：明确勾选了用它，没勾就沿用上次那组（重启按钮一键用）
+    // 现在就决定这组 (bin, 参数)：明确勾选了用它，没勾就沿用上次那组（重启按钮一键用）
     let chosen: Vec<(String, String)> = if !req.bins.is_empty() {
-        let bad = req.bins.iter().find(|b| !ok_name(b) || !this_bins.contains(b));
+        let bad = req.bins.iter().find(|b| !ok_name(&b.bin) || !this_bins.contains(&b.bin));
         if bad.is_some() {
             return (StatusCode::BAD_REQUEST, "这个项目里没有这个程序").into_response();
         }
-        let args = req.args.clone().unwrap_or_default();
-        req.bins.into_iter().map(|b| (b, args.clone())).collect()
+        req.bins
+            .into_iter()
+            .map(|b| (b.bin, b.args))
+            .collect()
     } else {
         app.last.lock().unwrap().get(&project).cloned().unwrap_or_default()
     };
@@ -1106,6 +1114,14 @@ fn drop_noise(out: &str) -> String {
     s
 }
 
+#[derive(Serialize)]
+struct BinLog {
+    /// 来源 bin 名（面板起的 bin），或「外部」unit 时是这个项目名
+    bin: String,
+    /// the unit 的 journalctl 原文，short-iso，每行行首带时间戳
+    log: String,
+}
+
 async fn logs(
     State(app): State<Arc<App>>,
     Path(key): Path<String>,
@@ -1114,28 +1130,38 @@ async fn logs(
     let Some((project, dir)) = resolve(&app, &key).await else {
         return (StatusCode::NOT_FOUND, "未知项目").into_response();
     };
-    let unit = pick_project_checked(&project, &bins(&dir).await).await.unit;
+    let this_bins = bins(&dir).await;
+    let picked = pick_project_checked(&project, &this_bins).await;
     let n = q.lines.unwrap_or(300).clamp(1, 2000).to_string();
-    let args = [
-        "-u",
-        unit.as_str(),
-        "-n",
-        &n,
-        "--no-pager",
-        "-o",
-        "short-iso",
-    ];
-    match run("journalctl", &args).await {
-        Ok((ok, out, err)) => {
-            let body = if ok {
+
+    // 拉日志的目标：面板起的 bin 每个 unit 都拉（多 bin 各自独立日志）；
+    // 手写的 unit（external）没有 bin，只有那一个 unit，标项目名。
+    if picked.external {
+        let unit = picked.unit;
+        let args = ["-u", unit.as_str(), "-n", &n, "--no-pager", "-o", "short-iso"];
+        let body = match run("journalctl", &args).await {
+            Ok((ok, out, err)) => if ok {
                 drop_noise(&out)
             } else {
                 format!("{out}{err}")
-            };
-            ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response()
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+            },
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        };
+        return Json(vec![BinLog { bin: format!("{project}（外部）"), log: body }]).into_response();
     }
+
+    let mut out = Vec::with_capacity(this_bins.len());
+    for b in &this_bins {
+        let unit = unit_of(&project, b);
+        let args = ["-u", unit.as_str(), "-n", &n, "--no-pager", "-o", "short-iso"];
+        let body = match run("journalctl", &args).await {
+            Ok((ok, out, err)) if ok => drop_noise(&out),
+            Ok((_, out, err)) => format!("{out}{err}"),
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        };
+        out.push(BinLog { bin: b.clone(), log: body });
+    }
+    Json(out).into_response()
 }
 
 async fn require_auth(State(app): State<Arc<App>>, req: Request, next: Next) -> Response {
@@ -1549,7 +1575,7 @@ mod tests {
     }
 
     #[test]
-    fn 参数按空格拆成独立参数() {
+    fn 参数原样透传不按空格拆分() {
         let v = systemd_run_argv(
             "/usr/bin/cargo",
             "panel-a.service",
@@ -1557,7 +1583,8 @@ mod tests {
             "worker",
             "--port 8080  -v",
         );
-        assert_eq!(&v[v.len() - 5..], &["worker", "--", "--port", "8080", "-v"]);
+        // 参数作为一个整体透传给程序，不把空格当分隔符拆成多个参数
+        assert_eq!(&v[v.len() - 3..], &["worker", "--", "--port 8080  -v"]);
     }
 
     #[test]
