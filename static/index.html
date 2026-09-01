@@ -121,6 +121,11 @@ td.ops button:last-child { margin-right: 0; }
 .runform input { min-width: 16rem; flex: 1; }
 /* 「取消」放进输入操作这一行，用 margin-left:auto 推到这一行最右侧 */
 .runform button.cancel { margin-left: auto; }
+/* bin 多选：一排排 checkbox，勾选态本身就在表达「选了哪些」，旁边再补一行汇总 */
+#runBins { display: flex; flex-wrap: wrap; gap: .4rem 1rem; width: 100%; margin-bottom: .5rem; }
+#runBins label { display: inline-flex; align-items: center; gap: .35rem; color: var(--fg); font-size: .88rem; cursor: pointer; }
+#runBins input[type=checkbox] { margin: 0; accent-color: var(--accent); }
+#runSel { width: 100%; margin: 0 0 .5rem; color: var(--muted); font-size: .8rem; }
 #runErr { margin-bottom: 0; }
 #logBody {
   margin: 0; max-height: 60vh; overflow: auto; padding: .7rem;
@@ -172,9 +177,10 @@ td.ops button:last-child { margin-right: 0; }
       <h2>运行 · <span id="runName"></span></h2>
     </header>
     <div class="runform">
-      <label>程序 <select id="runBin"></select></label>
+      <p id="runSel">未选择任何 bin</p>
+      <div id="runBins"></div>
       <label>参数 <input type="text" id="runArgs" placeholder="可留空，多个参数用空格分隔"></label>
-      <button id="runGo">启动</button>
+      <button id="runGo" disabled>运行选中</button>
       <button id="closeRun" class="ghost cancel">取消</button>
     </div>
     <p id="runErr" class="err"></p>
@@ -388,31 +394,48 @@ async function doAction(u, act, label, tr) {
   refresh();
 }
 
-// ---------- 选程序 + 填参数 ----------
+// ---------- 选程序（多选）+ 填参数 ----------
+
+/// 汇总当前勾选的 bin：更新摘要行，没勾就禁掉运行按钮
+function syncRunSel() {
+  const checked = [...$('runBins').querySelectorAll('input:checked')].map(i => i.value);
+  const sel = $('runSel');
+  if (checked.length === 0) {
+    sel.textContent = '未选择任何 bin';
+  } else {
+    sel.textContent = `已选 ${checked.length} 个：${checked.join('、')}`;
+  }
+  $('runGo').disabled = checked.length === 0;
+}
 
 function openRun(u) {
   runKey = u.key;
   $('runName').textContent = u.name;
   $('runErr').textContent = '';
-  const sel = $('runBin');
-  sel.replaceChildren(...u.bins.map(b => {
-    const o = document.createElement('option');
-    o.value = b;
-    o.textContent = b;
-    return o;
-  }));
-  const empty = u.bins.length === 0;
-  if (empty) {
-    const o = document.createElement('option');
-    o.textContent = '没找到 src/main.rs 或 src/bin/*.rs';
-    sel.appendChild(o);
+  const box = $('runBins');
+  box.replaceChildren();
+  if (u.bins.length === 0) {
+    // 一个可跑的 bin 都没有：给一句说明，不让勾
+    const tip = document.createElement('span');
+    tip.textContent = '没找到 src/main.rs 或 src/bin/*.rs';
+    tip.className = 'tip';
+    box.appendChild(tip);
+  } else {
+    // 预勾当前由面板起着（active）的那几个 bin，方便「接着跑」
+    const running = new Set(u.running_bins || []);
+    for (const b of u.bins) {
+      const label = document.createElement('label');
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.value = b;
+      cb.checked = running.has(b);
+      cb.onchange = syncRunSel;
+      label.append(cb, document.createTextNode(b));
+      box.appendChild(label);
+    }
   }
-  if (u.cur_bin) sel.value = u.cur_bin;
   $('runArgs').value = u.cur_args || '';
-  const go = $('runGo');
-  go.disabled = empty;
-  go.textContent = u.active === 'active' ? '切换并重启' : '启动';
-  go.dataset.act = u.active === 'active' ? 'restart' : 'start';
+  syncRunSel();
   $('runbox').hidden = false;
   $('runArgs').focus();
 }
@@ -422,11 +445,17 @@ $('runGo').onclick = async () => {
   const go = $('runGo');
   go.disabled = true;
   $('runErr').textContent = '';
+  // 收集所有勾选的 bin；backend 对每个分别启动（累加式，已经在跑的同名 unit 会先重启）
+  const bins = [...$('runBins').querySelectorAll('input:checked')].map(i => i.value);
+  if (bins.length === 0) {
+    go.disabled = false;
+    return;
+  }
   try {
-    await req(`/api/units/${runKey}/${go.dataset.act || 'start'}`, {
+    await req(`/api/units/${runKey}/start`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ bin: $('runBin').value, args: $('runArgs').value }),
+      body: JSON.stringify({ bins, args: $('runArgs').value }),
     });
     $('runbox').hidden = true;
     runKey = null;

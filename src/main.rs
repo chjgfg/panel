@@ -65,6 +65,8 @@ struct Status {
     uptime: Option<f64>,
     /// 这个项目里所有能 cargo run --bin 的名字
     bins: Vec<String>,
+    /// 当前由面板起着（active）的 bin 名，前端靠它回显勾选
+    running_bins: Vec<String>,
     /// 上次是用哪个 bin、哪些参数起来的（面板重启后会丢，只影响界面回显）
     cur_bin: Option<String>,
     cur_args: Option<String>,
@@ -106,8 +108,9 @@ struct App {
     fails: Mutex<(u32, Instant)>,
     /// unit -> (上次读到的 CPU 累计纳秒, 采样时刻)
     cpu_prev: Mutex<HashMap<String, (u64, Instant)>>,
-    /// 项目名 -> (bin, 参数)，「重启」要用它重新拼命令
-    last: Mutex<HashMap<String, (String, String)>>,
+    /// 项目名 -> 最近一次启动的那组 (bin, 参数)。「重启」要沿用它把整组重新拉起来，
+    /// 所以要记一组而不是一个 bin。
+    last: Mutex<HashMap<String, Vec<(String, String)>>>,
     /// 整机 CPU 的上次采样 (忙碌时间片, 总时间片)
     host_cpu: Mutex<Option<(u64, u64)>>,
     /// df 的结果缓存。磁盘占用变化很慢，没必要每 3 秒 fork 一个 df
@@ -184,7 +187,7 @@ fn cookie_token(headers: &HeaderMap) -> Option<&str> {
 const PROPS: &str = "Id,LoadState,ActiveState,SubState,UnitFileState,MainPID,\
                      MemoryCurrent,CPUUsageNSec,ActiveEnterTimestampMonotonic";
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Raw {
     load: String,
     active: String,
@@ -567,38 +570,99 @@ async fn stop_pids(pids: &[u32]) -> (bool, String) {
     }
 }
 
-/// 每个项目对应一个 transient unit，名字加 panel- 前缀避免撞上系统里的服务
-fn unit_of(project: &str) -> String {
-    format!("panel-{project}.service")
+/// 每个运行实例对应一个独立的 transient unit，名字加 panel- 前缀避免撞上系统里的服务。
+/// 一个项目会计着多个 bin 同时跑，所以 unit 名要带上 bin —— systemd-run 不允许两个
+/// active 的 unit 同名，不带 bin 的话第二个 bin 就起不来了。
+fn unit_of(project: &str, bin: &str) -> String {
+    format!("panel-{project}-{bin}.service")
 }
 
-/// 一个项目可能对应两个 unit：面板用 systemd-run 起的 panel-xxx.service，
-/// 以及你可能自己写过的 xxx.service。取真实存在的那个，
-/// 这样你手写的服务在面板里也能看到状态和日志。
-/// 返回的 bool 表示「这是你自己的 unit」，面板对它只做启停，不管选 bin。
-/// 从 show_many 的结果里挑：优先面板自己起的 panel-X，其次你手写的 X。
-/// 返回的 bool 表示「这是你自己的 unit」，面板对它只做启停，不管选 bin。
-fn pick_from(shown: &mut HashMap<String, Raw>, project: &str) -> (String, bool, Raw) {
-    let own = unit_of(project);
+/// 一个项目在面板里可能占着的全部候选 unit：
+///   每个 bin 一个面板 unit（panel-{p}-{bin}.service），
+///   加上你可能自己写过的 {p}.service。
+/// 刷新和 stop 都要把「这一个项目」跟 unit 群对上号。
+fn project_units(project: &str, bins: &[String]) -> Vec<String> {
+    let mut v: Vec<String> = bins
+        .iter()
+        .map(|b| unit_of(project, b))
+        .chain(std::iter::once(format!("{project}.service")))
+        .collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// 面板自己起的、用于某个 bin 的 unit 名拼接出来的 bin（unit_of 的逆运算）。
+/// 只用来把「哪些 bin 正在由面板跑着」翻译成前端可读的名字。
+fn bin_of_panel_unit(project: &str, unit: &str) -> Option<String> {
+    let prefix = format!("panel-{project}-");
+    unit.strip_prefix(&prefix)
+        .and_then(|s| s.strip_suffix(".service"))
+        .map(str::to_string)
+}
+
+/// 一个项目在面板里可能同时跑着多个 bin，各自一个 panel-{p}-{bin} unit，
+/// 也可能有你手写的 {p}.service。刷新时把「这一个项目」聚合成一个可见的行：
+/// 挑一个 unit 当主 unit 报状态，并把「当前由面板起着、在跑的 bins」汇总出来
+/// 给前端回显勾选。
+struct Picked {
+    /// 主 unit 名，展示和查日志用
+    unit: String,
+    /// 主 unit 是不是你自己写的 {p}.service（外部 unit，面板只做启停不选 bin）
+    external: bool,
+    raw: Raw,
+    /// 当前由面板起着（active）的各 bin 名。前端靠它回显「这个项目现在跑着哪些 bin」
+    running_bins: Vec<String>,
+}
+
+/// 从 show_many 的结果里把一个项目的全部 unit 收拢。
+/// 主 unit 挑选：面板的 bin unit 里谁在跑取谁；没在跑再退回你手写的 unit；
+/// 都没有就按第一个面板 unit 报「未运行」。
+fn pick_project(shown: &mut HashMap<String, Raw>, project: &str, bins: &[String]) -> Picked {
     let theirs = format!("{project}.service");
-    if shown.get(&own).is_some_and(|r| r.load == "loaded") {
-        let r = shown.remove(&own).unwrap();
-        return (own, false, r);
+
+    let mut rows: Vec<(String, Raw)> = project_units(project, bins)
+        .into_iter()
+        .map(|u| {
+            let r = shown.remove(&u).unwrap_or_default();
+            (u, r)
+        })
+        .collect();
+    // 手写的 unit 总是最后一个，方便下面区分
+    rows.sort_by_key(|(u, _)| if u.as_str() == theirs { 1 } else { 0 });
+
+    // 正在由面板起着（active）的 bin
+    let running_bins: Vec<String> = rows
+        .iter()
+        .filter(|(u, r)| u.as_str() != theirs && r.active == "active")
+        .filter_map(|(u, _)| bin_of_panel_unit(project, u))
+        .collect();
+
+    // 主 unit：优先面板里正在跑的 bin unit，其次你手写的在跑的 unit，再退回第一个
+    let primary = rows
+        .iter()
+        .find(|(u, r)| u.as_str() != theirs && r.active == "active")
+        .or_else(|| rows.iter().find(|(u, r)| u.as_str() == theirs && r.active == "active"))
+        .or_else(|| rows.first())
+        .unwrap(); // bins 至少让 project_units 有一个面板 unit，不会空
+    let external = primary.0.as_str() == theirs;
+
+    Picked {
+        unit: primary.0.clone(),
+        external,
+        raw: primary.1.clone(),
+        running_bins,
     }
-    if shown.get(&theirs).is_some_and(|r| r.load == "loaded") {
-        let r = shown.remove(&theirs).unwrap();
-        return (theirs, true, r);
-    }
-    // 两个都不存在，按面板自己的名字报「未运行」
-    let r = shown.remove(&own).unwrap_or_default();
-    (own, false, r)
 }
 
-/// 单个项目用的版本：一次 systemctl show 查两个候选名，一个进程搞定
-async fn pick_unit(project: &str) -> (String, bool, Raw) {
-    let cands = vec![unit_of(project), format!("{project}.service")];
+/// 单个项目用的版本：一次 systemctl show 查目标 bin 的所有候选名，一个进程搞定
+async fn pick_project_checked(
+    project: &str,
+    bins: &[String],
+) -> Picked {
+    let cands = project_units(project, bins);
     let mut shown = show_many(&cands).await;
-    pick_from(&mut shown, project)
+    pick_project(&mut shown, project, bins)
 }
 
 #[derive(Deserialize)]
@@ -724,66 +788,76 @@ async fn units(State(app): State<Arc<App>>) -> Json<Vec<Status>> {
     let boot = boot_secs().await;
     let found = discover(&app.cfg.dirs, &app.cfg.exclude).await;
 
-    // 所有项目的两个候选 unit 名一次问完 —— 原来是每个项目 fork 两次 systemctl
-    let cands: Vec<String> = found
-        .iter()
-        .flat_map(|(n, _)| [unit_of(n), format!("{n}.service")])
-        .collect();
+    // 先扫一遍每个项目的可选 bin（拼候选 unit 和 running_bins 都要用它）
+    let mut found_bins: Vec<(String, Vec<String>)> = Vec::with_capacity(found.len());
+    let mut cands: Vec<String> = Vec::new();
+    for (n, dir) in &found {
+        let b = bins(dir).await;
+        cands.extend(project_units(n, &b));
+        found_bins.push((n.clone(), b));
+    }
+    // 所有项目的全部候选 unit 一次问完 —— 原来是每个项目 fork 两次 systemctl
     let mut shown = show_many(&cands).await;
-    let picked: Vec<(String, bool, Raw)> = found
+    let picked: Vec<Picked> = found
         .iter()
-        .map(|(n, _)| pick_from(&mut shown, n))
+        .map(|(n, _)| {
+            let b = found_bins
+                .iter()
+                .find(|(bn, _)| bn == n)
+                .map(|(_, b)| b.clone())
+                .unwrap_or_default();
+            pick_project(&mut shown, n, &b)
+        })
         .collect();
 
-    // 只有存在「unit 没在跑」的项目时才去扫 /proc —— 那一趟是几百次 readlink，
+    // 只有存在「项目没有任何 unit 在跑」时才去扫 /proc —— 那一趟是几百次 readlink，
     // 单核机器上不该每 3 秒白跑一遍
-    let exes = if picked.iter().any(|(_, _, r)| r.active != "active") {
-        proc_exes().await
-    } else {
-        Vec::new()
-    };
+    let any_down = picked.iter().any(|p| p.running_bins.is_empty() && p.raw.active != "active");
+    let exes = if any_down { proc_exes().await } else { Vec::new() };
 
     let mut v = Vec::with_capacity(found.len());
-    for ((name, dir), (unit, external, r)) in found.into_iter().zip(picked) {
-        // 关键是「unit 有没有在跑」，不是「unit 存不存在」：
+    for ((name, dir), p) in found.into_iter().zip(picked) {
+        // 关键是「有没有 unit 在跑」，不是「unit 存不存在」：
         // 上次启动失败会留下一个 failed 的 unit，它不该屏蔽掉裸进程检测
-        let outside = if r.active == "active" {
+        let running = !p.running_bins.is_empty() || p.raw.active == "active";
+        let outside = if running {
             Vec::new()
         } else {
             find_outside(&exes, &dir)
         };
         let outside_pid = outside.first().copied();
-        let uptime = (r.active == "active")
-            .then(|| r.active_since_us.map(|u| (boot - u as f64 / 1e6).max(0.0)))
+        let uptime = (p.raw.active == "active")
+            .then(|| p.raw.active_since_us.map(|u| (boot - u as f64 / 1e6).max(0.0)))
             .flatten();
-        let (cur_bin, cur_args) = match app.last.lock().unwrap().get(&name) {
-            Some((b, a)) => (Some(b.clone()), Some(a.clone())),
-            None => (None, None),
-        };
+        let cur = app.last.lock().unwrap().get(&name).cloned();
+        let cur_bin = cur.as_ref().and_then(|g| g.first()).map(|(b, _)| b.clone());
+        let cur_args = cur.as_ref().and_then(|g| g.first()).map(|(_, a)| a.clone());
+        let bins = found_bins
+            .iter()
+            .find(|(bn, _)| bn == &name)
+            .map(|(_, b)| b.clone())
+            .unwrap_or_default();
         v.push(Status {
             key: name.clone(),
-            bins: if external {
-                Vec::new()
-            } else {
-                bins(&dir).await
-            },
+            bins,
             name,
-            cpu: app.cpu(&unit, r.cpu_nsec),
-            unit,
-            external,
-            loaded: r.load == "loaded",
-            enabled: r.enabled == "enabled",
-            active: r.active,
-            sub: r.sub,
-            pid: if r.pid > 0 {
-                r.pid
+            cpu: app.cpu(&p.unit, p.raw.cpu_nsec),
+            unit: p.unit,
+            external: p.external,
+            loaded: p.raw.load == "loaded",
+            enabled: p.raw.enabled == "enabled",
+            active: p.raw.active,
+            sub: p.raw.sub,
+            pid: if p.raw.pid > 0 {
+                p.raw.pid
             } else {
                 outside_pid.unwrap_or(0) as u64
             },
-            memory: r.memory,
+            memory: p.raw.memory,
             uptime,
             cur_bin,
             cur_args,
+            running_bins: p.running_bins,
             outside_pid,
         });
     }
@@ -803,10 +877,11 @@ async fn resolve(app: &App, key: &str) -> Option<(String, PathBuf)> {
 
 #[derive(Deserialize, Default)]
 struct ActionReq {
-    /// 要跑哪个 bin。stop 用不到；start/restart 不给就沿用上次的
+    /// 这次勾选要运行的 bin 集合。stop 用不到；start/restart 为空就沿用上次那组，
+    /// 重启按钮才能一键用。
     #[serde(default)]
-    bin: Option<String>,
-    /// 附加参数，空格分隔，原样传给程序（不过 shell，所以不用担心引号）
+    bins: Vec<String>,
+    /// 附加参数，空格分隔，原样传给每一个选中的 bin（不过 shell，不用担心引号）
     #[serde(default)]
     args: Option<String>,
 }
@@ -846,7 +921,7 @@ async fn spawn(
     bin: &str,
     args: &str,
 ) -> (bool, String) {
-    let unit = unit_of(project);
+    let unit = unit_of(project, bin);
     // 上一次跑完/跑挂的同名 unit 还挂在那儿的话，systemd-run 会拒绝创建
     let _ = run("systemctl", &["reset-failed", "--", unit.as_str()]).await;
 
@@ -855,10 +930,14 @@ async fn spawn(
 
     match run("systemd-run", &refs).await {
         Ok((true, ..)) => {
-            app.last
-                .lock()
-                .unwrap()
-                .insert(project.to_string(), (bin.to_string(), args.to_string()));
+            let mut last = app.last.lock().unwrap();
+            let group = last.entry(project.to_string()).or_default();
+            // 同一批里重复养同一个 bin 就覆盖掉，不重复记
+            if let Some(slot) = group.iter_mut().find(|(b, _)| b == bin) {
+                *slot = (bin.to_string(), args.to_string());
+            } else {
+                group.push((bin.to_string(), args.to_string()));
+            }
             (true, String::new())
         }
         Ok((false, out, err)) => {
@@ -877,44 +956,82 @@ async fn action(
     let Some((project, dir)) = resolve(&app, &key).await else {
         return (StatusCode::NOT_FOUND, "未知项目").into_response();
     };
-    let (unit, external, raw) = pick_unit(&project).await;
     let req = body.map(|Json(b)| b).unwrap_or_default();
-    // 同上：unit 只要没在跑，就得去看是不是有个面板外的裸进程占着
-    let outside = if raw.active == "active" {
+    let this_bins = bins(&dir).await;
+    // 聚合该项目当下所有 unit（每个 bin 一个面板 unit + 你手写的那个）
+    let picked = pick_project_checked(&project, &this_bins).await;
+    let external = picked.external;
+
+    // unit 只要没在跑，就得去看是不是有个面板外的裸进程占着
+    let outside = if picked.raw.active == "active" {
         Vec::new()
     } else {
         find_outside(&proc_exes().await, &dir)
     };
 
-    // 没指定 bin 就沿用上次那个，重启按钮才能一键用
-    let remembered = || app.last.lock().unwrap().get(&project).cloned();
-    let pick = || match req.bin.clone() {
-        Some(b) => Some((b, req.args.clone().unwrap_or_default())),
-        None => remembered(),
+    // 现在就决定这组 bin：明确勾选了用它，没勾就沿用上次那组（重启按钮一键用）
+    let chosen: Vec<(String, String)> = if !req.bins.is_empty() {
+        let bad = req.bins.iter().find(|b| !ok_name(b) || !this_bins.contains(b));
+        if bad.is_some() {
+            return (StatusCode::BAD_REQUEST, "这个项目里没有这个程序").into_response();
+        }
+        let args = req.args.clone().unwrap_or_default();
+        req.bins.into_iter().map(|b| (b, args.clone())).collect()
+    } else {
+        app.last.lock().unwrap().get(&project).cloned().unwrap_or_default()
     };
-    let sysctl = async |act: &str| match run("systemctl", &[act, "--", unit.as_str()]).await {
-        Ok((ok, out, err)) => (ok, if err.trim().is_empty() { out } else { err }),
-        Err(e) => (false, e.to_string()),
+
+    // quiet=true 时「unit 根本没在跑」不算错（systemctl stop 一个没 loaded 的会报 not loaded，
+    // 但停一个没跑的东西本来就该是空操作，不该弹红字）
+    let sysctl_on = async |u: &str, act: &str, quiet: bool| -> (bool, String) {
+        let (ok, msg) = match run("systemctl", &[act, "--", u]).await {
+            Ok((ok, out, err)) => (ok, if err.trim().is_empty() { out } else { err }),
+            Err(e) => (false, e.to_string()),
+        };
+        (ok || (quiet && !ok), msg)
     };
 
     let (ok, msg) = match act.as_str() {
-        // 面板外的裸进程 systemd 管不了，只能直接发信号
-        "stop" if !outside.is_empty() => stop_pids(&outside).await,
-        // 什么都没在跑时 systemctl stop 会报 not loaded，但「停止一个没在跑的东西」
-        // 本来就该是空操作，不该弹红字
-        "stop" if raw.active != "active" => return StatusCode::NO_CONTENT.into_response(),
-        "stop" => sysctl("stop").await,
+        "stop" => {
+            // 累加式下可能同时起着好几个 bin 的 unit，stop 把所有在跑的面板 unit、
+            // 你手写的 unit、以及面板外的裸进程一律停掉
+            let theirs = format!("{project}.service");
+            let proj_units = project_units(&project, &this_bins);
+            let shown = show_many(&proj_units).await;
+            let mut failed = String::new();
+            for u in &proj_units {
+                let theirs_ok = *u == theirs;
+                let active = shown.get(u).map_or(false, |r| r.active == "active");
+                if active && (theirs_ok || u.starts_with(&format!("panel-{project}-"))) {
+                    let (ok, msg) = sysctl_on(u, "stop", true).await;
+                    if !ok && !msg.trim().is_empty() {
+                        failed.push_str(&msg);
+                    }
+                }
+            }
+            if !outside.is_empty() {
+                let (ok, msg) = stop_pids(&outside).await;
+                if !ok {
+                    failed.push_str(&msg);
+                }
+            }
+            if failed.trim().is_empty() {
+                (true, String::new())
+            } else {
+                (false, failed)
+            }
+        }
         // 你自己写的 unit，ExecStart 是你定的，面板不插手怎么起
         _ if external => match act.as_str() {
-            "start" | "restart" => sysctl(&act).await,
+            "start" | "restart" => {
+                let u = picked.unit.clone();
+                sysctl_on(u.as_str(), act.as_str(), false).await
+            }
             _ => return (StatusCode::BAD_REQUEST, "非法操作").into_response(),
         },
         "start" | "restart" => {
-            let Some((bin, args)) = pick() else {
-                return (StatusCode::BAD_REQUEST, "请先选一个要运行的程序").into_response();
-            };
-            if !ok_name(&bin) || !bins(&dir).await.contains(&bin) {
-                return (StatusCode::BAD_REQUEST, "这个项目里没有这个程序").into_response();
+            if chosen.is_empty() {
+                return (StatusCode::BAD_REQUEST, "请先选要运行的程序").into_response();
             }
             // 外面已经有一个在跑：必须等它真的退出再起，否则新进程会撞 AddrInUse
             if !outside.is_empty() {
@@ -922,10 +1039,39 @@ async fn action(
                 if !ok {
                     return (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response();
                 }
-            } else if act == "restart" {
-                let _ = sysctl("stop").await;
             }
-            spawn(&app, &project, &dir, &bin, &args).await
+            // 累加式：对每个勾选的 bin 分别起；已经起着同 unit 的先停掉再起（保证用它当前参数）
+            let mut errs = Vec::new();
+            // 一次把所有候选 unit 的 ActiveState 问齐，循环里就不一个个 fork systemctl 了
+            let active_units: Vec<String> = {
+                let shown = show_many(&project_units(&project, &this_bins)).await;
+                this_bins
+                    .iter()
+                    .map(|b| unit_of(&project, b))
+                    .filter(|u| shown.get(u).map_or(false, |r| r.active == "active"))
+                    .collect()
+            };
+            for (bin, args) in &chosen {
+                let u = unit_of(&project, bin);
+                // 若这个 bin 的 unit 还在 active，先停掉，否则 systemd-run 同名会拒绝
+                if active_units.contains(&u) {
+                    let _ = sysctl_on(&u, "stop", true).await;
+                }
+                let (ok, msg) = spawn(&app, &project, &dir, bin, args).await;
+                if !ok {
+                    let msg = msg.trim();
+                    errs.push(if msg.is_empty() {
+                        format!("「{bin}」起不来")
+                    } else {
+                        format!("「{bin}」：{msg}")
+                    });
+                }
+            }
+            if !errs.is_empty() {
+                (false, errs.join("；"))
+            } else {
+                (true, String::new())
+            }
         }
         _ => return (StatusCode::BAD_REQUEST, "非法操作").into_response(),
     };
@@ -965,10 +1111,10 @@ async fn logs(
     Path(key): Path<String>,
     Query(q): Query<LogQuery>,
 ) -> Response {
-    let Some((project, _)) = resolve(&app, &key).await else {
+    let Some((project, dir)) = resolve(&app, &key).await else {
         return (StatusCode::NOT_FOUND, "未知项目").into_response();
     };
-    let (unit, ..) = pick_unit(&project).await;
+    let unit = pick_project_checked(&project, &bins(&dir).await).await.unit;
     let n = q.lines.unwrap_or(300).clamp(1, 2000).to_string();
     let args = [
         "-u",
@@ -1358,34 +1504,48 @@ mod tests {
         assert_eq!(m["panel-xau.service"].memory, None);
         assert_eq!(m["panel-xau.service"].active_since_us, None);
 
-        // 手写的 xau.service 在跑，就该选它，并标成 external
-        let (unit, external, r) = pick_from(&mut m, "xau");
-        assert_eq!(unit, "xau.service");
-        assert!(external);
-        assert_eq!(r.pid, 4242);
+        // 手写的 xau.service 在跑 —— 但面板自己的 bin unit 在跑时优先作为主子 unit，
+        // 手写的只算备选；这里只有手写的在跑，所以选它并标成 external
+        let mut m2 = m.clone();
+        let picked = pick_project(&mut m2, "xau", &["web".to_string()]);
+        assert_eq!(picked.unit, "xau.service");
+        assert!(picked.external);
+        assert_eq!(picked.raw.pid, 4242);
+        assert!(picked.running_bins.is_empty());
     }
 
     #[test]
-    fn 面板自己的unit优先于手写的() {
+    fn 多bin同时起着各自归进running_bins且以面板unit为主() {
         let mk = |load: &str, active: &str| Raw {
             load: load.into(),
             active: active.into(),
+            enabled: "enabled".into(),
+            pid: 1000,
             ..Raw::default()
         };
+        // 项目 xau 两个 bin 同时起着，你手写的 xau.service 也在跑
         let mut m = HashMap::from([
-            ("panel-xau.service".to_string(), mk("loaded", "active")),
+            ("panel-xau-web.service".to_string(), mk("loaded", "active")),
+            ("panel-xau-api.service".to_string(), mk("loaded", "active")),
             ("xau.service".to_string(), mk("loaded", "active")),
         ]);
-        let (unit, external, _) = pick_from(&mut m, "xau");
-        assert_eq!(unit, "panel-xau.service");
-        assert!(!external);
+        let bins = vec!["web".to_string(), "api".to_string()];
+        let p = pick_project(&mut m, "xau", &bins);
+        // 主 unit 优先面板里在跑的 bin unit（具体是哪个 bin 无关紧要）
+        assert!(!p.external);
+        assert!(p.unit.starts_with("panel-xau-"));
+        // 两个在跑的 bin 都要汇总给前端回显
+        assert_eq!(p.running_bins.len(), 2);
+        assert!(p.running_bins.contains(&"web".to_string()));
+        assert!(p.running_bins.contains(&"api".to_string()));
 
-        // 两个都不存在时，按面板自己的名字报，且不算 external
+        // 一个都没跑时：按某个面板 unit 报未运行，主 unit 算面板的、不算 external
         let mut empty: HashMap<String, Raw> = HashMap::new();
-        let (unit, external, r) = pick_from(&mut empty, "xau");
-        assert_eq!(unit, "panel-xau.service");
-        assert!(!external);
-        assert_eq!(r.load, "");
+        let p2 = pick_project(&mut empty, "xau", &bins);
+        assert!(!p2.external);
+        assert!(p2.unit.starts_with("panel-xau-"));
+        assert_eq!(p2.raw.load, "");
+        assert!(p2.running_bins.is_empty());
     }
 
     #[test]
