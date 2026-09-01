@@ -94,11 +94,15 @@ th, td { padding: .6rem .7rem; text-align: left; border-bottom: 1px solid var(--
 th { font-size: .78rem; color: var(--muted); }
 tbody tr:last-child td { border-bottom: 0; }
 tr.busy { opacity: .5; }
+tbody tr { vertical-align: middle; }
 td.name { white-space: normal; }
 td.name small { display: block; color: var(--muted); font-size: .75rem; }
-/* nowrap 让这一格的最小宽度等于所有按钮之和，表格布局就必须给足空间，
-   按钮不会被挤成一竖排。窄屏在下面的 media query 里再放开折行。 */
-td.ops { display: flex; flex-wrap: nowrap; gap: .4rem; align-items: center; }
+/* 操作按钮组不用 flex：flex 容器会让这个单元格走自己的垂直对齐通道，
+   和同行的普通文字单元格中线对不齐，按钮就上下飘。
+   改回行内元素 + vertical-align:middle，按钮和本行文字统一按中线对齐。 */
+td.ops { white-space: nowrap; }
+td.ops button { margin-right: .4rem; vertical-align: middle; }
+td.ops button:last-child { margin-right: 0; }
 .dot {
   display: inline-block; width: .6rem; height: .6rem; margin-right: .45rem;
   border-radius: 50%; background: var(--off);
@@ -130,7 +134,7 @@ td.ops { display: flex; flex-wrap: nowrap; gap: .4rem; align-items: center; }
   body { padding: .6rem; }
   th, td { padding: .5rem .45rem; font-size: .85rem; }
   th:nth-child(4), td:nth-child(4) { display: none; }
-  td.ops { flex-wrap: wrap; }   /* 手机上放开折行，否则会顶出横向滚动条 */
+  td.ops button { white-space: normal; }   /* 手机上让按钮可换行，避免顶出横向滚动条 */
 }
 </style>
 </head>
