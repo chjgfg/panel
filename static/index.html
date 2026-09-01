@@ -118,9 +118,11 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
 .stack-table th:nth-child(4), .stack-table td:nth-child(4) { width: 10%; }
 .stack-table th:nth-child(5), .stack-table td:nth-child(5) { width: 15%; }
 .stack-table th:nth-child(6), .stack-table td:nth-child(6) { width: 15%; }
-/* bin 独立面板：缩进一点，跟上方项目行区分开；内部列表，行数多时自己滚，不碰外层表格 */
+/* bin 独立面板：缩进一点，跟上方项目行区分开；内部列表，行数多时自己滚，不碰外层表格。
+   左右两侧 margin 取同一个值，左右留白对称：左侧跟上方父项目容器保持一致的缩进，
+   右侧留出一模一样的同等留白，展开/收起时面板始终水平居中，不会左右偏移晃动。 */
 .bin-panel {
-  margin: .35rem 0 0 1.6rem;
+  margin: .35rem 1.6rem 0 1.6rem;
   border: 1px solid var(--line); border-radius: 8px;
   background: color-mix(in oklab, var(--card) 92%, transparent);
   overflow: auto; max-height: 46vh;
