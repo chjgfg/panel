@@ -179,14 +179,19 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
 .run-bin-name { font-size: .95rem; color: var(--fg); font-weight: 600; }
 .run-single textarea.arg { width: 100%; resize: vertical; padding: .5rem .6rem; font-size: .85rem; font-family: inherit; line-height: 1.4; min-height: 6rem; }
 #runErr { margin: .5rem 0 0; }
-/* 日志弹窗：宽一点；来源下拉放在标题右侧、X 再靠最右 */
-.modal-log { width: min(760px, 95vw); }
+/* 日志弹窗：几乎占满可视区，长尾日志无需频繁横滚也能尽量整行显示；
+   高度覆盖 .modal 的 84vh 上限并自行定高，靠 flex 把高度让给日志区 */
+.modal-log {
+  width: min(1600px, 95vw);
+  height: 90vh;
+  max-height: none;
+}
 .modal-head .log-src { display: inline-flex; align-items: center; gap: .4rem; color: var(--muted); font-size: .85rem; }
 .modal-head .log-src select { padding: .3rem .5rem; font-size: .85rem; }
 /* 每条日志标来源 bin，用不同于正文的 muted 色，一眼分清归属 */
 #logBody .src { color: var(--accent); font-weight: 600; }
 #logBody {
-  margin: 0; height: 58vh; overflow: auto; padding: .7rem;
+  margin: 0; flex: 1; min-height: 0; overflow: auto; padding: .7rem;
   background: var(--card); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
   font: 12.5px/1.5 ui-monospace, Consolas, monospace;
   /* 不换行：一行日志就是一条记录，折行之后时间戳对不齐，很难扫。
