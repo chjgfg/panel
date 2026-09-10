@@ -85,7 +85,7 @@ button.ghost { background: transparent; color: var(--muted); border-color: var(-
 #app > header {
   display: flex; align-items: center; gap: .75rem; margin-bottom: .75rem;
 }
-#refresh { margin-left: auto; }
+#oracleCloud { margin-left: auto; }
 table {
   width: 100%; border-collapse: collapse; background: var(--card);
   border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
@@ -220,6 +220,7 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
   <header>
     <h1>项目面板</h1>
     <span id="tick"></span>
+    <button id="oracleCloud" type="button" class="ghost">Oracle Cloud</button>
     <button id="refresh" class="ghost">刷新</button>
     <button id="logout" class="ghost">退出</button>
   </header>
@@ -808,6 +809,11 @@ $('logout').onclick = async () => {
   showLogin();
 };
 
+$('oracleCloud').onclick = () => window.open(
+  'https://cloud.oracle.com/compute/instances?region=ap-singapore-2',
+  '_blank',
+  'noopener,noreferrer'
+);
 $('refresh').onclick = () => refresh();
 
 // 切换日志源筛选：用上一次拉到的数据直接重渲染，不用重新请求
