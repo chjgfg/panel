@@ -960,7 +960,8 @@ function renderTree() {
   const tree = $('srcTree');
   tree.replaceChildren();
   if (!srcCache) return;
-  tree.appendChild(treeNodes(srcCache.children, true));
+  // 全部收起：大项目一口气全展开会渲染几千个节点，慢；点哪个目录再展开哪个
+  tree.appendChild(treeNodes(srcCache.children, false));
 }
 
 function treeNodes(nodes, expanded) {
