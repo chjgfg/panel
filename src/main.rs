@@ -1,54 +1,40 @@
 // 一个只做四件事的小面板：看状态、看日志、启动、停止/重启。
-// 全部逻辑就这一个文件，网页是 static/index.html，编译时直接嵌进二进制。
+// 网页是 static/index.html，编译时直接嵌进二进制。
+//
+// 模块划分：
+//   config   配置文件结构与查找
+//   state    全局共享状态（会话表、采样缓存）
+//   auth     登录/登出/会话校验
+//   hostinfo 整机资源（/proc 与 df）
+//   discover 项目发现（扫目录、黑名单）
+//   systemd  systemctl/journalctl 交互
+// 这里只剩 web 层：路由、handler、源码树和进程管理。
+mod auth;
+mod config;
+mod discover;
+mod hostinfo;
+mod state;
+mod systemd;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::process::Stdio;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::{Path, Query, Request, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use tokio::process::Command;
 
-type BoxErr = Box<dyn std::error::Error>;
-
-const COOKIE: &str = "panel_session";
-const SESSION_SECS: u64 = 7 * 86400;
-const MAX_FAILS: u32 = 10;
-const LOCK_SECS: u64 = 60;
-
-#[derive(Deserialize)]
-struct Config {
-    /// 直接监听公网口，浏览器访问 http://你的IP（80 端口不用写端口号）
-    #[serde(default = "default_bind")]
-    bind: String,
-    /// 明文密码。配置文件记得 chmod 600
-    password: String,
-    /// 放项目的目录。里面每个子文件夹算一个项目，加项目不用改这里
-    #[serde(default = "default_dirs")]
-    dirs: Vec<String>,
-    /// 不想在页面上看到的项目。三种写法：
-    ///   "scratch"      项目名，任何扫描目录下叫这个的都排掉
-    ///   "test-*"       通配符，只支持 *
-    ///   "/srv/x/old"   带 / 就按完整路径匹配，只排掉这一个
-    #[serde(default)]
-    exclude: Vec<String>,
-    /// cargo 的绝对路径。留空自动探测——systemd 起进程时 PATH 里
-    /// 通常没有 ~/.cargo/bin，所以不能直接写 "cargo"
-    #[serde(default)]
-    cargo: Option<String>,
-}
-fn default_bind() -> String {
-    "0.0.0.0:80".into()
-}
-fn default_dirs() -> Vec<String> {
-    vec!["/opt/apps".into()]
-}
+use crate::config::{BoxErr, Config, config_path};
+use crate::discover::{discover, ok_name};
+use crate::state::App;
+use crate::systemd::{
+    Picked, boot_secs, pick_project, pick_project_checked, project_units, run, show_many, unit_of,
+};
 
 #[derive(Serialize)]
 struct Status {
@@ -93,419 +79,77 @@ struct BinInst {
     uptime: Option<f64>,
 }
 
-#[derive(Serialize, Clone)]
-struct Disk {
-    mount: String,
-    used: u64,
-    total: u64,
+#[derive(Deserialize)]
+struct CargoToml {
+    package: Option<CargoPkg>,
+}
+#[derive(Deserialize)]
+struct CargoPkg {
+    name: String,
 }
 
-#[derive(Serialize)]
-struct Host {
-    /// 整机 CPU 占用百分比，首次请求拿不到（要两次采样做差）
-    cpu: Option<f64>,
-    cores: usize,
-    load: [f64; 3],
-    mem_used: u64,
-    mem_total: u64,
-    swap_used: u64,
-    swap_total: u64,
-    disks: Vec<Disk>,
-    uptime: f64,
-}
+/// 列出项目里所有能 `cargo run --bin X` 的 X：
+///   src/main.rs        -> Cargo.toml 里的包名（cargo 就是这么命名默认 bin 的）
+///   src/bin/foo.rs     -> foo
+///   src/bin/foo/main.rs -> foo
+async fn bins(dir: &std::path::Path) -> Vec<String> {
+    let mut v = Vec::new();
 
-struct App {
-    cfg: Config,
-    /// cargo 的绝对路径，启动时定好
-    cargo: String,
-    /// token -> 过期时刻
-    sessions: Mutex<HashMap<String, Instant>>,
-    /// (连续失败次数, 最后一次失败时刻)
-    fails: Mutex<(u32, Instant)>,
-    /// unit -> (上次读到的 CPU 累计纳秒, 采样时刻)
-    cpu_prev: Mutex<HashMap<String, (u64, Instant)>>,
-    /// 项目名 -> 最近一次启动的那组 (bin, 参数)。「重启」要沿用它把整组重新拉起来，
-    /// 所以要记一组而不是一个 bin。
-    last: Mutex<HashMap<String, Vec<(String, String)>>>,
-    /// 整机 CPU 的上次采样 (忙碌时间片, 总时间片)
-    host_cpu: Mutex<Option<(u64, u64)>>,
-    /// df 的结果缓存。磁盘占用变化很慢，没必要每 3 秒 fork 一个 df
-    disks: Mutex<Option<(Instant, Vec<Disk>)>>,
-}
-
-impl App {
-    fn valid_session(&self, tok: &str) -> bool {
-        let mut s = self.sessions.lock().unwrap();
-        let now = Instant::now();
-        s.retain(|_, exp| *exp > now);
-        s.contains_key(tok)
+    if dir.join("src/main.rs").is_file()
+        && let Ok(t) = tokio::fs::read_to_string(dir.join("Cargo.toml")).await
+        && let Ok(ct) = toml::from_str::<CargoToml>(&t)
+        && let Some(pkg) = ct.package
+        && ok_name(&pkg.name)
+    {
+        v.push(pkg.name);
     }
 
-    fn new_session(&self) -> Option<String> {
-        let mut b = [0u8; 32];
-        getrandom::fill(&mut b).ok()?;
-        let tok: String = b.iter().map(|x| format!("{x:02x}")).collect();
-        self.sessions.lock().unwrap().insert(
-            tok.clone(),
-            Instant::now() + Duration::from_secs(SESSION_SECS),
-        );
-        Some(tok)
-    }
-
-    /// 连续失败 MAX_FAILS 次就锁 LOCK_SECS 秒。挡的是自动化撞库：
-    /// 密码接口不限速的话，攻击者能靠并发每秒试几千次。
-    fn lockout(&self) -> Option<u64> {
-        let (n, last) = *self.fails.lock().unwrap();
-        if n < MAX_FAILS {
-            return None;
-        }
-        let e = last.elapsed().as_secs();
-        (e < LOCK_SECS).then(|| LOCK_SECS - e)
-    }
-
-    fn on_fail(&self) {
-        let mut f = self.fails.lock().unwrap();
-        if f.0 >= MAX_FAILS && f.1.elapsed().as_secs() >= LOCK_SECS {
-            *f = (0, Instant::now()); // 锁定期已过，重新计数
-        }
-        f.0 += 1;
-        f.1 = Instant::now();
-    }
-
-    /// CPUUsageNSec 是开机以来的累计值，两次采样做差才是占用率。100% = 吃满一个核
-    fn cpu(&self, unit: &str, cur: Option<u64>) -> Option<f64> {
-        let cur = cur?;
-        let now = Instant::now();
-        let (prev, t) = self
-            .cpu_prev
-            .lock()
-            .unwrap()
-            .insert(unit.to_string(), (cur, now))?;
-        let dt = now.duration_since(t).as_secs_f64();
-        // 首次采样、间隔过短、或进程重启导致计数器归零，都算不出有意义的值
-        (dt >= 0.5 && cur >= prev).then(|| (cur - prev) as f64 / 1e9 / dt * 100.0)
-    }
-}
-
-fn cookie_token(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get(header::COOKIE)?
-        .to_str()
-        .ok()?
-        .split(';')
-        .filter_map(|c| c.trim().split_once('='))
-        .find(|(k, _)| *k == COOKIE)
-        .map(|(_, v)| v)
-}
-
-// ---------- systemctl / journalctl ----------
-
-const PROPS: &str = "Id,LoadState,ActiveState,SubState,UnitFileState,MainPID,\
-                     MemoryCurrent,CPUUsageNSec,ActiveEnterTimestampMonotonic";
-
-#[derive(Clone, Default)]
-struct Raw {
-    load: String,
-    active: String,
-    sub: String,
-    enabled: String,
-    pid: u64,
-    memory: Option<u64>,
-    cpu_nsec: Option<u64>,
-    active_since_us: Option<u64>,
-}
-
-/// systemd 对「未设置」的数值属性会返回 u64::MAX 或 [not set]，都要当 None
-fn num(v: &str) -> Option<u64> {
-    match v.parse::<u64>() {
-        Ok(n) if n != u64::MAX => Some(n),
-        _ => None,
-    }
-}
-
-/// 注意是直接 exec，不经过 shell，所以参数里有什么字符都不会被解释
-async fn run(cmd: &str, args: &[&str]) -> std::io::Result<(bool, String, String)> {
-    let out = Command::new(cmd)
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .await?;
-    Ok((
-        out.status.success(),
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-        String::from_utf8_lossy(&out.stderr).into_owned(),
-    ))
-}
-
-/// 把 `systemctl show` 的一段输出解析成 Raw
-fn parse_show(block: &str) -> Raw {
-    let m: HashMap<&str, &str> = block.lines().filter_map(|l| l.split_once('=')).collect();
-    let g = |k: &str| m.get(k).copied().unwrap_or("");
-    Raw {
-        load: g("LoadState").into(),
-        active: g("ActiveState").into(),
-        sub: g("SubState").into(),
-        enabled: g("UnitFileState").into(),
-        pid: num(g("MainPID")).unwrap_or(0),
-        memory: num(g("MemoryCurrent")).filter(|&n| n > 0),
-        cpu_nsec: num(g("CPUUsageNSec")),
-        active_since_us: num(g("ActiveEnterTimestampMonotonic")).filter(|&n| n > 0),
-    }
-}
-
-/// 一次 `systemctl show` 能查多个 unit，输出按空行分段，靠 Id= 认回是谁。
-/// 这很重要：单核机器上每次刷新原来要 fork 十几个 systemctl，现在只要 1 个。
-async fn show_many(units: &[String]) -> HashMap<String, Raw> {
-    let mut out = HashMap::new();
-    if units.is_empty() {
-        return out;
-    }
-    let mut args = vec!["show", "--no-pager", "--property", PROPS, "--"];
-    args.extend(units.iter().map(String::as_str));
-    let Ok((_, stdout, _)) = run("systemctl", &args).await else {
-        return out;
-    };
-    for block in stdout.split("\n\n") {
-        if block.trim().is_empty() {
-            continue;
-        }
-        let raw = parse_show(block);
-        let id = block
-            .lines()
-            .filter_map(|l| l.split_once('='))
-            .find(|(k, _)| *k == "Id")
-            .map(|(_, v)| v.trim().to_string());
-        if let Some(id) = id {
-            out.insert(id, raw);
-        }
-    }
-    out
-}
-
-/// systemd 给的是 monotonic 时间戳，要配 /proc/uptime 才能换算成「运行了多久」
-async fn boot_secs() -> f64 {
-    tokio::fs::read_to_string("/proc/uptime")
-        .await
-        .ok()
-        .and_then(|s| s.split_whitespace().next()?.parse().ok())
-        .unwrap_or(0.0)
-}
-
-// ---------- 整机资源 ----------
-
-/// /proc/stat 第一行 `cpu  user nice system idle iowait ...` 是开机以来的累计
-/// 时间片，两次采样做差才是占用率。idle 和 iowait 都算「没在干活」。
-/// 返回 (忙碌, 总计)。
-fn parse_cpu_line(s: &str) -> Option<(u64, u64)> {
-    let rest = s.lines().next()?.strip_prefix("cpu ")?;
-    let v: Vec<u64> = rest
-        .split_whitespace()
-        .filter_map(|x| x.parse().ok())
-        .collect();
-    if v.len() < 5 {
-        return None;
-    }
-    let total: u64 = v.iter().sum();
-    let busy = total.checked_sub(v[3] + v[4])?;
-    Some((busy, total))
-}
-
-/// /proc/meminfo 的值单位是 kB，这里统一换成字节
-fn parse_meminfo(s: &str) -> HashMap<&str, u64> {
-    s.lines()
-        .filter_map(|l| {
-            let (k, v) = l.split_once(':')?;
-            let n: u64 = v.split_whitespace().next()?.parse().ok()?;
-            Some((k, n * 1024))
-        })
-        .collect()
-}
-
-fn parse_loadavg(s: &str) -> [f64; 3] {
-    let mut out = [0.0; 3];
-    for (i, x) in s.split_whitespace().take(3).enumerate() {
-        out[i] = x.parse().unwrap_or(0.0);
-    }
-    out
-}
-
-/// 解析 `df -kP` 的输出。用 used+avail 当总量而不是第二列的 1K-blocks：
-/// 后者含保留块，跟 df 自己算 Use% 的分母不一致，会显得对不上。
-fn parse_df(s: &str) -> Vec<Disk> {
-    let mut v: Vec<Disk> = Vec::new();
-    for l in s.lines().skip(1) {
-        let f: Vec<&str> = l.split_whitespace().collect();
-        if f.len() < 6 {
-            continue;
-        }
-        let (Ok(used), Ok(avail)) = (f[2].parse::<u64>(), f[3].parse::<u64>()) else {
-            continue;
-        };
-        let mount = f[5].to_string();
-        // 几个扫描目录常常在同一个分区上，同一挂载点只报一次
-        if v.iter().any(|d| d.mount == mount) {
-            continue;
-        }
-        v.push(Disk {
-            mount,
-            used: used * 1024,
-            total: (used + avail) * 1024,
-        });
-    }
-    v
-}
-
-async fn host_stats(app: &App) -> Host {
-    let cpu = tokio::fs::read_to_string("/proc/stat")
-        .await
-        .ok()
-        .as_deref()
-        .and_then(parse_cpu_line)
-        .and_then(|cur| {
-            let prev = app.host_cpu.lock().unwrap().replace(cur);
-            let (pb, pt) = prev?;
-            let dt = cur.1.checked_sub(pt)?;
-            let db = cur.0.checked_sub(pb)?;
-            (dt > 0).then(|| db as f64 / dt as f64 * 100.0)
-        });
-
-    let mem = tokio::fs::read_to_string("/proc/meminfo")
-        .await
-        .unwrap_or_default();
-    let mem = parse_meminfo(&mem);
-    let g = |k: &str| mem.get(k).copied().unwrap_or(0);
-    // 用 MemAvailable 而不是 MemFree：缓存那部分随时能让出来，不算「已用」
-    let mem_total = g("MemTotal");
-    let mem_used = mem_total.saturating_sub(g("MemAvailable"));
-    let swap_total = g("SwapTotal");
-    let swap_used = swap_total.saturating_sub(g("SwapFree"));
-
-    let load = parse_loadavg(
-        &tokio::fs::read_to_string("/proc/loadavg")
-            .await
-            .unwrap_or_default(),
-    );
-
-    // 只查关心的路径，省得把 tmpfs 和 snap 的 loop 设备全列出来。
-    // 结果缓存 30 秒：磁盘占用变化很慢，不值得每次刷新都 fork 一个 df
-    let cached = {
-        let c = app.disks.lock().unwrap();
-        c.as_ref()
-            .filter(|(t, _)| t.elapsed() < Duration::from_secs(30))
-            .map(|(_, d)| d.clone())
-    };
-    let disks = match cached {
-        Some(d) => d,
-        None => {
-            let mut args = vec!["-kP", "--", "/"];
-            args.extend(app.cfg.dirs.iter().map(String::as_str));
-            let d = match run("df", &args).await {
-                Ok((_, out, _)) => parse_df(&out),
-                Err(_) => Vec::new(),
-            };
-            *app.disks.lock().unwrap() = Some((Instant::now(), d.clone()));
-            d
-        }
-    };
-
-    Host {
-        cpu,
-        cores: std::thread::available_parallelism().map_or(1, |n| n.get()),
-        load,
-        mem_used,
-        mem_total,
-        swap_used,
-        swap_total,
-        disks,
-        uptime: boot_secs().await,
-    }
-}
-
-// ---------- 项目发现 ----------
-
-/// 文件夹名会拼成 unit 名交给 systemctl，所以只放行安全字符。
-/// 开头是 - 会被当成命令行选项，开头是 . 的是隐藏目录（.git 之类）。
-fn ok_name(n: &str) -> bool {
-    !n.is_empty()
-        && n.len() <= 100
-        && !n.starts_with(['-', '.'])
-        && n.chars()
-            .all(|c| c.is_ascii_alphanumeric() || "._@-".contains(c))
-}
-
-/// 只支持 * 的通配匹配，够用又不用引依赖。没有 * 就是全等。
-fn glob_match(pat: &str, s: &str) -> bool {
-    let segs: Vec<&str> = pat.split('*').collect();
-    if segs.len() == 1 {
-        return pat == s;
-    }
-    // 第一段必须顶在开头（pat 以 * 开头时这段是空串，恒成立）
-    let Some(mut rest) = s.strip_prefix(segs[0]) else {
-        return false;
-    };
-    let last = segs.len() - 1;
-    for (i, seg) in segs.iter().enumerate().skip(1) {
-        if i == last {
-            // 最后一段必须落在末尾（pat 以 * 结尾时是空串，恒成立）
-            return rest.ends_with(seg);
-        }
-        if seg.is_empty() {
-            continue; // ** 跟 * 一个意思
-        }
-        let Some(at) = rest.find(seg) else {
-            return false;
-        };
-        rest = &rest[at + seg.len()..];
-    }
-    true
-}
-
-/// 黑名单：带 / 的按完整路径比，不带的按项目名比
-fn excluded(patterns: &[String], name: &str, dir: &std::path::Path) -> bool {
-    let path = dir.to_string_lossy().replace('\\', "/");
-    patterns.iter().any(|p| {
-        if p.contains('/') {
-            glob_match(p.trim_end_matches('/'), path.trim_end_matches('/'))
-        } else {
-            glob_match(p, name)
-        }
-    })
-}
-
-/// 面板自己的项目目录要排掉：它往往就在扫描目录里，
-/// 但从面板里重启面板等于自杀，列出来只会误点。
-/// 二进制在 <项目>/target/{debug,release}/panel，所以看 exe 是否在这个目录之下。
-fn is_self(dir: &std::path::Path) -> bool {
-    let Ok(exe) = std::env::current_exe().and_then(|p| p.canonicalize()) else {
-        return false;
-    };
-    dir.canonicalize().is_ok_and(|d| exe.starts_with(d))
-}
-
-/// 扫配置里的目录，每个子文件夹算一个项目，返回 (项目名, 绝对路径)。
-/// 每次请求都重新扫，所以新建文件夹后刷新网页就能看到，不用重启面板。
-async fn discover(dirs: &[String], exclude: &[String]) -> Vec<(String, PathBuf)> {
-    let mut out = Vec::new();
-    for d in dirs {
-        let Ok(mut rd) = tokio::fs::read_dir(d).await else {
-            continue; // 目录不存在就跳过，不影响其它目录
-        };
+    if let Ok(mut rd) = tokio::fs::read_dir(dir.join("src/bin")).await {
         while let Ok(Some(e)) = rd.next_entry().await {
-            let is_dir = e.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
-            let name = e.file_name().to_string_lossy().into_owned();
-            if is_dir
-                && ok_name(&name)
-                && !is_self(&e.path())
-                && !excluded(exclude, &name, &e.path())
+            let p = e.path();
+            let name = if p.extension().is_some_and(|x| x == "rs") {
+                p.file_stem()
+            } else if p.join("main.rs").is_file() {
+                p.file_name()
+            } else {
+                None
+            };
+            if let Some(n) = name.map(|n| n.to_string_lossy().into_owned())
+                && ok_name(&n)
             {
-                out.push((name, e.path()));
+                v.push(n);
             }
         }
     }
-    out.sort();
-    out.dedup_by(|a, b| a.0 == b.0);
-    out
+
+    v.sort();
+    v.dedup();
+    v
 }
+
+/// systemd 起的进程 PATH 里没有 ~/.cargo/bin，所以要拿到 cargo 的绝对路径
+fn find_cargo(explicit: Option<&str>) -> Option<String> {
+    if let Some(p) = explicit {
+        return std::path::Path::new(p).is_file().then(|| p.to_string());
+    }
+    let mut cands = Vec::new();
+    if let Ok(h) = std::env::var("HOME") {
+        cands.push(format!("{h}/.cargo/bin/cargo"));
+    }
+    for p in [
+        "/root/.cargo/bin/cargo",
+        "/usr/local/cargo/bin/cargo",
+        "/usr/local/bin/cargo",
+        "/usr/bin/cargo",
+    ] {
+        cands.push(p.into());
+    }
+    cands
+        .into_iter()
+        .find(|p| std::path::Path::new(p).is_file())
+}
+
+// ---------- 面板外进程 ----------
 
 /// 扫一遍 /proc 拿到所有进程的 exe 路径。每次刷新只扫一次，
 /// 再拿去跟各个项目目录比对，避免 N 个项目扫 N 遍 /proc。
@@ -586,171 +230,6 @@ async fn stop_pids(pids: &[u32]) -> (bool, String) {
     }
 }
 
-/// 每个运行实例对应一个独立的 transient unit，名字加 panel- 前缀避免撞上系统里的服务。
-/// 一个项目会计着多个 bin 同时跑，所以 unit 名要带上 bin —— systemd-run 不允许两个
-/// active 的 unit 同名，不带 bin 的话第二个 bin 就起不来了。
-fn unit_of(project: &str, bin: &str) -> String {
-    format!("panel-{project}-{bin}.service")
-}
-
-/// 一个项目在面板里可能占着的全部候选 unit：
-///   每个 bin 一个面板 unit（panel-{p}-{bin}.service），
-///   加上你可能自己写过的 {p}.service。
-/// 刷新和 stop 都要把「这一个项目」跟 unit 群对上号。
-fn project_units(project: &str, bins: &[String]) -> Vec<String> {
-    let mut v: Vec<String> = bins
-        .iter()
-        .map(|b| unit_of(project, b))
-        .chain(std::iter::once(format!("{project}.service")))
-        .collect();
-    v.sort();
-    v.dedup();
-    v
-}
-
-/// 面板自己起的、用于某个 bin 的 unit 名拼接出来的 bin（unit_of 的逆运算）。
-/// 只用来把「哪些 bin 正在由面板跑着」翻译成前端可读的名字。
-fn bin_of_panel_unit(project: &str, unit: &str) -> Option<String> {
-    let prefix = format!("panel-{project}-");
-    unit.strip_prefix(&prefix)
-        .and_then(|s| s.strip_suffix(".service"))
-        .map(str::to_string)
-}
-
-/// 一个项目在面板里可能同时跑着多个 bin，各自一个 panel-{p}-{bin} unit，
-/// 也可能有你手写的 {p}.service。刷新时把「这一个项目」聚合成一个可见的行：
-/// 挑一个 unit 当主 unit 报状态，并把「当前由面板起着、在跑的 bins」汇总出来
-/// 给前端回显勾选。
-struct Picked {
-    /// 主 unit 名，展示和查日志用
-    unit: String,
-    /// 主 unit 是不是你自己写的 {p}.service（外部 unit，面板只做启停不选 bin）
-    external: bool,
-    raw: Raw,
-    /// 当前由面板起着（active）的各 bin 名。前端靠它回显「这个项目现在跑着哪些 bin」
-    running_bins: Vec<String>,
-}
-
-/// 从 show_many 的结果里把一个项目的全部 unit 收拢（只读，不改动 shown）。
-/// 主 unit 挑选：面板的 bin unit 里谁在跑取谁；没在跑再退回你手写的 unit；
-/// 都没有就按第一个面板 unit 报「未运行」。
-fn pick_project(shown: &HashMap<String, Raw>, project: &str, bins: &[String]) -> Picked {
-    let theirs = format!("{project}.service");
-
-    let mut rows: Vec<(String, Raw)> = project_units(project, bins)
-        .into_iter()
-        .map(|u| {
-            let r = shown.get(&u).cloned().unwrap_or_default();
-            (u, r)
-        })
-        .collect();
-    // 手写的 unit 总是最后一个，方便下面区分
-    rows.sort_by_key(|(u, _)| if u.as_str() == theirs { 1 } else { 0 });
-
-    // 正在由面板起着（active）的 bin
-    let running_bins: Vec<String> = rows
-        .iter()
-        .filter(|(u, r)| u.as_str() != theirs && r.active == "active")
-        .filter_map(|(u, _)| bin_of_panel_unit(project, u))
-        .collect();
-
-    // 主 unit：优先面板里正在跑的 bin unit，其次你手写的在跑的 unit，再退回第一个
-    let primary = rows
-        .iter()
-        .find(|(u, r)| u.as_str() != theirs && r.active == "active")
-        .or_else(|| rows.iter().find(|(u, r)| u.as_str() == theirs && r.active == "active"))
-        .or_else(|| rows.first())
-        .unwrap(); // bins 至少让 project_units 有一个面板 unit，不会空
-    let external = primary.0.as_str() == theirs;
-
-    Picked {
-        unit: primary.0.clone(),
-        external,
-        raw: primary.1.clone(),
-        running_bins,
-    }
-}
-
-/// 单个项目用的版本：一次 systemctl show 查目标 bin 的所有候选名，一个进程搞定
-async fn pick_project_checked(
-    project: &str,
-    bins: &[String],
-) -> Picked {
-    let cands = project_units(project, bins);
-    let shown = show_many(&cands).await;
-    pick_project(&shown, project, bins)
-}
-
-#[derive(Deserialize)]
-struct CargoToml {
-    package: Option<CargoPkg>,
-}
-#[derive(Deserialize)]
-struct CargoPkg {
-    name: String,
-}
-
-/// 列出项目里所有能 `cargo run --bin X` 的 X：
-///   src/main.rs        -> Cargo.toml 里的包名（cargo 就是这么命名默认 bin 的）
-///   src/bin/foo.rs     -> foo
-///   src/bin/foo/main.rs -> foo
-async fn bins(dir: &std::path::Path) -> Vec<String> {
-    let mut v = Vec::new();
-
-    if dir.join("src/main.rs").is_file()
-        && let Ok(t) = tokio::fs::read_to_string(dir.join("Cargo.toml")).await
-        && let Ok(ct) = toml::from_str::<CargoToml>(&t)
-        && let Some(pkg) = ct.package
-        && ok_name(&pkg.name)
-    {
-        v.push(pkg.name);
-    }
-
-    if let Ok(mut rd) = tokio::fs::read_dir(dir.join("src/bin")).await {
-        while let Ok(Some(e)) = rd.next_entry().await {
-            let p = e.path();
-            let name = if p.extension().is_some_and(|x| x == "rs") {
-                p.file_stem()
-            } else if p.join("main.rs").is_file() {
-                p.file_name()
-            } else {
-                None
-            };
-            if let Some(n) = name.map(|n| n.to_string_lossy().into_owned())
-                && ok_name(&n)
-            {
-                v.push(n);
-            }
-        }
-    }
-
-    v.sort();
-    v.dedup();
-    v
-}
-
-/// systemd 起的进程 PATH 里没有 ~/.cargo/bin，所以要拿到 cargo 的绝对路径
-fn find_cargo(explicit: Option<&str>) -> Option<String> {
-    if let Some(p) = explicit {
-        return std::path::Path::new(p).is_file().then(|| p.to_string());
-    }
-    let mut cands = Vec::new();
-    if let Ok(h) = std::env::var("HOME") {
-        cands.push(format!("{h}/.cargo/bin/cargo"));
-    }
-    for p in [
-        "/root/.cargo/bin/cargo",
-        "/usr/local/cargo/bin/cargo",
-        "/usr/local/bin/cargo",
-        "/usr/bin/cargo",
-    ] {
-        cands.push(p.into());
-    }
-    cands
-        .into_iter()
-        .find(|p| std::path::Path::new(p).is_file())
-}
-
 // ---------- 接口 ----------
 
 async fn index() -> impl IntoResponse {
@@ -775,44 +254,8 @@ async fn hljs_js() -> impl IntoResponse {
     )
 }
 
-#[derive(Deserialize)]
-struct LoginReq {
-    password: String,
-}
-
-async fn login(State(app): State<Arc<App>>, Json(body): Json<LoginReq>) -> Response {
-    if let Some(wait) = app.lockout() {
-        let msg = format!("失败次数过多，请 {wait} 秒后再试");
-        return (StatusCode::TOO_MANY_REQUESTS, msg).into_response();
-    }
-    if body.password != app.cfg.password {
-        app.on_fail();
-        return (StatusCode::UNAUTHORIZED, "密码错误").into_response();
-    }
-    *app.fails.lock().unwrap() = (0, Instant::now());
-
-    let Some(tok) = app.new_session() else {
-        return (StatusCode::INTERNAL_SERVER_ERROR, "无法生成会话").into_response();
-    };
-    let c = format!("{COOKIE}={tok}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_SECS}");
-    (StatusCode::NO_CONTENT, [(header::SET_COOKIE, c)]).into_response()
-}
-
-async fn logout(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
-    if let Some(t) = cookie_token(&headers) {
-        app.sessions.lock().unwrap().remove(t);
-    }
-    let c = format!("{COOKIE}=; Path=/; Max-Age=0");
-    (StatusCode::NO_CONTENT, [(header::SET_COOKIE, c)]).into_response()
-}
-
-/// 前端拿它判断「cookie 还有效吗」，能进来就说明有效
-async fn me() -> StatusCode {
-    StatusCode::NO_CONTENT
-}
-
-async fn host(State(app): State<Arc<App>>) -> Json<Host> {
-    Json(host_stats(&app).await)
+async fn host(State(app): State<Arc<App>>) -> Json<hostinfo::Host> {
+    Json(hostinfo::host_stats(&app).await)
 }
 
 async fn units(State(app): State<Arc<App>>) -> Json<Vec<Status>> {
@@ -1435,15 +878,6 @@ async fn pull(State(app): State<Arc<App>>, Path(key): Path<String>) -> Response 
     }
 }
 
-async fn require_auth(State(app): State<Arc<App>>, req: Request, next: Next) -> Response {
-    let ok = cookie_token(req.headers()).is_some_and(|t| app.valid_session(t));
-    if ok {
-        next.run(req).await
-    } else {
-        StatusCode::UNAUTHORIZED.into_response()
-    }
-}
-
 #[tokio::main]
 async fn main() {
     // 单独包一层：直接从 main 返回 Err 的话，输出是 Debug 格式
@@ -1465,43 +899,6 @@ async fn no_cache(req: Request, next: Next) -> Response {
             .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     }
     res
-}
-
-/// 找配置文件，按这个顺序：
-///   1. 环境变量 PANEL_CONFIG
-///   2. 当前目录下的 panel.toml       —— 在源码目录里 cargo run / ./target/debug/panel
-///   3. 可执行文件旁边的 panel.toml   —— 部署成 /opt/panel/{panel, panel.toml}
-///   4. /etc/panel.toml
-///
-/// 2 和 3 缺一不可：cargo run 时可执行文件在 target/debug/ 里，跟你放配置的
-/// 项目根目录不是一个地方；而 systemd 启动服务时工作目录是 /，第 2 条又指不到。
-fn config_path() -> Result<std::path::PathBuf, BoxErr> {
-    if let Ok(p) = std::env::var("PANEL_CONFIG") {
-        return Ok(p.into());
-    }
-    let mut tried = Vec::new();
-    if let Ok(cwd) = std::env::current_dir() {
-        tried.push(cwd.join("panel.toml"));
-    }
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        tried.push(dir.join("panel.toml"));
-    }
-    tried.push("/etc/panel.toml".into());
-    tried.dedup(); // 直接在部署目录里跑的时候，前两条是同一个路径
-
-    if let Some(found) = tried.iter().find(|p| p.is_file()) {
-        return Ok(found.clone());
-    }
-    let list: Vec<String> = tried.iter().map(|p| format!("  {}", p.display())).collect();
-    Err(format!(
-        "找不到配置文件，这几个位置都看过了：\n{}\n\
-         照 panel.toml.example 改一份，放到上面任意一个位置；\
-         或者用 PANEL_CONFIG=/你的/路径 指定",
-        list.join("\n")
-    )
-    .into())
 }
 
 async fn start() -> Result<(), BoxErr> {
@@ -1539,21 +936,12 @@ async fn start() -> Result<(), BoxErr> {
     let exclude = cfg.exclude.clone();
     let dirs = cfg.dirs.clone();
 
-    let app = Arc::new(App {
-        cfg,
-        cargo: cargo.clone(),
-        sessions: Mutex::new(HashMap::new()),
-        fails: Mutex::new((0, Instant::now())),
-        cpu_prev: Mutex::new(HashMap::new()),
-        last: Mutex::new(HashMap::new()),
-        host_cpu: Mutex::new(None),
-        disks: Mutex::new(None),
-    });
+    let app = App::new(cfg, cargo.clone());
 
     // 除了首页和登录接口，其它一律要带有效 cookie
     let protected = Router::new()
-        .route("/api/me", get(me))
-        .route("/api/logout", post(logout))
+        .route("/api/me", get(auth::me))
+        .route("/api/logout", post(auth::logout))
         .route("/api/units", get(units))
         .route("/api/host", get(host))
         .route("/api/units/{key}/logs", get(logs))
@@ -1562,12 +950,12 @@ async fn start() -> Result<(), BoxErr> {
         .route("/api/units/{key}/pull", get(pull))
         .route("/api/units/{key}/bins/{bin}/{action}", post(bin_action))
         .route("/api/units/{key}/{action}", post(action))
-        .layer(middleware::from_fn_with_state(app.clone(), require_auth));
+        .layer(middleware::from_fn_with_state(app.clone(), auth::require_auth));
 
     let router = Router::new()
         .route("/", get(index))
         .route("/vendor/highlight.11.12.0.min.js", get(hljs_js))
-        .route("/api/login", post(login))
+        .route("/api/login", post(auth::login))
         .merge(protected)
         .layer(middleware::from_fn(no_cache))
         .with_state(app);
@@ -1604,20 +992,6 @@ async fn start() -> Result<(), BoxErr> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn 文件夹名只放行安全字符() {
-        assert!(ok_name("blog"));
-        assert!(ok_name("my-api_2.0"));
-        assert!(ok_name("tpl@inst"));
-        assert!(!ok_name(""));
-        assert!(!ok_name(".git")); // 隐藏目录
-        assert!(!ok_name("-rf")); // 会被当成命令行选项
-        assert!(!ok_name("a b")); // 空格
-        assert!(!ok_name("../etc")); // 路径穿越
-        assert!(!ok_name("naïve")); // 非 ASCII
-        assert!(!ok_name(&"x".repeat(101)));
-    }
 
     #[test]
     fn 不带参数时不加双横线() {
@@ -1676,182 +1050,6 @@ mod tests {
         let dir = PathBuf::from("/root/rust_project/xau");
         assert_eq!(find_outside(&exes, &dir), vec![1, 3]);
         assert!(find_outside(&exes, &PathBuf::from("/root/rust_project/nope")).is_empty());
-    }
-
-    #[test]
-    fn 通配符只认星号() {
-        assert!(glob_match("panel", "panel"));
-        assert!(!glob_match("panel", "panel2"));
-        assert!(glob_match("test-*", "test-a"));
-        assert!(glob_match("test-*", "test-")); // * 可以匹配空
-        assert!(!glob_match("test-*", "tes"));
-        assert!(glob_match("*-old", "proj-old"));
-        assert!(!glob_match("*-old", "proj-new"));
-        assert!(glob_match("*tmp*", "my-tmp-thing"));
-        assert!(glob_match("a*b", "ab")); // 中间可以是空
-        assert!(!glob_match("a*b", "a"));
-        assert!(glob_match("*", "随便什么"));
-        assert!(glob_match("/srv/*/old", "/srv/x/old"));
-        assert!(!glob_match("/srv/*/old", "/srv/x/new"));
-    }
-
-    #[test]
-    fn 黑名单按名字或路径匹配() {
-        let dir = PathBuf::from("/root/rust_project/panel");
-        // 不带 / 的按项目名比
-        assert!(excluded(&["panel".into()], "panel", &dir));
-        assert!(!excluded(&["panel".into()], "xau", &dir));
-        assert!(excluded(&["pa*".into()], "panel", &dir));
-        // 带 / 的按完整路径比，同名但不同路径的不受影响
-        assert!(excluded(
-            &["/root/rust_project/panel".into()],
-            "panel",
-            &dir
-        ));
-        assert!(!excluded(&["/srv/apps/panel".into()], "panel", &dir));
-        assert!(excluded(&["/root/rust_project/*".into()], "panel", &dir));
-        // 末尾多个斜杠不该影响判断
-        assert!(excluded(
-            &["/root/rust_project/panel/".into()],
-            "panel",
-            &dir
-        ));
-        assert!(!excluded(&[], "panel", &dir));
-    }
-
-    #[test]
-    fn 整机cpu两次采样做差() {
-        // idle(3) 和 iowait(4) 算没干活，其余都算忙
-        let a = "cpu  100 0 100 800 0 0 0 0 0 0\nintr 1\n";
-        let b = "cpu  200 0 100 1000 0 0 0 0 0 0\nintr 1\n";
-        assert_eq!(parse_cpu_line(a), Some((200, 1000)));
-        assert_eq!(parse_cpu_line(b), Some((300, 1300)));
-        // 忙碌增量 100 / 总增量 300 ≈ 33.3%
-        let (b0, t0) = parse_cpu_line(a).unwrap();
-        let (b1, t1) = parse_cpu_line(b).unwrap();
-        let pct = (b1 - b0) as f64 / (t1 - t0) as f64 * 100.0;
-        assert!((pct - 33.333).abs() < 0.01, "{pct}");
-        // 字段不够、或者压根不是 cpu 行，都要给 None 而不是 panic
-        assert_eq!(parse_cpu_line("cpu  1 2 3\n"), None);
-        assert_eq!(parse_cpu_line("cpu0 1 2 3 4 5\n"), None);
-        assert_eq!(parse_cpu_line(""), None);
-    }
-
-    #[test]
-    fn 内存按可用量算已用() {
-        let s = "MemTotal:        4030464 kB\n\
-                 MemFree:          123456 kB\n\
-                 MemAvailable:    3000000 kB\n\
-                 SwapTotal:             0 kB\n\
-                 SwapFree:              0 kB\n";
-        let m = parse_meminfo(s);
-        assert_eq!(m.get("MemTotal"), Some(&(4030464 * 1024)));
-        // 已用 = Total - Available，不是 Total - Free（缓存随时能让出来）
-        assert_eq!(m["MemTotal"] - m["MemAvailable"], 1030464 * 1024);
-        assert_eq!(m.get("SwapTotal"), Some(&0));
-        assert_eq!(parse_meminfo("垃圾行\n").len(), 0);
-    }
-
-    #[test]
-    fn 负载取前三个数() {
-        assert_eq!(
-            parse_loadavg("0.42 0.30 0.25 1/234 5678\n"),
-            [0.42, 0.30, 0.25]
-        );
-        assert_eq!(parse_loadavg(""), [0.0, 0.0, 0.0]);
-    }
-
-    #[test]
-    fn df输出解析且挂载点去重() {
-        let s = "Filesystem     1024-blocks     Used Available Capacity Mounted on\n\
-                 /dev/sda1         50432764 18000000  29000000      39% /\n\
-                 /dev/sda1         50432764 18000000  29000000      39% /\n\
-                 tmpfs               403044        0    403044       0% /dev/shm\n\
-                 坏行\n";
-        let d = parse_df(s);
-        assert_eq!(d.len(), 2, "同一挂载点只能出现一次");
-        assert_eq!(d[0].mount, "/");
-        assert_eq!(d[0].used, 18_000_000 * 1024);
-        // 总量用 used+avail，跟 df 自己算 Use% 的分母一致
-        assert_eq!(d[0].total, (18_000_000 + 29_000_000) * 1024);
-        assert_eq!(d[1].mount, "/dev/shm");
-        assert!(parse_df("只有表头\n").is_empty());
-    }
-
-    #[test]
-    fn 一次show多个unit按id分段() {
-        // systemctl show 多个 unit 时，每段之间是一个空行
-        let out = "Id=panel-xau.service\nLoadState=not-found\nActiveState=inactive\n\
-                   SubState=dead\nUnitFileState=\nMainPID=0\nMemoryCurrent=[not set]\n\
-                   CPUUsageNSec=[not set]\nActiveEnterTimestampMonotonic=0\n\
-                   \n\
-                   Id=xau.service\nLoadState=loaded\nActiveState=active\nSubState=running\n\
-                   UnitFileState=enabled\nMainPID=4242\nMemoryCurrent=52428800\n\
-                   CPUUsageNSec=1500000000\nActiveEnterTimestampMonotonic=9000000\n";
-        let mut m: HashMap<String, Raw> = HashMap::new();
-        for block in out.split("\n\n") {
-            if block.trim().is_empty() {
-                continue;
-            }
-            let id = block
-                .lines()
-                .filter_map(|l| l.split_once('='))
-                .find(|(k, _)| *k == "Id")
-                .map(|(_, v)| v.trim().to_string())
-                .unwrap();
-            m.insert(id, parse_show(block));
-        }
-        assert_eq!(m.len(), 2);
-        assert_eq!(m["panel-xau.service"].load, "not-found");
-        assert_eq!(m["xau.service"].active, "active");
-        assert_eq!(m["xau.service"].pid, 4242);
-        assert_eq!(m["xau.service"].memory, Some(52428800));
-        // [not set] 要当 None，不能 panic
-        assert_eq!(m["panel-xau.service"].memory, None);
-        assert_eq!(m["panel-xau.service"].active_since_us, None);
-
-        // 手写的 xau.service 在跑 —— 但面板自己的 bin unit 在跑时优先作为主子 unit，
-        // 手写的只算备选；这里只有手写的在跑，所以选它并标成 external
-        let m2 = m.clone();
-        let picked = pick_project(&m2, "xau", &["web".to_string()]);
-        assert_eq!(picked.unit, "xau.service");
-        assert!(picked.external);
-        assert_eq!(picked.raw.pid, 4242);
-        assert!(picked.running_bins.is_empty());
-    }
-
-    #[test]
-    fn 多bin同时起着各自归进running_bins且以面板unit为主() {
-        let mk = |load: &str, active: &str| Raw {
-            load: load.into(),
-            active: active.into(),
-            enabled: "enabled".into(),
-            pid: 1000,
-            ..Raw::default()
-        };
-        // 项目 xau 两个 bin 同时起着，你手写的 xau.service 也在跑
-        let m = HashMap::from([
-            ("panel-xau-web.service".to_string(), mk("loaded", "active")),
-            ("panel-xau-api.service".to_string(), mk("loaded", "active")),
-            ("xau.service".to_string(), mk("loaded", "active")),
-        ]);
-        let bins = vec!["web".to_string(), "api".to_string()];
-        let p = pick_project(&m, "xau", &bins);
-        // 主 unit 优先面板里在跑的 bin unit（具体是哪个 bin 无关紧要）
-        assert!(!p.external);
-        assert!(p.unit.starts_with("panel-xau-"));
-        // 两个在跑的 bin 都要汇总给前端回显
-        assert_eq!(p.running_bins.len(), 2);
-        assert!(p.running_bins.contains(&"web".to_string()));
-        assert!(p.running_bins.contains(&"api".to_string()));
-
-        // 一个都没跑时：按某个面板 unit 报未运行，主 unit 算面板的、不算 external
-        let empty: HashMap<String, Raw> = HashMap::new();
-        let p2 = pick_project(&empty, "xau", &bins);
-        assert!(!p2.external);
-        assert!(p2.unit.starts_with("panel-xau-"));
-        assert_eq!(p2.raw.load, "");
-        assert!(p2.running_bins.is_empty());
     }
 
     #[test]
