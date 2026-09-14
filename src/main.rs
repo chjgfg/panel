@@ -763,6 +763,8 @@ async fn index() -> impl IntoResponse {
 // 语法高亮用 highlight.js，和页面一样编译时嵌进二进制，部署不依赖外网。
 // 文件名带版本号，升级换文件名即可让缓存失效，可以放心设长缓存
 // （no_cache 中间件里对 /vendor/ 单独放行）。
+// token 配色不用官方主题 CSS：它把 code.hljs 设成 display:block 会打断
+// 行内布局，且十几类 token 挤一两个颜色分不出来——配色面板自己写。
 async fn hljs_js() -> impl IntoResponse {
     (
         [
@@ -770,16 +772,6 @@ async fn hljs_js() -> impl IntoResponse {
             (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
         ],
         include_str!("../static/vendor/highlight.11.12.0.min.js"),
-    )
-}
-
-async fn hljs_css() -> impl IntoResponse {
-    (
-        [
-            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
-            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
-        ],
-        include_str!("../static/vendor/highlight.11.12.0.min.css"),
     )
 }
 
@@ -1575,7 +1567,6 @@ async fn start() -> Result<(), BoxErr> {
     let router = Router::new()
         .route("/", get(index))
         .route("/vendor/highlight.11.12.0.min.js", get(hljs_js))
-        .route("/vendor/highlight.11.12.0.min.css", get(hljs_css))
         .route("/api/login", post(login))
         .merge(protected)
         .layer(middleware::from_fn(no_cache))

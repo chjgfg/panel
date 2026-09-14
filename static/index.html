@@ -355,40 +355,61 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
 .src-msg.ok { color: var(--on); }
 .src-msg.bad { color: var(--bad); }
 #srcBody {
-  flex: 1; min-height: 0; overflow: auto; margin: 0; padding: .6rem 0;
-  font: 12.5px/1.5 ui-monospace, Consolas, monospace;
+  flex: 1; min-height: 0; overflow: auto; margin: 0; padding: .65rem 0;
+  font: 12.5px/1.6 ui-monospace, Consolas, monospace;
+  tab-size: 4;
   /* 源码可以折行吗?不折,一行 import 就能看出层次。太长横向滚动看 */
   white-space: pre;
   counter-reset: ln;
+  /* 行号与 token 调色板。深浅两套在 html.light 里整体换,语义到颜色的映射不变:
+     行号=灰,关键字=紫,函数=蓝,字符串=绿,数字=橙,类型=青,属性=琥珀,语言内建变量=红 */
+  --ln: #3d4466;
+  --tk-fg: #a9b1d6; --tk-kw: #bb9af7; --tk-fn: #7aa2f7; --tk-str: #9ece6a;
+  --tk-num: #ff9e64; --tk-com: #565f89; --tk-type: #2ac3de; --tk-attr: #e0af68;
+  --tk-var: #f7768e;
 }
-/* ---------- 语法高亮 ----------
-   用 highlight.js(本地 vendor,编译时嵌进二进制,不走 CDN——面板可能没外网)。
-   一行一个 .cl div(CSS 计数器出行号),token 的颜色由 tokyo-night-dark 主题上色。
-   主题只给深色一套:浅色模式下套 .light 作用域覆盖回面板自己的柔和色。 */
-#srcBody .cl { white-space: pre; padding-right: 1.2rem; }
+html.light #srcBody {
+  --ln: #a0a8b8;
+  --tk-fg: #2a2f3a; --tk-kw: #8250df; --tk-fn: #0550ae; --tk-str: #0a7d3f;
+  --tk-num: #b3541e; --tk-com: #6e7781; --tk-type: #0f7ea8; --tk-attr: #954f0e;
+  --tk-var: #cf222e;
+}
+/* ---------- 源码行:gutter 与代码两列 ----------
+   每行 .cl 是一行 flex:左列 ::before 是行号(右对齐、定宽,宽度 --ln-w 由 JS
+   按总行数位数设,几个字符就几 ch),右列 code 是代码。两列 baseline 对齐,
+   行号右边一道细分隔线 + 固定间距,和代码不挤在一起;
+   行号 sticky 钉在左边,横向滚长行时代码从行号底下滚过去 */
+#srcBody .cl { display: flex; align-items: baseline; }
 #srcBody .cl::before {
   counter-increment: ln;
   content: counter(ln);
-  display: inline-block; min-width: 3.2em; margin: 0 1rem 0 .9rem;
-  text-align: right; color: #3d4466; user-select: none;
-  /* 横向滚长行时,代码从行号底下滚过去,行号钉死在左边 */
+  flex: none; width: var(--ln-w, 3ch);
+  padding-right: .75rem; margin-right: 1.1rem;
+  text-align: right; color: var(--ln); user-select: none;
+  border-right: 1px solid var(--line);
   position: sticky; left: 0; background: var(--card);
 }
-/* highlight.js 的 token 色直接用主题,只需接管行号/背景这些面板自己的部分 */
-#srcBody .hljs { background: transparent; padding: 0; }
-/* 浅色模式下 35 门语言的深色主题没法逐个换,统一压成面板自己的低饱和配色:
-   token 类名是 highlight.js 的语义类(keyword/string/number/comment/…) */
-html.light #srcBody .hljs-keyword { color: #8250df; }
-html.light #srcBody .hljs-title { color: #6f42c1; }
-html.light #srcBody .hljs-title.function_ { color: #6639ba; }
-html.light #srcBody .hljs-string, html.light #srcBody .hljs-regexp { color: #0a7d3f; }
-html.light #srcBody .hljs-number, html.light #srcBody .hljs-literal { color: #b3541e; }
-html.light #srcBody .hljs-comment, html.light #srcBody .hljs-meta { color: #6e7781; font-style: italic; }
-html.light #srcBody .hljs-type, html.light #srcBody .hljs-built_in { color: #0f7ea8; }
-html.light #srcBody .hljs-attr, html.light #srcBody .hljs-attribute { color: #954f0e; }
-html.light #srcBody .hljs-variable, html.light #srcBody .hljs-variable.language_ { color: #cf222e; }
-html.light #srcBody .hljs-symbol, html.light #srcBody .hljs-selector-tag { color: #116329; }
-html.light #srcBody .hljs-tag, html.light #srcBody .hljs-name { color: #116329; }
+#srcBody .cl code { font: inherit; color: var(--tk-fg); }
+/* ---------- 语法高亮 ----------
+   用 highlight.js(本地 vendor,编译时嵌进二进制,不走 CDN——面板可能没外网)。
+   它输出的 HTML 已转义过,直接塞 innerHTML 安全。
+   token 配色不用官方主题:官方把十几类 token 挤成一两个颜色,分不出来;
+   这里自己按语义分色,深浅两套只换色值不换映射 */
+#srcBody .hljs-keyword, #srcBody .hljs-selector-tag { color: var(--tk-kw); }
+#srcBody .hljs-title, #srcBody .hljs-title.function_ { color: var(--tk-fn); }
+#srcBody .hljs-title.class_, #srcBody .hljs-title.class_.inherited__ { color: var(--tk-type); }
+#srcBody .hljs-section { color: var(--tk-fn); font-weight: 600; }
+#srcBody .hljs-string, #srcBody .hljs-regexp, #srcBody .hljs-quote,
+#srcBody .hljs-symbol, #srcBody .hljs-addition { color: var(--tk-str); }
+#srcBody .hljs-number, #srcBody .hljs-literal { color: var(--tk-num); }
+#srcBody .hljs-comment, #srcBody .hljs-meta { color: var(--tk-com); font-style: italic; }
+#srcBody .hljs-type, #srcBody .hljs-built_in { color: var(--tk-type); }
+#srcBody .hljs-attr, #srcBody .hljs-attribute, #srcBody .hljs-property,
+#srcBody .hljs-name, #srcBody .hljs-operator { color: var(--tk-attr); }
+#srcBody .hljs-variable.language_, #srcBody .hljs-tag,
+#srcBody .hljs-template-variable, #srcBody .hljs-deletion { color: var(--tk-var); }
+#srcBody .hljs-emphasis { font-style: italic; }
+#srcBody .hljs-strong { font-weight: 700; }
 /* 语言徽标:用各语言的社区品牌色,文件还没读就知道是个什么文件 */
 .lang-tag {
   flex-shrink: 0; font-size: .68rem; font-weight: 700; letter-spacing: .03em;
@@ -405,8 +426,6 @@ html.light #srcBody .hljs-tag, html.light #srcBody .hljs-name { color: #116329; 
   td.ops button { white-space: normal; }   /* 手机上让按钮可换行，避免顶出横向滚动条 */
 }
 </style>
-<!-- 语法高亮主题：tokyo-night-dark，和面板深蓝黑底一脉相承；本地 vendor 不走 CDN -->
-<link rel="stylesheet" href="/vendor/highlight.11.12.0.min.css">
 </head>
 <body>
 <script>
@@ -1227,10 +1246,23 @@ const LANG_BY_EXT = {
   sql: 'sql', graphql: 'graphql', gql: 'graphql',
   mk: 'makefile', makefile: 'makefile',
   diff: 'diff', patch: 'diff', wasm: 'wasm',
+  /* env/ini 系:key=value 结构,ini 语法正好;gitignore 走 bash 的
+     「# 注释 + 路径」习惯高亮 */
+  env: 'ini', ini: 'ini',
 };
 
-/// 各语言的徽标:名字 + 社区品牌色(深浅两个色:文字色/底色)。
-/// 未知后缀没有徽标,不显示。
+/// 完整文件名(小写) → 语言。给 Makefile/Dockerfile 这种没有扩展名、
+/// 或扩展名不代表语言(makefile)的文件。
+const LANG_BY_NAME = {
+  'makefile': 'makefile', 'gnumakefile': 'makefile',
+  'dockerfile': 'bash', 'dockerfile.dev': 'bash',
+  '.gitignore': 'bash', '.dockerignore': 'bash',
+  '.env': 'ini', '.env.local': 'ini', '.env.example': 'ini',
+  '.gitattributes': 'ini',
+};
+
+/// 各语言的徽标:名字 + 社区品牌色。
+/// 未知语言没有徽标,不显示。
 const LANG_TAG = {
   rust:    ['Rust', '#e0af68'],
   python:  ['Python', '#e8c268'],
@@ -1259,32 +1291,35 @@ const LANG_TAG = {
   graphql: ['GraphQL', '#f7768e'],
   makefile: ['Make', '#e8c170'],
   diff:    ['Diff', '#f7768e'],
-  ini:     ['INI', '#9ece6a'],
+  ini:     ['ENV', '#9ece6a'],
 };
 
-/// 按扩展名挑语言。取文件名最后一个点后面的部分;
-/// 表里没有的再问 hljs(它自己认 ps1/makefile 等一堆别名),还不认识就 null。
+/// 按路径挑语言:先看完整文件名表(Makefile/.env 这类),再按扩展名,
+/// 表里没有的问 hljs(它自己认 ps1 等一堆别名),还不认识就 null。
 function langOf(path) {
-  const m = /\.([^.]+)$/.exec(path);
+  const name = path.slice(path.lastIndexOf('/') + 1).toLowerCase();
+  if (LANG_BY_NAME[name]) return LANG_BY_NAME[name];
+  const m = /\.([^.]+)$/.exec(name);
   if (!m) return null;
-  const ext = m[1].toLowerCase();
+  const ext = m[1];
   return LANG_BY_EXT[ext] || (hljs.getLanguage(ext) ? ext : null);
 }
 
 /// 渲染整个文件:hljs 高亮过的 HTML 按行拆开,每行套一个 .cl div
 /// (CSS 计数器出行号)。多行 token(块注释/模板字符串)拆开后标签会断,
 /// 所以逐行高亮——每行独立走一遍 hljs,断不了。
+/// 行号列宽度按总行数位数定(几个字符几 ch),和文件规模匹配。
 function renderCode(text, lang) {
+  const lines = text.split('\n');
+  $('srcBody').style.setProperty('--ln-w', Math.max(3, String(lines.length).length) + 'ch');
   const opt = lang ? { language: lang, ignoreIllegals: true } : undefined;
-  return text.split('\n')
-    .map(l => {
-      // 没认出语言就纯转义文本,别交给 hljs 猜(猜错还不如纯色)
-      const inner = lang
-        ? hljs.highlight(l, opt).value
-        : l.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
-      return `<div class="cl"><code class="hljs">${inner}</code></div>`;
-    })
-    .join('');
+  return lines.map(l => {
+    // 没认出语言就纯转义文本,别交给 hljs 猜(猜错还不如纯色)
+    const inner = lang
+      ? hljs.highlight(l, opt).value
+      : l.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+    return `<div class="cl"><code>${inner}</code></div>`;
+  }).join('');
 }
 
 /// 语言徽标上色:品牌色文字 + 微透底
