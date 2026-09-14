@@ -1,25 +1,28 @@
 // 一个只做四件事的小面板：看状态、看日志、启动、停止/重启。
-// 网页是 static/index.html，编译时直接嵌进二进制。
+// 网页是 static/ 下的三个文件，编译时直接嵌进二进制。
 //
 // 模块划分：
 //   config   配置文件结构与查找
 //   state    全局共享状态（会话表、采样缓存）
 //   auth     登录/登出/会话校验
 //   hostinfo 整机资源（/proc 与 df）
-//   discover 项目发现（扫目录、黑名单）
+//   discover 项目发现（扫目录、黑名单、bin 探测）
 //   systemd  systemctl/journalctl 交互
-// 这里只剩 web 层：路由、handler、源码树和进程管理。
+//   procs    面板外进程的探测与停止
+//   srctree  源码目录树与文件读取
+// 这里只剩 web 层：路由、handler 组装。
 mod auth;
 mod config;
 mod discover;
 mod hostinfo;
+mod procs;
+mod srctree;
 mod state;
 mod systemd;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
@@ -30,8 +33,10 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{BoxErr, Config, config_path};
-use crate::discover::{discover, ok_name};
+use crate::discover::{bins, discover, find_cargo, ok_name};
+use crate::procs::{find_outside, proc_exes, stop_pids};
 use crate::state::App;
+use crate::srctree::{FileBody, Node, file_path_ok, read_file, walk_tree};
 use crate::systemd::{
     Picked, boot_secs, pick_project, pick_project_checked, project_units, run, show_many, unit_of,
 };
@@ -77,157 +82,6 @@ struct BinInst {
     memory: Option<u64>,
     cpu: Option<f64>,
     uptime: Option<f64>,
-}
-
-#[derive(Deserialize)]
-struct CargoToml {
-    package: Option<CargoPkg>,
-}
-#[derive(Deserialize)]
-struct CargoPkg {
-    name: String,
-}
-
-/// 列出项目里所有能 `cargo run --bin X` 的 X：
-///   src/main.rs        -> Cargo.toml 里的包名（cargo 就是这么命名默认 bin 的）
-///   src/bin/foo.rs     -> foo
-///   src/bin/foo/main.rs -> foo
-async fn bins(dir: &std::path::Path) -> Vec<String> {
-    let mut v = Vec::new();
-
-    if dir.join("src/main.rs").is_file()
-        && let Ok(t) = tokio::fs::read_to_string(dir.join("Cargo.toml")).await
-        && let Ok(ct) = toml::from_str::<CargoToml>(&t)
-        && let Some(pkg) = ct.package
-        && ok_name(&pkg.name)
-    {
-        v.push(pkg.name);
-    }
-
-    if let Ok(mut rd) = tokio::fs::read_dir(dir.join("src/bin")).await {
-        while let Ok(Some(e)) = rd.next_entry().await {
-            let p = e.path();
-            let name = if p.extension().is_some_and(|x| x == "rs") {
-                p.file_stem()
-            } else if p.join("main.rs").is_file() {
-                p.file_name()
-            } else {
-                None
-            };
-            if let Some(n) = name.map(|n| n.to_string_lossy().into_owned())
-                && ok_name(&n)
-            {
-                v.push(n);
-            }
-        }
-    }
-
-    v.sort();
-    v.dedup();
-    v
-}
-
-/// systemd 起的进程 PATH 里没有 ~/.cargo/bin，所以要拿到 cargo 的绝对路径
-fn find_cargo(explicit: Option<&str>) -> Option<String> {
-    if let Some(p) = explicit {
-        return std::path::Path::new(p).is_file().then(|| p.to_string());
-    }
-    let mut cands = Vec::new();
-    if let Ok(h) = std::env::var("HOME") {
-        cands.push(format!("{h}/.cargo/bin/cargo"));
-    }
-    for p in [
-        "/root/.cargo/bin/cargo",
-        "/usr/local/cargo/bin/cargo",
-        "/usr/local/bin/cargo",
-        "/usr/bin/cargo",
-    ] {
-        cands.push(p.into());
-    }
-    cands
-        .into_iter()
-        .find(|p| std::path::Path::new(p).is_file())
-}
-
-// ---------- 面板外进程 ----------
-
-/// 扫一遍 /proc 拿到所有进程的 exe 路径。每次刷新只扫一次，
-/// 再拿去跟各个项目目录比对，避免 N 个项目扫 N 遍 /proc。
-/// 非 Linux（或 /proc 读不到）时返回空表，功能自动退化成「看不见外部进程」。
-async fn proc_exes() -> Vec<(u32, PathBuf)> {
-    let mut v = Vec::new();
-    let Ok(mut rd) = tokio::fs::read_dir("/proc").await else {
-        return v;
-    };
-    while let Ok(Some(e)) = rd.next_entry().await {
-        // /proc 里除了 pid 还有 self、meminfo 之类，非数字的直接跳过
-        let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
-            continue;
-        };
-        if let Ok(exe) = tokio::fs::read_link(format!("/proc/{pid}/exe")).await {
-            v.push((pid, exe));
-        }
-    }
-    v
-}
-
-/// 你在终端里 cargo run 起来的进程，systemd 不认识它，只能靠 exe 路径认：
-/// 编出来的二进制一定在 <项目>/target/{debug,release}/ 下面。
-/// 返回全部匹配的 pid —— cargo run 可能留下不止一个进程，只杀第一个不够。
-fn find_outside(exes: &[(u32, PathBuf)], dir: &std::path::Path) -> Vec<u32> {
-    let target = dir.join("target");
-    exes.iter()
-        .filter(|(_, exe)| exe.starts_with(&target))
-        .map(|(pid, _)| *pid)
-        .collect()
-}
-
-/// 进程还活着吗。僵尸进程要算死的：它已经放掉端口了，
-/// 只是父进程还没回收，等它「消失」会白等 3 秒然后误报杀不掉。
-fn alive(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| alive_from_stat(&s))
-}
-
-/// /proc/<pid>/stat 格式是 `pid (comm) S ...`，comm 里可能有空格和括号
-/// （进程名就叫 `foo (bar)` 也是合法的），所以状态字段要从最后一个 ) 往后取。
-fn alive_from_stat(stat: &str) -> bool {
-    stat.rsplit_once(')')
-        .is_some_and(|(_, rest)| !rest.trim_start().starts_with('Z'))
-}
-
-/// 先 TERM，等它们真的退出（最多 3 秒），赖着不走的补一发 KILL。
-/// 必须等：端口是进程被回收之后才释放的，发完信号就返回会撞上 AddrInUse。
-async fn stop_pids(pids: &[u32]) -> (bool, String) {
-    if pids.is_empty() {
-        return (true, String::new());
-    }
-    let list: Vec<String> = pids.iter().map(u32::to_string).collect();
-    let signal = async |sig: &str| {
-        let mut argv = vec![sig];
-        argv.extend(list.iter().map(String::as_str));
-        let _ = run("kill", &argv).await;
-    };
-
-    signal("-TERM").await;
-    for _ in 0..30 {
-        if !pids.iter().any(|p| alive(*p)) {
-            return (true, String::new());
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-
-    signal("-KILL").await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let left: Vec<String> = pids
-        .iter()
-        .filter(|p| alive(**p))
-        .map(u32::to_string)
-        .collect();
-    if left.is_empty() {
-        (true, String::new())
-    } else {
-        (false, format!("这些进程杀不掉：{}", left.join(", ")))
-    }
 }
 
 // ---------- 接口 ----------
@@ -756,95 +610,13 @@ async fn logs(
     Json(out).into_response()
 }
 
-// ---------- 查看源码 ----------
-
-/// 源码树里不放的名字：点开头的隐藏项（.git、.idea 之类）、编译产物和依赖目录。
-/// 例外白名单：.env.example、.gitignore 这类常要看的点文件放行。
-/// node_modules/vendor 这类目录一个就好几万文件，进来树就废了。
-fn tree_skip(name: &str) -> bool {
-    const DOTFILES_KEEP: &[&str] = &[
-        ".env.example", ".env.local.example", ".env.sample",
-        ".gitignore", ".gitattributes", ".dockerignore",
-        ".editorconfig", ".npmrc", ".nvmrc", ".rustfmt.toml", ".rust-toolchain",
-    ];
-    const DIRS_SKIP: &[&str] = &[
-        "target", "node_modules", "vendor", "dist", "build",
-        "out", "__pycache__", "venv", ".venv",
-    ];
-    (name.starts_with('.') && !DOTFILES_KEEP.contains(&name)) || DIRS_SKIP.contains(&name)
-}
-
-/// 提供文件内容的大小上限（512KB）。超了只列名字不给内容，
-/// 免得哪个大文件把响应撑爆。
-const MAX_SRC_FILE: u64 = 512 * 1024;
-
-#[derive(Serialize)]
-struct Node {
-    name: String,
-    /// 相对项目根的路径，用 / 连接
-    path: String,
-    dir: bool,
-    /// 文件超过 512KB：树里就标出来，前端点都不用点
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    big: bool,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    children: Vec<Node>,
-}
-
-/// 递归扫一个目录成一列 Node。只出结构不读内容——文件内容走 /file 懒加载，
-/// 否则项目一大，扫树就得把几百个文件挨个读一遍。
-/// 递归 async fn 必须装箱,否则 future 大小算不出来。
-fn walk<'a>(dir: &'a std::path::Path, rel: &'a str) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<Node>> + Send + 'a>> {
-    Box::pin(async move {
-        let mut out = Vec::new();
-    let Ok(mut rd) = tokio::fs::read_dir(dir).await else {
-        return out;
-    };
-    while let Ok(Some(e)) = rd.next_entry().await {
-        let name = e.file_name().to_string_lossy().into_owned();
-        if tree_skip(&name) {
-            continue;
-        }
-        // 符号链接不跟：源码树里链接没什么可看的，不跟就不会有环
-        let Ok(ft) = e.file_type().await else { continue };
-        let path = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
-        let node = if ft.is_dir() {
-            let kids = walk(&e.path(), &path).await;
-            Node { name, path, dir: true, big: false, children: kids }
-        } else if ft.is_file() {
-            // metadata 读不到就当大文件处理，免得点了报错
-            let big = e.metadata().await.map_or(true, |m| m.len() > MAX_SRC_FILE);
-            Node { name, path, dir: false, big, children: Vec::new() }
-        } else {
-            continue; // socket、fifo 之类
-        };
-        out.push(node);
-    }
-    out.sort_by(|a, b| b.dir.cmp(&a.dir).then_with(|| a.name.cmp(&b.name)));
-        out
-    })
-}
-
-/// 项目目录树（只给结构，内容点开文件时另走 /file，见下）
+/// 项目目录树（只给结构，内容点开文件时另走 /file）
 async fn tree(State(app): State<Arc<App>>, Path(key): Path<String>) -> Response {
     let Some((name, dir)) = resolve(&app, &key).await else {
         return (StatusCode::NOT_FOUND, "未知项目").into_response();
     };
-    let children = walk(&dir, "").await;
+    let children = walk_tree(&dir).await;
     Json(Node { name, path: String::new(), dir: true, big: false, children }).into_response()
-}
-
-/// 懒加载取文件时的路径检查：必须是相对路径，不带 .. 穿越到项目外，
-/// 且路径上每段都是树里会显示的名字（node_modules 之类就算拼 URL 也读不到）
-fn file_path_ok(path: &str) -> bool {
-    !path.starts_with('/')
-        && path.split('/').all(|seg| !seg.is_empty() && seg != ".." && !tree_skip(seg))
-}
-
-#[derive(Serialize)]
-struct FileBody {
-    /// None = 二进制（不是合法 UTF-8）。大小上限在树里已标 big，这里再防一道
-    content: Option<String>,
 }
 
 /// 单个文件内容。树接口只给结构，这里点哪个文件读哪个
@@ -862,20 +634,7 @@ async fn file(
     if !file_path_ok(path) {
         return (StatusCode::BAD_REQUEST, "非法路径").into_response();
     }
-    let full = dir.join(path);
-    let Ok(meta) = tokio::fs::metadata(&full).await else {
-        return (StatusCode::NOT_FOUND, "文件不存在").into_response();
-    };
-    if !meta.is_file() {
-        return (StatusCode::BAD_REQUEST, "不是文件").into_response();
-    }
-    let content = if meta.len() > MAX_SRC_FILE {
-        None
-    } else {
-        // 按 UTF-8 读不进来就是二进制，照样不给内容
-        tokio::fs::read(&full).await.ok().and_then(|b| String::from_utf8(b).ok())
-    };
-    Json(FileBody { content }).into_response()
+    Json(read_file(&dir.join(path)).await).into_response()
 }
 
 /// 在项目目录里 git pull 最新代码
@@ -1035,42 +794,6 @@ mod tests {
     }
 
     #[test]
-    fn 僵尸进程算死的() {
-        assert!(alive_from_stat("69968 (xau) R 1 69968 69968 0 -1 4194560"));
-        assert!(alive_from_stat("69968 (xau) S 1 69968"));
-        assert!(!alive_from_stat("69968 (xau) Z 1 69968"));
-        // 进程名里带空格和括号是合法的，状态字段必须从最后一个 ) 往后取
-        assert!(alive_from_stat("42 (my (weird) app) R 1 42"));
-        assert!(!alive_from_stat("42 (my (weird) app) Z 1 42"));
-        // 名字里有 z 不该被当成僵尸
-        assert!(alive_from_stat("42 (zombie-hunter) S 1 42"));
-        assert!(!alive_from_stat("")); // 读不到就当死了
-    }
-
-    #[test]
-    fn 只认target目录下的进程() {
-        let exes = vec![
-            (
-                1u32,
-                PathBuf::from("/root/rust_project/xau/target/debug/xau"),
-            ),
-            (2, PathBuf::from("/root/.cargo/bin/cargo")),
-            (
-                3,
-                PathBuf::from("/root/rust_project/xau/target/release/shell"),
-            ),
-            (
-                4,
-                PathBuf::from("/root/rust_project/other/target/debug/other"),
-            ),
-            (5, PathBuf::from("/usr/bin/sshd")),
-        ];
-        let dir = PathBuf::from("/root/rust_project/xau");
-        assert_eq!(find_outside(&exes, &dir), vec![1, 3]);
-        assert!(find_outside(&exes, &PathBuf::from("/root/rust_project/nope")).is_empty());
-    }
-
-    #[test]
     fn 参数原样透传不按空格拆分() {
         let v = systemd_run_argv(
             "/usr/bin/cargo",
@@ -1081,49 +804,6 @@ mod tests {
         );
         // 参数作为一个整体透传给程序，不把空格当分隔符拆成多个参数
         assert_eq!(&v[v.len() - 3..], &["worker", "--", "--port 8080  -v"]);
-    }
-
-    #[test]
-    fn 源码树过滤隐藏目录和target() {
-        assert!(tree_skip(".git"));
-        assert!(tree_skip(".idea"));
-        assert!(tree_skip("target"));
-        // 普通名字都放行，包括点在中间的
-        assert!(!tree_skip("src"));
-        assert!(!tree_skip("panel.toml"));
-        assert!(!tree_skip("my.dir"));
-        // 常要看的点文件走白名单放行
-        assert!(!tree_skip(".env.example"));
-        assert!(!tree_skip(".gitignore"));
-        // 但 .env 本体是密钥，不放
-        assert!(tree_skip(".env"));
-    }
-
-    #[test]
-    fn 依赖和构建目录也过滤() {
-        for d in ["node_modules", "vendor", "dist", "build", "out", "__pycache__", "venv", ".venv"] {
-            assert!(tree_skip(d), "{d} 该被过滤");
-        }
-        // 名字里含这些词但不完全相等的不误伤
-        assert!(!tree_skip("outbox"));
-        assert!(!tree_skip("dist_config"));
-        assert!(!tree_skip("build.rs"));
-    }
-
-    #[test]
-    fn 文件路径穿越挡在门外() {
-        // 相对路径、每段干净，放行
-        assert!(file_path_ok("src/main.rs"));
-        assert!(file_path_ok("a/b/c.txt"));
-        assert!(file_path_ok(".gitignore"));
-        // 绝对路径、.. 穿越、空段，都拒
-        assert!(!file_path_ok("/etc/passwd"));
-        assert!(!file_path_ok("src/../Cargo.toml"));
-        assert!(!file_path_ok("src//main.rs"));
-        assert!(!file_path_ok(""));
-        // 树里不显示的目录，拼 URL 也读不到
-        assert!(!file_path_ok("node_modules/x/index.js"));
-        assert!(!file_path_ok(".env"));
     }
 
     #[test]

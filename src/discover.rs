@@ -1,5 +1,7 @@
-// 项目发现：扫目录、黑名单/通配排除、名字校验。
+// 项目发现：扫目录、黑名单/通配排除、名字校验、项目 bin 探测。
 use std::path::PathBuf;
+
+use serde::Deserialize;
 
 /// 文件夹名会拼成 unit 名交给 systemctl，所以只放行安全字符。
 /// 开头是 - 会被当成命令行选项，开头是 . 的是隐藏目录（.git 之类）。
@@ -83,6 +85,76 @@ pub async fn discover(dirs: &[String], exclude: &[String]) -> Vec<(String, PathB
     out.sort();
     out.dedup_by(|a, b| a.0 == b.0);
     out
+}
+
+#[derive(Deserialize)]
+struct CargoToml {
+    package: Option<CargoPkg>,
+}
+#[derive(Deserialize)]
+struct CargoPkg {
+    name: String,
+}
+
+/// 列出项目里所有能 `cargo run --bin X` 的 X：
+///   src/main.rs        -> Cargo.toml 里的包名（cargo 就是这么命名默认 bin 的）
+///   src/bin/foo.rs     -> foo
+///   src/bin/foo/main.rs -> foo
+pub async fn bins(dir: &std::path::Path) -> Vec<String> {
+    let mut v = Vec::new();
+
+    if dir.join("src/main.rs").is_file()
+        && let Ok(t) = tokio::fs::read_to_string(dir.join("Cargo.toml")).await
+        && let Ok(ct) = toml::from_str::<CargoToml>(&t)
+        && let Some(pkg) = ct.package
+        && ok_name(&pkg.name)
+    {
+        v.push(pkg.name);
+    }
+
+    if let Ok(mut rd) = tokio::fs::read_dir(dir.join("src/bin")).await {
+        while let Ok(Some(e)) = rd.next_entry().await {
+            let p = e.path();
+            let name = if p.extension().is_some_and(|x| x == "rs") {
+                p.file_stem()
+            } else if p.join("main.rs").is_file() {
+                p.file_name()
+            } else {
+                None
+            };
+            if let Some(n) = name.map(|n| n.to_string_lossy().into_owned())
+                && ok_name(&n)
+            {
+                v.push(n);
+            }
+        }
+    }
+
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// systemd 起的进程 PATH 里没有 ~/.cargo/bin，所以要拿到 cargo 的绝对路径
+pub fn find_cargo(explicit: Option<&str>) -> Option<String> {
+    if let Some(p) = explicit {
+        return std::path::Path::new(p).is_file().then(|| p.to_string());
+    }
+    let mut cands = Vec::new();
+    if let Ok(h) = std::env::var("HOME") {
+        cands.push(format!("{h}/.cargo/bin/cargo"));
+    }
+    for p in [
+        "/root/.cargo/bin/cargo",
+        "/usr/local/cargo/bin/cargo",
+        "/usr/local/bin/cargo",
+        "/usr/bin/cargo",
+    ] {
+        cands.push(p.into());
+    }
+    cands
+        .into_iter()
+        .find(|p| std::path::Path::new(p).is_file())
 }
 
 #[cfg(test)]
