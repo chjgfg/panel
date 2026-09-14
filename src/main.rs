@@ -36,7 +36,7 @@ use crate::config::{BoxErr, Config, config_path};
 use crate::discover::{bins, discover, find_cargo, ok_name};
 use crate::procs::{find_outside, proc_exes, stop_pids};
 use crate::state::App;
-use crate::srctree::{FileBody, Node, file_path_ok, read_file, walk_tree};
+use crate::srctree::{Node, file_path_ok, read_file, walk_tree};
 use crate::systemd::{
     Picked, boot_secs, pick_project, pick_project_checked, project_units, run, show_many, unit_of,
 };
