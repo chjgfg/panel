@@ -65,68 +65,65 @@ input, select {
 }
 #loginForm input { width: 100%; padding: .55rem .7rem; }
 /* ---------- 按钮体系：一套设计语言，按语义分档 ----------
-   统一的部分：圆角、边框 1px、字重、150ms 亮度过渡、hover 提亮一档。
+   统一的部分：圆角、边框 1px、150ms 过渡、hover 提亮一档、同样的内边距。
    分档按「操作后果」而不是「位置」：
    - 默认（primary）：accent 蓝实心，弹窗里唯一的主操作（运行/确定）
-   - .chip：彩色浅底 + 彩字，页面上的常规动作（日志/源码/刷新…），蓝系
-   - .go / .stop / .restart：同 chip 的做法但换语义色——绿启动、红停止、黄重启，
-     深色下一排按钮不再是清一色蓝，哪个能点、哪个危险一眼扫出来
-   - .ghost：透明底灰字，最低频的次操作（退出/取消的备选位）
-   所有彩字都用 600 字重 + 色底，深色下对比度按 WCAG 大字号标准都过。 */
+   - .chip：中性实底软按钮。用 fg 往 card 里兑出来的实色底，不用透明蓝浆——
+     透明色叠在不同背景上会发灰发闷，实底在任何位置观感都一致
+   - .go / .stop / .restart：同 chip 的实底构造但兑语义色——绿启动、红停止、黄重启
+   - .ghost：无边框的安静文字钮，hover 才给一层浅底，外链和退出用 */
 button {
-  padding: .4rem .8rem; background: var(--accent); color: #fff;
+  padding: .38rem .8rem; background: var(--accent); color: #fff;
   border-color: transparent; cursor: pointer;
   font-weight: 500;
   transition: background-color .15s, border-color .15s, color .15s, opacity .15s;
 }
-button:hover:not(:disabled) { filter: brightness(1.12); }
+button:hover:not(:disabled) { filter: brightness(1.1); }
 #loginForm button { width: 100%; margin-top: .75rem; padding: .55rem; }
 button:disabled { opacity: .35; cursor: not-allowed; }
 
-/* chip 基型：彩色浅底 + 彩字。后面各语义档只换色相，别的都继承这里 */
+/* 中性软按钮：实底比 card 亮一档，正文色文字。常规动作的默认档 */
 button.chip {
-  background: color-mix(in oklab, var(--accent) 15%, transparent);
-  color: var(--accent); border-color: color-mix(in oklab, var(--accent) 40%, transparent);
-  font-weight: 600;
+  background: color-mix(in oklab, var(--fg) 8%, var(--card));
+  color: var(--fg); border-color: var(--line);
 }
 button.chip:hover:not(:disabled) {
-  background: color-mix(in oklab, var(--accent) 27%, transparent);
-  border-color: color-mix(in oklab, var(--accent) 65%, transparent);
+  background: color-mix(in oklab, var(--fg) 14%, var(--card));
+  border-color: color-mix(in oklab, var(--fg) 30%, var(--line));
 }
-/* 语义档：和 chip 同构，只换色。--go 绿 / --danger 红 / --caution 黄 */
+/* 语义档：同样的实底构造，把兑进 card 的色从 fg 换成语义色。
+   底是低饱和色块、字是纯语义色，深色下亮堂、浅色下沉稳 */
 button.go {
-  background: color-mix(in oklab, var(--go) 16%, transparent);
-  color: var(--go); border-color: color-mix(in oklab, var(--go) 42%, transparent);
+  background: color-mix(in oklab, var(--go) 16%, var(--card));
+  color: var(--go); border-color: color-mix(in oklab, var(--go) 38%, var(--card));
   font-weight: 600;
 }
 button.go:hover:not(:disabled) {
-  background: color-mix(in oklab, var(--go) 28%, transparent);
-  border-color: color-mix(in oklab, var(--go) 65%, transparent);
+  background: color-mix(in oklab, var(--go) 26%, var(--card));
 }
 button.stop {
-  background: color-mix(in oklab, var(--danger) 15%, transparent);
-  color: var(--danger); border-color: color-mix(in oklab, var(--danger) 42%, transparent);
+  background: color-mix(in oklab, var(--danger) 16%, var(--card));
+  color: var(--danger); border-color: color-mix(in oklab, var(--danger) 38%, var(--card));
   font-weight: 600;
 }
 button.stop:hover:not(:disabled) {
-  background: color-mix(in oklab, var(--danger) 27%, transparent);
-  border-color: color-mix(in oklab, var(--danger) 65%, transparent);
+  background: color-mix(in oklab, var(--danger) 26%, var(--card));
 }
 button.restart {
-  background: color-mix(in oklab, var(--caution) 15%, transparent);
-  color: var(--caution); border-color: color-mix(in oklab, var(--caution) 45%, transparent);
+  background: color-mix(in oklab, var(--caution) 15%, var(--card));
+  color: var(--caution); border-color: color-mix(in oklab, var(--caution) 40%, var(--card));
   font-weight: 600;
 }
 button.restart:hover:not(:disabled) {
-  background: color-mix(in oklab, var(--caution) 27%, transparent);
-  border-color: color-mix(in oklab, var(--caution) 70%, transparent);
+  background: color-mix(in oklab, var(--caution) 25%, var(--card));
 }
+/* 安静档：平时就是一行灰字，hover 才浮出底色。外链、退出这类最低频的用 */
 button.ghost {
-  background: transparent; color: var(--muted); border-color: var(--line);
-  font-weight: 500;
+  background: transparent; color: var(--muted); border-color: transparent;
 }
 button.ghost:hover:not(:disabled) {
-  color: var(--fg); border-color: var(--muted);
+  color: var(--fg);
+  background: color-mix(in oklab, var(--fg) 8%, transparent);
 }
 /* 深色下细滚动条：默认那种亮灰大块滚动条在深色 UI 里非常扎眼。
    Firefox 走 scrollbar-color，WebKit 走 ::-webkit-scrollbar。
