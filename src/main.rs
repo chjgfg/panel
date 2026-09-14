@@ -1284,9 +1284,15 @@ async fn logs(
 
 // ---------- 查看源码 ----------
 
-/// 源码树里不放的名字：点开头的隐藏名（.git、.idea 之类）和 target（编译产物）。
+/// 源码树里不放的名字：点开头的隐藏项（.git、.idea 之类）和 target（编译产物）。
+/// 例外白名单：.env.example、.gitignore 这类常要看的点文件放行。
 fn tree_skip(name: &str) -> bool {
-    name.starts_with('.') || name == "target"
+    const DOTFILES_KEEP: &[&str] = &[
+        ".env.example", ".env.local.example", ".env.sample",
+        ".gitignore", ".gitattributes", ".dockerignore",
+        ".editorconfig", ".npmrc", ".nvmrc", ".rustfmt.toml", ".rust-toolchain",
+    ];
+    (name.starts_with('.') && !DOTFILES_KEEP.contains(&name)) || name == "target"
 }
 
 /// 提供文件内容的大小上限（512KB）。超了只列名字不给内容，
@@ -1805,6 +1811,11 @@ mod tests {
         assert!(!tree_skip("src"));
         assert!(!tree_skip("panel.toml"));
         assert!(!tree_skip("my.dir"));
+        // 常要看的点文件走白名单放行
+        assert!(!tree_skip(".env.example"));
+        assert!(!tree_skip(".gitignore"));
+        // 但 .env 本体是密钥，不放
+        assert!(tree_skip(".env"));
     }
 
     #[test]
