@@ -4,3 +4,4 @@
 /panel.toml
 panel.log
 .omc
+Cargo.lock
