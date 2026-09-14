@@ -1041,14 +1041,39 @@ $('srcPull').onclick = async () => {
   }
 };
 
+/// 复制文本。navigator.clipboard 只在安全上下文(HTTPS/localhost)可用，
+/// 面板是裸 HTTP 访问的，所以要退回 execCommand 这条老路：把文本塞进一个
+/// 临时 textarea，选中后让浏览器执行复制，完事把节点删掉。
+function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    return navigator.clipboard.writeText(text);
+  }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  // 移出可视区但不 display:none —— display:none 的元素选不中内容
+  ta.style.position = 'fixed';
+  ta.style.left = '-9999px';
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  try {
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok ? Promise.resolve() : Promise.reject(new Error('execCommand 返回失败'));
+  } catch (e) {
+    ta.remove();
+    return Promise.reject(e);
+  }
+}
+
 $('srcCopy').onclick = async () => {
   if (!srcCur) return srcMsg('先在左边选一个文件', false);
   if (srcCur.content == null) return srcMsg('这个文件没有可复制的内容', false);
   try {
-    await navigator.clipboard.writeText(srcCur.content);
+    await copyText(srcCur.content);
     srcMsg(`已复制 ${srcCur.path}`, true);
   } catch {
-    srcMsg('复制失败: 浏览器不允许访问剪贴板', false);
+    srcMsg('复制失败：浏览器拒绝了复制操作', false);
   }
 };
 
