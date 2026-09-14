@@ -14,8 +14,16 @@
      都过了 8 这条线（#d29922 只有 5.8，红黄在红绿色盲眼里会糊成一片）。 */
   --on: #3fb950; --off: #6e7681; --bad: #f85149; --warn: #e3b341;
 }
+/* 浅色变量组，和下面媒体查询里的定义保持一致 */
+html.light {
+  --bg: #f4f5f7; --card: #fff; --line: #e2e5ea;
+  --fg: #1b1f24; --muted: #6b7280;
+  --on: #1a7f37; --off: #9aa0a6; --bad: #cf222e; --warn: #bf8700;
+}
+/* 「跟随系统」档（html 上没有 data-theme 时）：系统浅色 → 也加浅色变量。
+   JS 会维护 html.classList 的 light，所以这里其实只是兜底，真正干活的是脚本。 */
 @media (prefers-color-scheme: light) {
-  :root {
+  html:not([data-theme]) {
     --bg: #f4f5f7; --card: #fff; --line: #e2e5ea;
     --fg: #1b1f24; --muted: #6b7280;
     --on: #1a7f37; --off: #9aa0a6; --bad: #cf222e; --warn: #bf8700;
@@ -277,6 +285,17 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
 </style>
 </head>
 <body>
+<script>
+// 防闪烁：必须在首次渲染前同步执行。
+// data-theme: "" / "auto"(跟随系统) / "dark" / "light"。html.light 由主脚本维护。
+document.documentElement.dataset.theme = localStorage.getItem('theme') || 'auto';
+if (document.documentElement.dataset.theme === 'auto'
+    && matchMedia('(prefers-color-scheme: light)').matches) {
+  document.documentElement.classList.add('light');
+} else if (document.documentElement.dataset.theme === 'light') {
+  document.documentElement.classList.add('light');
+}
+</script>
 <div id="login" hidden>
   <form id="loginForm">
     <h1>项目面板</h1>
@@ -290,6 +309,7 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
   <header>
     <h1>项目面板</h1>
     <span id="tick"></span>
+    <button id="themeBtn" type="button" class="ghost" title="切换黑夜/白天（跟随系统 → 白天 → 黑夜）">主题</button>
     <button id="oracleCloud" type="button" class="ghost">Oracle Cloud</button>
     <button id="ddia" type="button" class="ghost">设计数据密集型应用</button>
     <button id="refresh" class="ghost">刷新</button>
@@ -916,6 +936,25 @@ $('ddia').onclick = () => window.open(
   'noopener,noreferrer'
 );
 $('refresh').onclick = () => refresh();
+
+// ---------- 主题切换（跟随系统 → 白天 → 黑夜，循环）----------
+// html.light 这个 class 是唯一真源：CSS 变量全看它。data-theme 只是记录你选了哪档。
+function applyTheme() {
+  const t = document.documentElement.dataset.theme || 'auto';
+  const light = t === 'light' || (t === 'auto' && matchMedia('(prefers-color-scheme: light)').matches);
+  document.documentElement.classList.toggle('light', light);
+  $('themeBtn').textContent = t === 'auto' ? '主题·自动' : t === 'light' ? '主题·白天' : '主题·黑夜';
+}
+$('themeBtn').onclick = () => {
+  const cur = document.documentElement.dataset.theme || 'auto';
+  const next = cur === 'auto' ? 'light' : cur === 'light' ? 'dark' : 'auto';
+  document.documentElement.dataset.theme = next;
+  localStorage.setItem('theme', next);
+  applyTheme();
+};
+// 自动档下系统切白天/黑夜时跟着变（比如日落定时切深的）
+matchMedia('(prefers-color-scheme: light)').addEventListener('change', applyTheme);
+applyTheme();
 
 // 切换日志源筛选：用上一次拉到的数据直接重渲染，不用重新请求
 $('logFilter').onchange = () => { if (logCache) renderLogs(true); };
