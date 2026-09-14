@@ -420,7 +420,7 @@ if (document.documentElement.dataset.theme === 'auto'
         <div id="srcTreeGrip" title="拖拽调整宽度"></div>
         <div class="src-right">
           <div class="src-toolbar">
-            <button id="srcTreeToggle" class="ghost" title="隐藏/显示目录树">隐藏目录</button>
+            <button id="srcTreeToggle" class="chip" title="隐藏/显示目录树">隐藏目录</button>
             <span id="srcPath" class="src-path"></span>
             <button id="srcPull" class="chip">拉取代码</button>
             <button id="srcCopy" class="chip">一键复制</button>
@@ -655,13 +655,13 @@ function projectRow(u) {
   if (u.external) {
     // 自写的 unit 没有 bin 面板，对它来说「项目就是这一个 unit」，不存在选择歧义，
     // 启动/停止/重启/日志直接留在项目行
-    btn(ops, '启动', false, () => doAction(u, 'start', '启动'));
-    btn(ops, '停止', false, () => doAction(u, 'stop', '停止'));
-    btn(ops, '重启', false, () => doAction(u, 'restart', '重启'));
-    btn(ops, '日志', false, () => openLogs(u), 'ghost');
+    btn(ops, '启动', false, () => doAction(u, 'start', '启动'), 'chip');
+    btn(ops, '停止', false, () => doAction(u, 'stop', '停止'), 'chip');
+    btn(ops, '重启', false, () => doAction(u, 'restart', '重启'), 'chip');
+    btn(ops, '日志', false, () => openLogs(u), 'chip');
   } else {
     // 普通项目：项目顶层只留「展开/收起」和「源码」，启动动作下移到 bin 面板各行
-    if (expandable) btn(ops, expanded.has(u.key) ? '收起' : '展开', false, toggleExpand);
+    if (expandable) btn(ops, expanded.has(u.key) ? '收起' : '展开', false, toggleExpand, 'chip');
     btn(ops, '源码', false, () => openSrc(u), 'chip');
   }
   return tr;
@@ -733,10 +733,10 @@ function binRow(u, inst) {
   ops.className = 'ops';
   // 四个按钮永远都在，按运行态做可用性控制：
   //   未运行：启动🉑、停止/重启灰；运行中：启动灰、停止/重启🉑；日志恒🉑
-  btn(ops, '启动', inst.running, () => openRun(u, inst.bin));
-  btn(ops, '停止', !inst.running, () => binAction(u, inst, 'stop'));
-  btn(ops, '重启', !inst.running, () => binAction(u, inst, 'restart'));
-  btn(ops, '日志', false, () => openLogs(u, inst.bin), 'ghost');
+  btn(ops, '启动', inst.running, () => openRun(u, inst.bin), 'chip');
+  btn(ops, '停止', !inst.running, () => binAction(u, inst, 'stop'), 'chip');
+  btn(ops, '重启', !inst.running, () => binAction(u, inst, 'restart'), 'chip');
+  btn(ops, '日志', false, () => openLogs(u, inst.bin), 'chip');
   return tr;
 }
 
