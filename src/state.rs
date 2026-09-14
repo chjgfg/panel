@@ -7,8 +7,8 @@ use crate::config::Config;
 use crate::hostinfo::Disk;
 
 pub const SESSION_SECS: u64 = 7 * 86400;
-const MAX_FAILS: u32 = 10;
-const LOCK_SECS: u64 = 60;
+const MAX_FAILS: u32 = 5;
+const LOCK_SECS: u64 = 600;
 
 pub struct App {
     pub cfg: Config,
@@ -63,6 +63,8 @@ impl App {
 
     /// 连续失败 MAX_FAILS 次就锁 LOCK_SECS 秒。挡的是自动化撞库：
     /// 密码接口不限速的话，攻击者能靠并发每秒试几千次。
+    /// 5 次失败锁 10 分钟——就算前缀泄露被人拿到登录页，
+    /// 一天最多也就试 700 来个密码，长随机密码根本试不动。
     pub fn lockout(&self) -> Option<u64> {
         let (n, last) = *self.fails.lock().unwrap();
         if n < MAX_FAILS {

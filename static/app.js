@@ -319,7 +319,7 @@ function doAction(u, act, label) {
   const tone = act === 'stop' ? 'danger' : act === 'restart' ? 'caution' : '';
   openConfirm(`确认${label}`, `确认${label}该程序「${u.name}」吗？`, async () => {
     try {
-      await req(`/api/units/${u.key}/${act}`, {
+      await req(`api/units/${u.key}/${act}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: '{}',
@@ -366,7 +366,7 @@ function binAction(u, inst, act) {
   const tone = act === 'stop' ? 'danger' : 'caution';
   openConfirm(`确认${label}`, `确认${label}该 bin 程序「${inst.bin}」吗？`, async () => {
     try {
-      await req(`/api/units/${u.key}/bins/${encodeURIComponent(inst.bin)}/${act}`, {
+      await req(`api/units/${u.key}/bins/${encodeURIComponent(inst.bin)}/${act}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: '{}',
@@ -404,7 +404,7 @@ $('runGo').onclick = async () => {
   $('runErr').textContent = '';
   try {
     // 只提交当前这个 bin；参数原样透传（空格、换行都不拆）
-    await req(`/api/units/${runKey}/start`, {
+    await req(`api/units/${runKey}/start`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ bins: [{ bin: runBin, args: $('runArgs').value }] }),
@@ -461,7 +461,7 @@ let logCache = null;   // 最近一次拉到的 [{bin, log}]，切筛选时不�
 async function loadLogs(jump) {
   if (!logKey) return;
   try {
-    logCache = await (await req(`/api/units/${logKey}/logs?lines=300`)).json();
+    logCache = await (await req(`api/units/${logKey}/logs?lines=300`)).json();
     renderLogs(jump);
   } catch { /* 401 已由 req() 处理 */ }
 }
@@ -502,7 +502,7 @@ function renderLogs(jump) {
 async function refresh() {
   if (document.hidden) return;   // 后台标签页不用白跑
   try {
-    render(await (await req('/api/units')).json());
+    render(await (await req('api/units')).json());
     $('tick').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
     if ($('banner').textContent.startsWith('刷新失败')) banner('');
     await loadLogs(false);
@@ -511,7 +511,7 @@ async function refresh() {
   }
   // 整机资源单独一个 try：读不到（比如不是 Linux）也不该影响项目列表
   try {
-    renderHost(await (await req('/api/host')).json());
+    renderHost(await (await req('api/host')).json());
   } catch { /* 401 已由 req() 处理 */ }
 }
 
@@ -520,7 +520,7 @@ $('loginForm').onsubmit = async e => {
   $('loginBtn').disabled = true;
   $('loginErr').textContent = '';
   try {
-    const r = await fetch('/api/login', {
+    const r = await fetch('api/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ password: $('pw').value })
@@ -536,7 +536,7 @@ $('loginForm').onsubmit = async e => {
 };
 
 $('logout').onclick = async () => {
-  try { await fetch('/api/logout', { method: 'POST', credentials: 'same-origin' }); } catch {}
+  try { await fetch('api/logout', { method: 'POST', credentials: 'same-origin' }); } catch {}
   showLogin();
 };
 
@@ -612,7 +612,7 @@ async function loadTree() {
   tip.className = 'src-path';
   $('srcTree').appendChild(tip);
   try {
-    srcCache = await (await req(`/api/units/${srcKey}/tree`)).json();
+    srcCache = await (await req(`api/units/${srcKey}/tree`)).json();
     renderTree();
   } catch (e) {
     if (e.message !== '未登录') {
@@ -809,7 +809,7 @@ async function showFile(n, row) {
   $('srcBody').replaceChildren();
   $('srcBody').textContent = '加载中…';
   try {
-    const body = await (await req(`/api/units/${srcKey}/file?path=${encodeURIComponent(n.path)}`)).json();
+    const body = await (await req(`api/units/${srcKey}/file?path=${encodeURIComponent(n.path)}`)).json();
     fileCache.set(n.path, body.content);
     if (srcCur !== n) return;   // 等待期间用户又点了别的文件，别覆盖
     $('srcBody').replaceChildren();
@@ -841,7 +841,7 @@ $('srcPull').onclick = async () => {
   b.disabled = true;
   srcMsg('正在 git pull…', true);
   try {
-    const r = await req(`/api/units/${srcKey}/pull`);
+    const r = await req(`api/units/${srcKey}/pull`);
     srcMsg('拉取成功', true);
     await loadTree();   // 代码变了,目录树重新拉一遍
   } catch (e) {
@@ -956,6 +956,6 @@ $('srcTreeToggle').onclick = () => {
 
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 
-fetch('/api/me', { credentials: 'same-origin' })
+fetch('api/me', { credentials: 'same-origin' })
   .then(r => r.ok ? showApp() : showLogin())
   .catch(showLogin);

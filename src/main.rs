@@ -676,6 +676,31 @@ async fn no_cache(req: Request, next: Next) -> Response {
     res
 }
 
+/// 前缀清洗：去掉首尾的 /，拒绝 "。"、空串等。返回 None = 不合法（空前缀）。
+/// 空 prefix（配置里没写）走调用方的「挂在根路径」分支，不进这里。
+fn clean_prefix(raw: &str) -> Result<String, String> {
+    let p = raw.trim_matches('/');
+    if p.is_empty() || !p.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err(format!(
+            "prefix 只能由字母、数字、连字符组成（当前值 \"{raw}\"）。\
+             随便生成一个：openssl rand -hex 8"
+        ));
+    }
+    Ok(p.to_string())
+}
+
+/// 面板挂在秘密前缀下时，前缀之外的任何路径一律 404——
+/// 扫描器看到的和一台空机器没有区别，连登录页都摸不到。
+/// 唯一的善意例外：/前缀（无尾斜杠）301 到 /前缀/，浏览器输网址方便。
+async fn secret_path(prefix: Arc<String>, req: Request, next: Next) -> Response {
+    let path = req.uri().path();
+    if path == format!("/{prefix}") {
+        let loc = format!("/{prefix}/");
+        return (StatusCode::MOVED_PERMANENTLY, [(header::LOCATION, loc)]).into_response();
+    }
+    next.run(req).await
+}
+
 async fn start() -> Result<(), BoxErr> {
     let path = config_path()?;
     let text = std::fs::read_to_string(&path)
@@ -710,7 +735,8 @@ async fn start() -> Result<(), BoxErr> {
     let bind = cfg.bind.clone();
     let exclude = cfg.exclude.clone();
     let dirs = cfg.dirs.clone();
-
+    let prefix = cfg.prefix.trim().to_string();
+    // App 拿走 cfg 所有权，之后想再读配置就从 App 里读
     let app = App::new(cfg, cargo.clone());
 
     // 除了首页和登录接口，其它一律要带有效 cookie
@@ -727,7 +753,7 @@ async fn start() -> Result<(), BoxErr> {
         .route("/api/units/{key}/{action}", post(action))
         .layer(middleware::from_fn_with_state(app.clone(), auth::require_auth));
 
-    let router = Router::new()
+    let panel = Router::new()
         .route("/", get(index))
         .route("/static/style.css", get(style_css))
         .route("/static/app.js", get(app_js))
@@ -735,7 +761,22 @@ async fn start() -> Result<(), BoxErr> {
         .route("/api/login", post(auth::login))
         .merge(protected)
         .layer(middleware::from_fn(no_cache))
-        .with_state(app);
+        .with_state(app.clone());
+
+    // 配置了秘密前缀就把整个面板挪到 /前缀/ 下，前缀外一律 404；
+    // 没配 = 挂在根路径，行为和从前完全一样。
+    // 用 nest_service 而不是 nest：axum 0.8 的 nest 匹配不了「/前缀/」
+    // 这个带尾斜杠的首页路径（内层 route("/") 只有裸 / 才命中）
+    let router = if prefix.is_empty() {
+        panel
+    } else {
+        let prefix = Arc::new(clean_prefix(&prefix)?);
+        Router::new()
+            .nest_service(&format!("/{prefix}"), panel)
+            .layer(middleware::from_fn(move |req, next| {
+                secret_path(prefix.clone(), req, next)
+            }))
+    };
 
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
@@ -762,6 +803,10 @@ async fn start() -> Result<(), BoxErr> {
         }
     }
     println!("面板已启动: http://{}", listener.local_addr()?);
+    if !prefix.is_empty() {
+        // 提前校验过了，这里只是启动日志再报一遍方便对账
+        println!("秘密路径: /{}/ （其余路径一律 404）", clean_prefix(&prefix)?);
+    }
     axum::serve(listener, router).await?;
     Ok(())
 }
@@ -769,6 +814,56 @@ async fn start() -> Result<(), BoxErr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 端到端验证前缀路由：/前缀（301 补斜杠）、/前缀/（首页）、
+    /// 前缀外（404，扫描器看不出这里有面板）
+    #[tokio::test]
+    async fn 前缀外一律404前缀内正常() {
+        use tower::ServiceExt;
+
+        let inner = Router::new()
+            .route("/", get(|| async { "HOME" }))
+            .route("/api/login", get(|| async { "LOGIN" }));
+        let prefix = "s3cret";
+        let nest_at = format!("/{prefix}");
+        let holder = Arc::new(prefix.to_string());
+        let app: Router = Router::new()
+            .nest_service(&nest_at, inner)
+            .layer(middleware::from_fn(move |req, next| {
+                secret_path(holder.clone(), req, next)
+            }));
+
+        for (path, want) in [
+            ("/".to_string(), StatusCode::NOT_FOUND),
+            ("/admin".to_string(), StatusCode::NOT_FOUND),
+            ("/api/login".to_string(), StatusCode::NOT_FOUND),
+            ("/static/style.css".to_string(), StatusCode::NOT_FOUND),
+            (format!("/{prefix}"), StatusCode::MOVED_PERMANENTLY),
+            (format!("/{prefix}/"), StatusCode::OK),
+            (format!("/{prefix}/api/login"), StatusCode::OK),
+        ] {
+            let r = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(path.clone())
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(r.status(), want, "路径 {path}");
+        }
+    }
+
+    #[test]
+    fn 前缀清洗去掉斜杠并拒绝非法字符() {
+        assert_eq!(clean_prefix("/abc/").unwrap(), "abc");
+        assert_eq!(clean_prefix("a-b9").unwrap(), "a-b9");
+        assert!(clean_prefix("a/b").is_err());
+        assert!(clean_prefix("a b").is_err());
+        assert!(clean_prefix("///").is_err());
+    }
 
     #[test]
     fn 不带参数时不加双横线() {

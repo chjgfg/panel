@@ -23,6 +23,10 @@ pub struct Config {
     /// 通常没有 ~/.cargo/bin，所以不能直接写 "cargo"
     #[serde(default)]
     pub cargo: Option<String>,
+    /// 秘密路径前缀。设了之后只有 /前缀/... 能打开面板，其余路径一律 404，
+    /// 公网上的扫描器/爆破工具看不出这台机器部署了面板。留空 = 挂在根路径
+    #[serde(default)]
+    pub prefix: String,
 }
 fn default_bind() -> String {
     "0.0.0.0:80".into()
