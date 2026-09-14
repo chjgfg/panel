@@ -1282,6 +1282,94 @@ async fn logs(
     Json(out).into_response()
 }
 
+// ---------- 查看源码 ----------
+
+/// 源码树里不放的名字：点开头的隐藏名（.git、.idea 之类）和 target（编译产物）。
+fn tree_skip(name: &str) -> bool {
+    name.starts_with('.') || name == "target"
+}
+
+/// 提供文件内容的大小上限（512KB）。超了只列名字不给内容，
+/// 免得哪个大文件把整个 JSON 撑爆。
+const MAX_SRC_FILE: u64 = 512 * 1024;
+
+#[derive(Serialize)]
+struct Node {
+    name: String,
+    /// 相对项目根的路径，用 / 连接
+    path: String,
+    dir: bool,
+    /// 文件内容。None = 二进制（不是合法 UTF-8）或超过大小上限
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    children: Vec<Node>,
+}
+
+/// 递归扫一个目录成一列 Node。目录在前、文件在后,各自按名字排。
+/// 递归 async fn 必须装箱,否则 future 大小算不出来。
+fn walk<'a>(dir: &'a std::path::Path, rel: &'a str) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<Node>> + Send + 'a>> {
+    Box::pin(async move {
+        let mut out = Vec::new();
+    let Ok(mut rd) = tokio::fs::read_dir(dir).await else {
+        return out;
+    };
+    while let Ok(Some(e)) = rd.next_entry().await {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if tree_skip(&name) {
+            continue;
+        }
+        // 符号链接不跟：源码树里链接没什么可看的，不跟就不会有环
+        let Ok(ft) = e.file_type().await else { continue };
+        let path = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
+        let node = if ft.is_dir() {
+            let kids = walk(&e.path(), &path).await;
+            Node { name, path, dir: true, content: None, children: kids }
+        } else if ft.is_file() {
+            // metadata 读不到就没法判大小，干脆不给内容
+            let big = e.metadata().await.map_or(true, |m| m.len() > MAX_SRC_FILE);
+            let content = if big {
+                None
+            } else {
+                // 按 UTF-8 读不进来就是二进制，照样不给内容
+                tokio::fs::read(&e.path()).await.ok().and_then(|b| String::from_utf8(b).ok())
+            };
+            Node { name, path, dir: false, content, children: Vec::new() }
+        } else {
+            continue; // socket、fifo 之类
+        };
+        out.push(node);
+    }
+    out.sort_by(|a, b| b.dir.cmp(&a.dir).then_with(|| a.name.cmp(&b.name)));
+        out
+    })
+}
+
+/// 项目目录树（内容一并带上，前端切文件不用再发请求）
+async fn tree(State(app): State<Arc<App>>, Path(key): Path<String>) -> Response {
+    let Some((name, dir)) = resolve(&app, &key).await else {
+        return (StatusCode::NOT_FOUND, "未知项目").into_response();
+    };
+    let children = walk(&dir, "").await;
+    Json(Node { name, path: String::new(), dir: true, content: None, children }).into_response()
+}
+
+/// 在项目目录里 git pull 最新代码
+async fn pull(State(app): State<Arc<App>>, Path(key): Path<String>) -> Response {
+    let Some((_, dir)) = resolve(&app, &key).await else {
+        return (StatusCode::NOT_FOUND, "未知项目").into_response();
+    };
+    let d = dir.display().to_string();
+    match run("git", &["-C", &d, "pull"]).await {
+        Ok((true, out, _)) => (StatusCode::OK, out).into_response(),
+        Ok((false, out, err)) => {
+            let msg = if err.trim().is_empty() { out } else { err };
+            (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 async fn require_auth(State(app): State<Arc<App>>, req: Request, next: Next) -> Response {
     let ok = cookie_token(req.headers()).is_some_and(|t| app.valid_session(t));
     if ok {
@@ -1400,6 +1488,8 @@ async fn start() -> Result<(), BoxErr> {
         .route("/api/units", get(units))
         .route("/api/host", get(host))
         .route("/api/units/{key}/logs", get(logs))
+        .route("/api/units/{key}/tree", get(tree))
+        .route("/api/units/{key}/pull", get(pull))
         .route("/api/units/{key}/bins/{bin}/{action}", post(bin_action))
         .route("/api/units/{key}/{action}", post(action))
         .layer(middleware::from_fn_with_state(app.clone(), require_auth));
@@ -1704,6 +1794,17 @@ mod tests {
         );
         // 参数作为一个整体透传给程序，不把空格当分隔符拆成多个参数
         assert_eq!(&v[v.len() - 3..], &["worker", "--", "--port 8080  -v"]);
+    }
+
+    #[test]
+    fn 源码树过滤隐藏目录和target() {
+        assert!(tree_skip(".git"));
+        assert!(tree_skip(".idea"));
+        assert!(tree_skip("target"));
+        // 普通名字都放行，包括点在中间的
+        assert!(!tree_skip("src"));
+        assert!(!tree_skip("panel.toml"));
+        assert!(!tree_skip("my.dir"));
     }
 
     #[test]

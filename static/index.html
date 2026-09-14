@@ -198,6 +198,66 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
      太长的横向滚动看。 */
   white-space: pre;
 }
+/* 源码弹窗：左右分栏。左边目录树窄一些（大项目树会很深），右边占大头看代码 */
+.src-layout {
+  flex: 1; min-height: 0;
+  display: flex;
+  border-top: 1px solid var(--line);
+}
+.src-layout > * { min-width: 0; } /* pre 内容再长也不许把分栏顶宽 */
+#srcTree {
+  width: 260px; flex-shrink: 0; overflow: auto;
+  padding: .6rem .3rem;
+  border-right: 1px solid var(--line);
+  font-size: .85rem;
+  /* 树要自己滚，不能跟着右边代码一起滚 */
+}
+/* 树节点：行内块按钮化，点击切换文件；目录名左侧的小箭头单独可点收起 */
+#srcTree .node {
+  display: block; width: 100%;
+  text-align: left; background: transparent; color: var(--fg);
+  border: 0; padding: .15rem .4rem; border-radius: 4px;
+  cursor: pointer; font: inherit;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#srcTree .node:hover { background: var(--line); }
+#srcTree .node.cur { background: color-mix(in oklab, var(--accent) 25%, transparent); }
+#srcTree .node .tw {
+  display: inline-block; width: 1em; color: var(--muted);
+  user-select: none;
+}
+#srcTree .kids { margin-left: 1rem; border-left: 1px solid var(--line); padding-left: .2rem; }
+/* 顶层容器就是整棵树的根,不吃缩进 */
+#srcTree > .kids { margin-left: 0; border-left: 0; padding-left: 0; }
+.src-right { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.src-toolbar {
+  display: flex; align-items: center; gap: .6rem;
+  padding: .5rem .8rem; border-bottom: 1px solid var(--line);
+}
+.src-toolbar .src-path {
+  flex: 1; min-width: 0;
+  font-family: ui-monospace, Consolas, monospace; font-size: .8rem;
+  color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.src-toolbar button { flex-shrink: 0; }
+/* pull/复制 的结果提示条，成功绿色失败红色，几秒后自动淡出 */
+.src-msg {
+  padding: .35rem .8rem; font-size: .8rem;
+  border-bottom: 1px solid var(--line);
+}
+.src-msg.ok { color: var(--on); }
+.src-msg.bad { color: var(--bad); }
+#srcBody {
+  flex: 1; min-height: 0; overflow: auto; margin: 0; padding: .7rem;
+  font: 12.5px/1.5 ui-monospace, Consolas, monospace;
+  /* 源码可以折行吗?不折,一行 import 就能看出层次。太长横向滚动看 */
+  white-space: pre;
+}
+/* 手机上树放不下 260px,收窄一点 */
+@media (max-width: 640px) {
+  #srcTree { width: 180px; }
+}
 @media (max-width: 640px) {
   body { padding: .6rem; }
   th, td { padding: .5rem .45rem; font-size: .85rem; }
@@ -287,6 +347,27 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
       </div>
     </div>
   </div>
+  <!-- 源码模态弹窗：左树右码，复用日志弹窗的宽屏样式 -->
+  <div id="srcBox" class="overlay" hidden>
+    <div class="modal modal-log">
+      <div class="modal-head">
+        <h2>源码 · <span id="srcName"></span></h2>
+        <button id="srcCloseX" class="close-x" aria-label="关闭" title="关闭">×</button>
+      </div>
+      <div class="src-layout">
+        <nav id="srcTree" aria-label="项目目录"></nav>
+        <div class="src-right">
+          <div class="src-toolbar">
+            <span id="srcPath" class="src-path"></span>
+            <button id="srcPull" class="ghost">拉取代码</button>
+            <button id="srcCopy" class="ghost">一键复制</button>
+          </div>
+          <div id="srcMsg" class="src-msg" hidden></div>
+          <pre id="srcBody"></pre>
+        </div>
+      </div>
+    </div>
+  </div>
 </main>
 
 <script>
@@ -315,6 +396,7 @@ function showLogin() {
   $('logBox').hidden = true;
   $('runbox').hidden = true;
   $('confirmBox').hidden = true;
+  closeSrcBox();
   $('app').hidden = true;
   $('login').hidden = false;
   $('pw').focus();
@@ -515,8 +597,9 @@ function projectRow(u) {
     btn(ops, '重启', false, () => doAction(u, 'restart', '重启'));
     btn(ops, '日志', false, () => openLogs(u), true);
   } else {
-    // 普通项目：项目顶层只留「展开/收起」，启动动作下移到 bin 面板各行
+    // 普通项目：项目顶层只留「展开/收起」和「源码」，启动动作下移到 bin 面板各行
     if (expandable) btn(ops, expanded.has(u.key) ? '收起' : '展开', false, toggleExpand);
+    btn(ops, '源码', false, () => openSrc(u), true);
   }
   return tr;
 
@@ -834,6 +917,152 @@ function closeLogBox() {
 }
 $('logCloseX').onclick = closeLogBox;
 $('logClose').onclick = closeLogBox;
+
+// ---------- 查看源码 ----------
+
+let srcKey = null;        // 当前弹窗对应的项目 key
+let srcCache = null;      // 最近一次拉到的目录树，切文件不用重拉
+let srcCur = null;        // 当前打开的文件节点
+
+function openSrc(u) {
+  srcKey = u.key;
+  srcCache = null;
+  srcCur = null;
+  $('srcName').textContent = u.name;
+  $('srcPath').textContent = '';
+  $('srcBody').textContent = '';
+  srcMsg('');
+  $('srcBox').hidden = false;
+  loadTree();
+}
+
+async function loadTree() {
+  if (!srcKey) return;
+  $('srcTree').replaceChildren();
+  const tip = document.createElement('div');
+  tip.textContent = '加载中…';
+  tip.className = 'src-path';
+  $('srcTree').appendChild(tip);
+  try {
+    srcCache = await (await req(`/api/units/${srcKey}/tree`)).json();
+    renderTree();
+  } catch (e) {
+    if (e.message !== '未登录') {
+      $('srcTree').replaceChildren();
+      srcMsg('拉目录失败: ' + e.message, false);
+    }
+  }
+}
+
+/// 目录树渲染。目录点名字展开/收起（纯前端折叠，不发请求），
+/// 文件点名字右侧显示内容。全程 textContent/DOM 建，不怕文件名里有怪字符。
+function renderTree() {
+  const tree = $('srcTree');
+  tree.replaceChildren();
+  if (!srcCache) return;
+  tree.appendChild(treeNodes(srcCache.children, true));
+}
+
+function treeNodes(nodes, expanded) {
+  const wrap = document.createElement('div');
+  wrap.className = 'kids';
+  for (const n of nodes) {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'node';
+    row.textContent = n.name;
+    if (n.dir) {
+      const tw = document.createElement('span');
+      tw.className = 'tw';
+      tw.textContent = expanded ? '▾' : '▸';
+      row.prepend(tw);
+      let open = expanded;
+      let kids = null;
+      row.onclick = () => {
+        open = !open;
+        tw.textContent = open ? '▾' : '▸';
+        // children 被 skip_serializing_if 省掉时当作空目录处理
+        if (open && !kids && (n.children || []).length) {
+          kids = treeNodes(n.children, false);
+          row.after(kids);
+        } else if (kids) {
+          kids.hidden = !open;
+        }
+      };
+      if (expanded && (n.children || []).length) {
+        kids = treeNodes(n.children, false);
+      }
+      wrap.appendChild(row);
+      if (kids) wrap.appendChild(kids);
+    } else {
+      row.onclick = () => showFile(n, row);
+      wrap.appendChild(row);
+    }
+  }
+  return wrap;
+}
+
+function showFile(n, row) {
+  srcCur = n;
+  $('srcTree').querySelectorAll('.node.cur').forEach(el => el.classList.remove('cur'));
+  if (row) row.classList.add('cur');
+  $('srcPath').textContent = n.path;
+  if (n.content == null) {
+    $('srcBody').textContent = '(二进制文件或超过 512KB,不展示内容)';
+  } else {
+    $('srcBody').textContent = n.content;
+  }
+}
+
+/// 结果提示条:ok=true 绿色成功,false 红色失败;几秒后自动消失
+let srcMsgTimer = null;
+function srcMsg(text, ok) {
+  const m = $('srcMsg');
+  clearTimeout(srcMsgTimer);
+  m.textContent = text || '';
+  m.hidden = !text;
+  m.className = 'src-msg' + (text ? (ok ? ' ok' : ' bad') : '');
+  if (text) srcMsgTimer = setTimeout(() => { m.hidden = true; }, 5000);
+}
+
+$('srcPull').onclick = async () => {
+  if (!srcKey) return;
+  const b = $('srcPull');
+  b.disabled = true;
+  srcMsg('正在 git pull…', true);
+  try {
+    const r = await req(`/api/units/${srcKey}/pull`);
+    srcMsg('拉取成功', true);
+    await loadTree();   // 代码变了,目录树重新拉一遍
+  } catch (e) {
+    if (e.message !== '未登录') srcMsg('拉取失败: ' + e.message, false);
+  } finally {
+    b.disabled = false;
+  }
+};
+
+$('srcCopy').onclick = async () => {
+  if (!srcCur) return srcMsg('先在左边选一个文件', false);
+  if (srcCur.content == null) return srcMsg('这个文件没有可复制的内容', false);
+  try {
+    await navigator.clipboard.writeText(srcCur.content);
+    srcMsg(`已复制 ${srcCur.path}`, true);
+  } catch {
+    srcMsg('复制失败: 浏览器不允许访问剪贴板', false);
+  }
+};
+
+function closeSrcBox() {
+  srcKey = null;
+  srcCache = null;
+  srcCur = null;
+  $('srcTree').replaceChildren();
+  $('srcBody').textContent = '';
+  $('srcPath').textContent = '';
+  $('srcMsg').hidden = true;
+  $('srcBox').hidden = true;
+}
+$('srcCloseX').onclick = closeSrcBox;
 
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 
