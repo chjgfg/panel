@@ -7,10 +7,11 @@
 <title>项目面板</title>
 <style>
 :root {
-  /* 深色组：背景带一点蓝调并压深一档，卡片和背景的层次差就出来了；
-     muted 比 rgb 灰提亮一些，深色下小字的可读性全靠它 */
-  --bg: #11141a; --card: #191d25; --line: #2a303c;
-  --fg: #e7eaf0; --muted: #949cad; --accent: #5b9dff;
+  /* 深色组：比「深灰」更进一步往深蓝黑走，背景压到接近纯黑，
+     卡片和背景的层次差靠亮度差而不是色相差，深色下每层都读得出来；
+     muted 提亮保住小字可读性，line 同步加深避免「脏边框」 */
+  --bg: #0b0d12; --card: #141821; --line: #272e3d;
+  --fg: #e7eaf0; --muted: #98a2b5; --accent: #5b9dff;
   /* 表格状态点 + 仪表严重度。--warn 是按 CVD 可分辨性选的：
      深色下 #e3b341 与 #f85149 的 deutan ΔE 12.3，浅色下 #bf8700 与 #cf222e 为 11.0，
      都过了 8 这条线（#d29922 只有 5.8，红黄在红绿色盲眼里会糊成一片）。 */
@@ -228,17 +229,19 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
 .dot.bad { background: var(--bad); }
 
 #projList { margin-top: .4rem; }
-/* 运行弹窗：模态遮罩 + 居中卡片，遮罩不拦截点击（点击遮罩不关闭弹窗） */
+/* 运行弹窗：模态遮罩 + 居中卡片，遮罩不拦截点击（点击遮罩不关闭弹窗）。
+   遮罩和投影用半透明纯黑：白天压暗页面聚焦弹窗，黑夜融进背景只留弹窗亮着 */
 .overlay {
   position: fixed; inset: 0; z-index: 50;
   display: flex; align-items: center; justify-content: center;
-  background: rgba(0, 0, 0, .45);
+  background: rgba(0, 0, 0, .55);
 }
 .modal {
   width: min(520px, 94vw); max-height: 84vh;
   display: flex; flex-direction: column;
   background: var(--card); border: 1px solid var(--line);
-  border-radius: 12px; box-shadow: 0 12px 40px rgba(0, 0, 0, .35);
+  border-radius: 12px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, .5), 0 0 0 1px rgba(255, 255, 255, .02);
   overflow: hidden;
 }
 .modal-head {
@@ -264,7 +267,7 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
    停止/重启的确认按钮换对应语义色实心，让「我在确认什么」在按钮上就有预告 */
 .modal-foot button.primary { background: var(--accent); color: #fff; border-color: transparent; }
 .modal-foot button.danger { background: var(--danger); color: #fff; border-color: transparent; }
-.modal-foot button.caution { background: var(--caution); color: #11141a; border-color: transparent; }
+.modal-foot button.caution { background: var(--caution); color: #14161c; border-color: transparent; }
 /* 运行弹窗的主操作：绿色实心，和表格里绿色「启动」一个语义 */
 .modal-foot button.go-solid { background: var(--go); color: #fff; border-color: transparent; }
 /* 运行弹窗内容（单 bin）：bin 名 + 参数文本域，原样透传 */
@@ -504,6 +507,15 @@ function banner(msg) {
   $('banner').hidden = !msg;
 }
 
+/// 弹窗滚动锁：模态弹窗打开时锁掉 body 滚动，否则滚轮在弹窗里滚到头之后
+/// 事件会冒泡给 body，后面的页面跟着一起滚（滚动穿透）。
+/// 按当前还有哪个弹窗开着来开关，关一个弹窗不会误解锁另一个还开着的。
+function syncScrollLock() {
+  const open = ['runbox', 'confirmBox', 'logBox', 'srcBox']
+    .some(id => !$(id).hidden);
+  document.body.style.overflow = open ? 'hidden' : '';
+}
+
 function showLogin() {
   clearInterval(timer);
   timer = null;
@@ -514,6 +526,7 @@ function showLogin() {
   $('runbox').hidden = true;
   $('confirmBox').hidden = true;
   closeSrcBox();
+  syncScrollLock();
   $('app').hidden = true;
   $('login').hidden = false;
   $('pw').focus();
@@ -824,10 +837,12 @@ function openConfirm(title, msg, onOk, tone) {
   $('confirmMsg').textContent = msg;
   $('confirmOk').className = tone || 'primary';
   $('confirmBox').hidden = false;
+  syncScrollLock();
 }
 function closeConfirm() {
   confirmCb = null;
   $('confirmBox').hidden = true;
+  syncScrollLock();
 }
 $('confirmCloseX').onclick = closeConfirm;      // X 不执行操作
 $('confirmCancel').onclick = closeConfirm;      // 取消不执行操作
@@ -871,6 +886,7 @@ function openRun(u, bin) {
   $('runErr').textContent = '';
   $('runGo').disabled = false;
   $('runbox').hidden = false;
+  syncScrollLock();
   $('runArgs').focus();
 }
 
@@ -888,6 +904,7 @@ $('runGo').onclick = async () => {
     });
     // 执行完成自动关闭弹窗
     $('runbox').hidden = true;
+    syncScrollLock();
     runKey = null; runBin = null;
   } catch (e) {
     if (e.message !== '未登录') $('runErr').textContent = e.message;
@@ -903,6 +920,7 @@ function closeRunBox() {
   runBin = null;
   $('runbox').hidden = true;
   $('runErr').textContent = '';
+  syncScrollLock();
 }
 $('closeRunX').onclick = closeRunBox;
 $('closeRun').onclick = closeRunBox;
@@ -910,6 +928,7 @@ $('closeRun').onclick = closeRunBox;
 function openLogs(u, preselBin) {
   $('logName').textContent = u.name;
   $('logBox').hidden = false;
+  syncScrollLock();
   logKey = u.key;
   // 筛选项：全部 + 每个 bin。多 bin 同时跑时能只看某一个，或全部按时间混合看
   const sel = $('logFilter');
@@ -1054,6 +1073,7 @@ function closeLogBox() {
   logCache = null;
   $('logBody').replaceChildren();
   $('logBox').hidden = true;
+  syncScrollLock();
 }
 $('logCloseX').onclick = closeLogBox;
 $('logClose').onclick = closeLogBox;
@@ -1073,6 +1093,7 @@ function openSrc(u) {
   $('srcBody').textContent = '';
   srcMsg('');
   $('srcBox').hidden = false;
+  syncScrollLock();
   loadTree();
 }
 
@@ -1227,6 +1248,7 @@ function closeSrcBox() {
   $('srcPath').textContent = '';
   $('srcMsg').hidden = true;
   $('srcBox').hidden = true;
+  syncScrollLock();
 }
 $('srcCloseX').onclick = closeSrcBox;
 
