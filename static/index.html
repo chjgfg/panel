@@ -15,12 +15,16 @@
      深色下 #e3b341 与 #f85149 的 deutan ΔE 12.3，浅色下 #bf8700 与 #cf222e 为 11.0，
      都过了 8 这条线（#d29922 只有 5.8，红黄在红绿色盲眼里会糊成一片）。 */
   --on: #3fb950; --off: #6e7681; --bad: #f85149; --warn: #e3b341;
+  /* 按钮语义色：绿=启动/运行，红=停止/危险，黄=重启/谨慎。亮度和 accent
+     同档，深色下不用提亮也能和背景拉开对比。 */
+  --go: #3fb950; --danger: #f85149; --caution: #e3b341;
 }
 /* 浅色变量组，和下面媒体查询里的定义保持一致 */
 html.light {
   --bg: #f4f5f7; --card: #fff; --line: #e2e5ea;
   --fg: #1b1f24; --muted: #6b7280;
   --on: #1a7f37; --off: #9aa0a6; --bad: #cf222e; --warn: #bf8700;
+  --go: #1a7f37; --danger: #cf222e; --caution: #9a6700;
 }
 /* 「跟随系统」档（html 上没有 data-theme 时）：系统浅色 → 也加浅色变量。
    JS 会维护 html.classList 的 light，所以这里其实只是兜底，真正干活的是脚本。 */
@@ -29,6 +33,7 @@ html.light {
     --bg: #f4f5f7; --card: #fff; --line: #e2e5ea;
     --fg: #1b1f24; --muted: #6b7280;
     --on: #1a7f37; --off: #9aa0a6; --bad: #cf222e; --warn: #bf8700;
+    --go: #1a7f37; --danger: #cf222e; --caution: #9a6700;
   }
 }
 * { box-sizing: border-box; }
@@ -59,22 +64,69 @@ input, select {
   padding: .45rem .6rem; background: var(--bg); color: var(--fg);
 }
 #loginForm input { width: 100%; padding: .55rem .7rem; }
+/* ---------- 按钮体系：一套设计语言，按语义分档 ----------
+   统一的部分：圆角、边框 1px、字重、150ms 亮度过渡、hover 提亮一档。
+   分档按「操作后果」而不是「位置」：
+   - 默认（primary）：accent 蓝实心，弹窗里唯一的主操作（运行/确定）
+   - .chip：彩色浅底 + 彩字，页面上的常规动作（日志/源码/刷新…），蓝系
+   - .go / .stop / .restart：同 chip 的做法但换语义色——绿启动、红停止、黄重启，
+     深色下一排按钮不再是清一色蓝，哪个能点、哪个危险一眼扫出来
+   - .ghost：透明底灰字，最低频的次操作（退出/取消的备选位）
+   所有彩字都用 600 字重 + 色底，深色下对比度按 WCAG 大字号标准都过。 */
 button {
-  padding: .4rem .75rem; background: var(--accent); color: #fff;
+  padding: .4rem .8rem; background: var(--accent); color: #fff;
   border-color: transparent; cursor: pointer;
+  font-weight: 500;
+  transition: background-color .15s, border-color .15s, color .15s, opacity .15s;
 }
+button:hover:not(:disabled) { filter: brightness(1.12); }
 #loginForm button { width: 100%; margin-top: .75rem; padding: .55rem; }
-button:disabled { opacity: .4; cursor: not-allowed; }
-button.ghost { background: transparent; color: var(--muted); border-color: var(--line); }
-/* chip 档：比 ghost 醒目、比主按钮安静。accent 色系的浅底 + 彩字，
-   给「常用但非主操作」的按钮用（源码、拉取代码、一键复制）。 */
+button:disabled { opacity: .35; cursor: not-allowed; }
+
+/* chip 基型：彩色浅底 + 彩字。后面各语义档只换色相，别的都继承这里 */
 button.chip {
-  background: color-mix(in oklab, var(--accent) 16%, transparent);
-  color: var(--accent); border-color: color-mix(in oklab, var(--accent) 38%, transparent);
+  background: color-mix(in oklab, var(--accent) 15%, transparent);
+  color: var(--accent); border-color: color-mix(in oklab, var(--accent) 40%, transparent);
   font-weight: 600;
 }
 button.chip:hover:not(:disabled) {
-  background: color-mix(in oklab, var(--accent) 26%, transparent);
+  background: color-mix(in oklab, var(--accent) 27%, transparent);
+  border-color: color-mix(in oklab, var(--accent) 65%, transparent);
+}
+/* 语义档：和 chip 同构，只换色。--go 绿 / --danger 红 / --caution 黄 */
+button.go {
+  background: color-mix(in oklab, var(--go) 16%, transparent);
+  color: var(--go); border-color: color-mix(in oklab, var(--go) 42%, transparent);
+  font-weight: 600;
+}
+button.go:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--go) 28%, transparent);
+  border-color: color-mix(in oklab, var(--go) 65%, transparent);
+}
+button.stop {
+  background: color-mix(in oklab, var(--danger) 15%, transparent);
+  color: var(--danger); border-color: color-mix(in oklab, var(--danger) 42%, transparent);
+  font-weight: 600;
+}
+button.stop:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--danger) 27%, transparent);
+  border-color: color-mix(in oklab, var(--danger) 65%, transparent);
+}
+button.restart {
+  background: color-mix(in oklab, var(--caution) 15%, transparent);
+  color: var(--caution); border-color: color-mix(in oklab, var(--caution) 45%, transparent);
+  font-weight: 600;
+}
+button.restart:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--caution) 27%, transparent);
+  border-color: color-mix(in oklab, var(--caution) 70%, transparent);
+}
+button.ghost {
+  background: transparent; color: var(--muted); border-color: var(--line);
+  font-weight: 500;
+}
+button.ghost:hover:not(:disabled) {
+  color: var(--fg); border-color: var(--muted);
 }
 /* 深色下细滚动条：默认那种亮灰大块滚动条在深色 UI 里非常扎眼。
    Firefox 走 scrollbar-color，WebKit 走 ::-webkit-scrollbar。
@@ -211,8 +263,13 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
 /* 确认弹窗：比运行弹窗窄一点，提示文案略大 */
 .modal-sm { width: min(420px, 94vw); }
 .confirm-msg { margin: 0; font-size: .92rem; line-height: 1.6; color: var(--fg); }
-/* 确定按钮用主色调（默认 button 已是 accent 蓝，这里显式声明语义一致） */
+/* 确定按钮用主色调（默认 button 已是 accent 蓝，这里显式声明语义一致）。
+   停止/重启的确认按钮换对应语义色实心，让「我在确认什么」在按钮上就有预告 */
 .modal-foot button.primary { background: var(--accent); color: #fff; border-color: transparent; }
+.modal-foot button.danger { background: var(--danger); color: #fff; border-color: transparent; }
+.modal-foot button.caution { background: var(--caution); color: #11141a; border-color: transparent; }
+/* 运行弹窗的主操作：绿色实心，和表格里绿色「启动」一个语义 */
+.modal-foot button.go-solid { background: var(--go); color: #fff; border-color: transparent; }
 /* 运行弹窗内容（单 bin）：bin 名 + 参数文本域，原样透传 */
 .run-single { display: flex; flex-direction: column; gap: .5rem; }
 .run-bin-name { font-size: .95rem; color: var(--fg); font-weight: 600; }
@@ -342,8 +399,8 @@ if (document.documentElement.dataset.theme === 'auto'
     <span id="tick"></span>
     <button id="oracleCloud" type="button" class="ghost">Oracle Cloud</button>
     <button id="ddia" type="button" class="ghost">设计数据密集型应用</button>
-    <button id="themeBtn" type="button" class="ghost" title="切换黑夜/白天（跟随系统 → 白天 → 黑夜）">主题</button>
-    <button id="refresh" class="ghost">刷新</button>
+    <button id="themeBtn" type="button" class="chip" title="切换黑夜/白天（跟随系统 → 白天 → 黑夜）">主题</button>
+    <button id="refresh" class="chip">刷新</button>
     <button id="logout" class="ghost">退出</button>
   </header>
 
@@ -371,7 +428,7 @@ if (document.documentElement.dataset.theme === 'auto'
         <p id="runErr" class="err"></p>
       </div>
       <div class="modal-foot">
-        <button id="runGo" disabled>运行</button>
+        <button id="runGo" class="go-solid" disabled>运行</button>
         <button id="closeRun" class="chip cancel">取消</button>
       </div>
     </div>
@@ -655,9 +712,9 @@ function projectRow(u) {
   if (u.external) {
     // 自写的 unit 没有 bin 面板，对它来说「项目就是这一个 unit」，不存在选择歧义，
     // 启动/停止/重启/日志直接留在项目行
-    btn(ops, '启动', false, () => doAction(u, 'start', '启动'), 'chip');
-    btn(ops, '停止', false, () => doAction(u, 'stop', '停止'), 'chip');
-    btn(ops, '重启', false, () => doAction(u, 'restart', '重启'), 'chip');
+    btn(ops, '启动', false, () => doAction(u, 'start', '启动'), 'go');
+    btn(ops, '停止', false, () => doAction(u, 'stop', '停止'), 'stop');
+    btn(ops, '重启', false, () => doAction(u, 'restart', '重启'), 'restart');
     btn(ops, '日志', false, () => openLogs(u), 'chip');
   } else {
     // 普通项目：项目顶层只留「展开/收起」和「源码」，启动动作下移到 bin 面板各行
@@ -733,15 +790,16 @@ function binRow(u, inst) {
   ops.className = 'ops';
   // 四个按钮永远都在，按运行态做可用性控制：
   //   未运行：启动🉑、停止/重启灰；运行中：启动灰、停止/重启🉑；日志恒🉑
-  btn(ops, '启动', inst.running, () => openRun(u, inst.bin), 'chip');
-  btn(ops, '停止', !inst.running, () => binAction(u, inst, 'stop'), 'chip');
-  btn(ops, '重启', !inst.running, () => binAction(u, inst, 'restart'), 'chip');
+  btn(ops, '启动', inst.running, () => openRun(u, inst.bin), 'go');
+  btn(ops, '停止', !inst.running, () => binAction(u, inst, 'stop'), 'stop');
+  btn(ops, '重启', !inst.running, () => binAction(u, inst, 'restart'), 'restart');
   btn(ops, '日志', false, () => openLogs(u, inst.bin), 'chip');
   return tr;
 }
 
 /// 项目一级的通用操作（外部 unit 的启动/停止/重启），走自定义确认弹窗
 function doAction(u, act, label) {
+  const tone = act === 'stop' ? 'danger' : act === 'restart' ? 'caution' : '';
   openConfirm(`确认${label}`, `确认${label}该程序「${u.name}」吗？`, async () => {
     try {
       await req(`/api/units/${u.key}/${act}`, {
@@ -754,7 +812,7 @@ function doAction(u, act, label) {
       if (e.message !== '未登录') banner(`${label}「${u.name}」失败: ${e.message}`);
     }
     refresh();
-  });
+  }, tone);
 }
 
 // ---------- 自定义确认弹窗（替换原生 confirm）----------
@@ -762,10 +820,12 @@ let confirmCb = null;
 
 /// 打开确认弹窗：设标题/文案，确定时执行 onOk（可 async），执行完自动关。
 /// 关闭仅三种：右上角 X、取消按钮、确定执行完成后。
-function openConfirm(title, msg, onOk) {
+/// tone 决定确定按钮的语义色：danger 红（停止）/ caution 黄（重启）/ 空=默认蓝。
+function openConfirm(title, msg, onOk, tone) {
   confirmCb = onOk;
   $('confirmTitle').textContent = title;
   $('confirmMsg').textContent = msg;
+  $('confirmOk').className = tone || 'primary';
   $('confirmBox').hidden = false;
 }
 function closeConfirm() {
@@ -784,6 +844,7 @@ $('confirmOk').onclick = async () => {          // 确定：执行完毕后关�
 /// 单个 bin 的停止/重启：先弹自定义确认，确定后才执行，只动这一个 bin 的 unit
 function binAction(u, inst, act) {
   const label = act === 'stop' ? '停止' : '重启';
+  const tone = act === 'stop' ? 'danger' : 'caution';
   openConfirm(`确认${label}`, `确认${label}该 bin 程序「${inst.bin}」吗？`, async () => {
     try {
       await req(`/api/units/${u.key}/bins/${encodeURIComponent(inst.bin)}/${act}`, {
@@ -796,7 +857,7 @@ function binAction(u, inst, act) {
       if (e.message !== '未登录') banner(`${label}「${inst.bin}」失败: ${e.message}`);
     }
     refresh();
-  });
+  }, tone);
 }
 
 // ---------- 选程序（多选，每行独立参数）+ 填参数 ----------
