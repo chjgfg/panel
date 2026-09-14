@@ -254,6 +254,22 @@ async fn hljs_js() -> impl IntoResponse {
     )
 }
 
+// 页面自己的 CSS/JS：也是编译时嵌进二进制的（部署仍只拷一个可执行文件）。
+// 和 vendor 不同，它们跟页面同版本演进，设短缓存 + 升级换 v= 版本号。
+async fn style_css() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        include_str!("../static/style.css"),
+    )
+}
+
+async fn app_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "application/javascript; charset=utf-8")],
+        include_str!("../static/app.js"),
+    )
+}
+
 async fn host(State(app): State<Arc<App>>) -> Json<hostinfo::Host> {
     Json(hostinfo::host_stats(&app).await)
 }
@@ -954,6 +970,8 @@ async fn start() -> Result<(), BoxErr> {
 
     let router = Router::new()
         .route("/", get(index))
+        .route("/static/style.css", get(style_css))
+        .route("/static/app.js", get(app_js))
         .route("/vendor/highlight.11.12.0.min.js", get(hljs_js))
         .route("/api/login", post(auth::login))
         .merge(protected)

@@ -1,0 +1,419 @@
+:root {
+  /* 深色组：比「深灰」更进一步往深蓝黑走，背景压到接近纯黑，
+     卡片和背景的层次差靠亮度差而不是色相差，深色下每层都读得出来；
+     muted 提亮保住小字可读性，line 同步加深避免「脏边框」 */
+  --bg: #0b0d12; --card: #141821; --line: #272e3d;
+  --fg: #e7eaf0; --muted: #98a2b5; --accent: #5b9dff;
+  /* 表格状态点 + 仪表严重度。--warn 是按 CVD 可分辨性选的：
+     深色下 #e3b341 与 #f85149 的 deutan ΔE 12.3，浅色下 #bf8700 与 #cf222e 为 11.0，
+     都过了 8 这条线（#d29922 只有 5.8，红黄在红绿色盲眼里会糊成一片）。 */
+  --on: #3fb950; --off: #6e7681; --bad: #f85149; --warn: #e3b341;
+  /* 按钮语义色：绿=启动/运行，红=停止/危险，黄=重启/谨慎。亮度和 accent
+     同档，深色下不用提亮也能和背景拉开对比。 */
+  --go: #3fb950; --danger: #f85149; --caution: #e3b341;
+}
+/* 浅色变量组，和下面媒体查询里的定义保持一致 */
+html.light {
+  --bg: #f4f5f7; --card: #fff; --line: #e2e5ea;
+  --fg: #1b1f24; --muted: #6b7280;
+  --on: #1a7f37; --off: #9aa0a6; --bad: #cf222e; --warn: #bf8700;
+  --go: #1a7f37; --danger: #cf222e; --caution: #9a6700;
+}
+/* 「跟随系统」档（html 上没有 data-theme 时）：系统浅色 → 也加浅色变量。
+   JS 会维护 html.classList 的 light，所以这里其实只是兜底，真正干活的是脚本。 */
+@media (prefers-color-scheme: light) {
+  html:not([data-theme]) {
+    --bg: #f4f5f7; --card: #fff; --line: #e2e5ea;
+    --fg: #1b1f24; --muted: #6b7280;
+    --on: #1a7f37; --off: #9aa0a6; --bad: #cf222e; --warn: #bf8700;
+    --go: #1a7f37; --danger: #cf222e; --caution: #9a6700;
+  }
+}
+* { box-sizing: border-box; }
+
+/* 必须 !important：浏览器让 hidden 生效靠的是自带样式表里的 [hidden]{display:none}，
+   而下面 #login{display:flex} 是作者样式表里的 id 选择器，优先级更高会把它顶掉，
+   结果就是 hidden 属性加上了、元素照样显示。 */
+[hidden] { display: none !important; }
+body {
+  margin: 0; padding: 1rem; background: var(--bg); color: var(--fg);
+  font: 15px/1.5 system-ui, "Microsoft YaHei", sans-serif;
+}
+h1 { font-size: 1.15rem; margin: 0; }
+h2 { font-size: .95rem; margin: 0; }
+.err { color: var(--bad); margin: .5rem 0; font-size: .85rem; min-height: 1.2em; }
+#tick { color: var(--muted); font-size: .8rem; }
+
+#login { display: flex; min-height: 80vh; align-items: center; justify-content: center; }
+#loginForm {
+  width: min(320px, 100%); padding: 1.5rem; background: var(--card);
+  border: 1px solid var(--line); border-radius: 10px;
+}
+#loginForm h1 { margin-bottom: 1rem; }
+input, button, select {
+  font: inherit; border-radius: 6px; border: 1px solid var(--line);
+}
+input, select {
+  padding: .45rem .6rem; background: var(--bg); color: var(--fg);
+}
+#loginForm input { width: 100%; padding: .55rem .7rem; }
+/* ---------- 按钮体系：一套设计语言，按语义分档 ----------
+   统一的部分：圆角、边框 1px、150ms 过渡、hover 提亮一档、同样的内边距。
+   分档按「操作后果」而不是「位置」：
+   - 默认（primary）：accent 蓝实心，弹窗里唯一的主操作（运行/确定）
+   - .chip：中性实底软按钮。用 fg 往 card 里兑出来的实色底，不用透明蓝浆——
+     透明色叠在不同背景上会发灰发闷，实底在任何位置观感都一致
+   - .go / .stop / .restart：同 chip 的实底构造但兑语义色——绿启动、红停止、黄重启
+   - .ghost：无边框的安静文字钮，hover 才给一层浅底，外链和退出用 */
+button {
+  padding: .38rem .8rem; background: var(--accent); color: #fff;
+  border-color: transparent; cursor: pointer;
+  font-weight: 500;
+  transition: background-color .15s, border-color .15s, color .15s, opacity .15s;
+}
+button:hover:not(:disabled) { filter: brightness(1.1); }
+#loginForm button { width: 100%; margin-top: .75rem; padding: .55rem; }
+button:disabled { opacity: .35; cursor: not-allowed; }
+
+/* 中性软按钮：实底比 card 亮一档，正文色文字。常规动作的默认档 */
+button.chip {
+  background: color-mix(in oklab, var(--fg) 8%, var(--card));
+  color: var(--fg); border-color: var(--line);
+}
+button.chip:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--fg) 14%, var(--card));
+  border-color: color-mix(in oklab, var(--fg) 30%, var(--line));
+}
+/* 语义档：同样的实底构造，把兑进 card 的色从 fg 换成语义色。
+   底是低饱和色块、字是纯语义色，深色下亮堂、浅色下沉稳 */
+button.go {
+  background: color-mix(in oklab, var(--go) 16%, var(--card));
+  color: var(--go); border-color: color-mix(in oklab, var(--go) 38%, var(--card));
+  font-weight: 600;
+}
+button.go:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--go) 26%, var(--card));
+}
+button.stop {
+  background: color-mix(in oklab, var(--danger) 16%, var(--card));
+  color: var(--danger); border-color: color-mix(in oklab, var(--danger) 38%, var(--card));
+  font-weight: 600;
+}
+button.stop:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--danger) 26%, var(--card));
+}
+button.restart {
+  background: color-mix(in oklab, var(--caution) 15%, var(--card));
+  color: var(--caution); border-color: color-mix(in oklab, var(--caution) 40%, var(--card));
+  font-weight: 600;
+}
+button.restart:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--caution) 25%, var(--card));
+}
+/* 安静档：平时就是一行灰字，hover 才浮出底色。外链、退出这类最低频的用 */
+button.ghost {
+  background: transparent; color: var(--muted); border-color: transparent;
+}
+button.ghost:hover:not(:disabled) {
+  color: var(--fg);
+  background: color-mix(in oklab, var(--fg) 8%, transparent);
+}
+/* 深色下细滚动条：默认那种亮灰大块滚动条在深色 UI 里非常扎眼。
+   Firefox 走 scrollbar-color，WebKit 走 ::-webkit-scrollbar。
+   滚动条颜色用 muted 和 line，跟主题走，白天黑夜都不突兀。 */
+* { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: color-mix(in oklab, var(--muted) 30%, transparent);
+  border-radius: 5px;
+  /* 滚动条贴着内容一侧留 3px 透明边，视觉宽度 4px，不挡内容 */
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in oklab, var(--muted) 55%, transparent);
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-corner { background: transparent; }
+
+#app { max-width: min(1600px, 96vw); margin: 0 auto; }
+
+/* ---------- 整机资源：一排 stat tile，每个是一个「占比对上限」的仪表 ---------- */
+.stats {
+  display: grid; gap: .6rem; margin-bottom: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+}
+.tile {
+  padding: .6rem .7rem; background: var(--card);
+  border: 1px solid var(--line); border-radius: 10px;
+}
+.tile b { display: block; font-weight: 400; font-size: .78rem; color: var(--muted); }
+/* 数值每 3 秒重绘一次，用等宽数字免得位数变化时左右抖动 */
+.tile strong {
+  display: block; margin: .15rem 0 .25rem; font-size: 1.25rem; font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.tile small { color: var(--muted); font-size: .75rem; }
+/* 轨道取填充色的浅一档（同色相），这样整条都在表达状态，而不是一半灰一半彩 */
+.meter {
+  height: 6px; margin-top: .45rem; border-radius: 3px; overflow: hidden;
+  background: var(--line);
+  background: color-mix(in oklab, var(--m) 22%, transparent);
+}
+.meter i { display: block; height: 100%; border-radius: 3px; background: var(--m); }
+#app > header {
+  display: flex; align-items: center; gap: .75rem; margin-bottom: .75rem;
+}
+#oracleCloud { margin-left: auto; }
+table {
+  width: 100%; border-collapse: collapse; background: var(--card);
+  border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
+}
+th, td { padding: .6rem .7rem; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; vertical-align: middle; }
+th { font-size: .78rem; color: var(--muted); }
+tbody tr:last-child td { border-bottom: 0; }
+tr.busy { opacity: .5; }
+tbody tr { vertical-align: middle; }
+td.name { white-space: normal; }
+td.name small { display: block; color: var(--muted); font-size: .75rem; }
+/* 操作按钮组不用 flex：flex 容器会让这个单元格走自己的垂直对齐通道，
+   和同行的普通文字单元格中线对不齐，按钮就上下飘。
+   改回行内元素 + vertical-align:middle，按钮和本行文字统一按中线对齐。 */
+td.ops { white-space: nowrap; }
+td.ops button { margin-right: .4rem; vertical-align: middle; }
+td.ops button:last-child { margin-right: 0; }
+/* 项目行展开箭头 */
+td.name .caret { cursor: pointer; user-select: none; margin-right: .4rem; color: var(--muted); }
+td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
+/* 项目块：每个项目 = 一张项目行表（放表格里）+ 下方表格外的 bin 独立面板 */
+#projList { display: flex; flex-direction: column; gap: .4rem; margin-top: .4rem; }
+.proj-block > table { margin: 0; }
+/* 主表格（表头 + 每个项目行）列宽统一钉死：table-layout:fixed 让每一列都按下面
+   的百分比走，表头和各项目行表格列宽完全一致，绝不因内容长度漂移错位。 */
+.stack-table { table-layout: fixed; width: 100%; }
+.stack-table th:nth-child(1), .stack-table td:nth-child(1) { width: 30%; }
+.stack-table th:nth-child(2), .stack-table td:nth-child(2) { width: 16%; }
+.stack-table th:nth-child(3), .stack-table td:nth-child(3) { width: 14%; }
+.stack-table th:nth-child(4), .stack-table td:nth-child(4) { width: 10%; }
+.stack-table th:nth-child(5), .stack-table td:nth-child(5) { width: 15%; }
+.stack-table th:nth-child(6), .stack-table td:nth-child(6) { width: 15%; }
+/* bin 独立面板：缩进一点，跟上方项目行区分开；内部列表，行数多时自己滚，不碰外层表格。
+   左右两侧 margin 取同一个值，左右留白对称：左侧跟上方父项目容器保持一致的缩进，
+   右侧留出一模一样的同等留白，展开/收起时面板始终水平居中，不会左右偏移晃动。 */
+.bin-panel {
+  margin: .35rem 1.6rem 0 1.6rem;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: color-mix(in oklab, var(--card) 92%, transparent);
+  overflow: auto; max-height: 46vh;
+}
+.bin-panel table { border: 0; border-radius: 0; }
+.bin-panel th { font-size: .72rem; }
+.bin-panel td { padding: .4rem .7rem; }
+.bin-panel .ops { white-space: nowrap; }
+.bin-panel .ops button { padding: .25rem .6rem; font-size: .8rem; }
+.dot {
+  display: inline-block; width: .6rem; height: .6rem; margin-right: .45rem;
+  border-radius: 50%; background: var(--off);
+}
+.dot.on { background: var(--on); }
+.dot.bad { background: var(--bad); }
+
+#projList { margin-top: .4rem; }
+/* 运行弹窗：模态遮罩 + 居中卡片，遮罩不拦截点击（点击遮罩不关闭弹窗）。
+   遮罩和投影用半透明纯黑：白天压暗页面聚焦弹窗，黑夜融进背景只留弹窗亮着 */
+.overlay {
+  position: fixed; inset: 0; z-index: 50;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, .55);
+}
+.modal {
+  width: min(520px, 94vw); max-height: 84vh;
+  display: flex; flex-direction: column;
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, .5), 0 0 0 1px rgba(255, 255, 255, .02);
+  overflow: hidden;
+}
+.modal-head {
+  display: flex; align-items: center; gap: .75rem;
+  padding: .9rem 1rem; border-bottom: 1px solid var(--line);
+}
+.modal-head h2 { margin: 0; font-size: 1rem; }
+.modal-head .close-x {
+  margin-left: auto; background: transparent; color: var(--muted);
+  border: 0; font-size: 1.4rem; line-height: 1; padding: .2rem .5rem;
+  cursor: pointer;
+}
+.modal-head .close-x:hover { color: var(--fg); }
+.modal-body { padding: .9rem 1rem; overflow: auto; }
+.modal-foot {
+  display: flex; justify-content: flex-end; gap: .6rem;
+  padding: .8rem 1rem; border-top: 1px solid var(--line);
+}
+/* 确认弹窗：比运行弹窗窄一点，提示文案略大 */
+.modal-sm { width: min(420px, 94vw); }
+.confirm-msg { margin: 0; font-size: .92rem; line-height: 1.6; color: var(--fg); }
+/* 确定按钮用主色调（默认 button 已是 accent 蓝，这里显式声明语义一致）。
+   停止/重启的确认按钮换对应语义色实心，让「我在确认什么」在按钮上就有预告 */
+.modal-foot button.primary { background: var(--accent); color: #fff; border-color: transparent; }
+.modal-foot button.danger { background: var(--danger); color: #fff; border-color: transparent; }
+.modal-foot button.caution { background: var(--caution); color: #14161c; border-color: transparent; }
+/* 运行弹窗的主操作：绿色实心，和表格里绿色「启动」一个语义 */
+.modal-foot button.go-solid { background: var(--go); color: #fff; border-color: transparent; }
+/* 运行弹窗内容（单 bin）：bin 名 + 参数文本域，原样透传 */
+.run-single { display: flex; flex-direction: column; gap: .5rem; }
+.run-bin-name { font-size: .95rem; color: var(--fg); font-weight: 600; }
+.run-single textarea.arg { width: 100%; resize: vertical; padding: .5rem .6rem; font-size: .85rem; font-family: inherit; line-height: 1.4; min-height: 6rem; }
+#runErr { margin: .5rem 0 0; }
+/* 日志弹窗：几乎占满可视区，长尾日志无需频繁横滚也能尽量整行显示；
+   高度覆盖 .modal 的 84vh 上限并自行定高，靠 flex 把高度让给日志区 */
+.modal-log {
+  width: min(1600px, 95vw);
+  height: 90vh;
+  max-height: none;
+}
+.modal-head .log-src { display: inline-flex; align-items: center; gap: .4rem; color: var(--muted); font-size: .85rem; }
+.modal-head .log-src select { padding: .3rem .5rem; font-size: .85rem; }
+/* 每条日志标来源 bin，用不同于正文的 muted 色，一眼分清归属 */
+#logBody .src { color: var(--accent); font-weight: 600; }
+#logBody {
+  margin: 0; flex: 1; min-height: 0; overflow: auto; padding: .7rem;
+  background: var(--card); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+  font: 12.5px/1.5 ui-monospace, Consolas, monospace;
+  /* 不换行：一行日志就是一条记录，折行之后时间戳对不齐，很难扫。
+     太长的横向滚动看。 */
+  white-space: pre;
+}
+/* 源码弹窗：左右分栏。左边目录树窄一些（大项目树会很深），右边占大头看代码 */
+.src-layout {
+  flex: 1; min-height: 0;
+  display: flex;
+  border-top: 1px solid var(--line);
+}
+.src-layout > * { min-width: 0; } /* pre 内容再长也不许把分栏顶宽 */
+#srcTree {
+  width: 260px; flex-shrink: 0; overflow: auto;
+  padding: .6rem .3rem;
+  border-right: 1px solid var(--line);
+  font-size: .85rem;
+  /* 树要自己滚，不能跟着右边代码一起滚 */
+}
+/* 拖拽调宽条：夹在树和代码之间的一条窄竖条，hover 高亮提示可拖 */
+#srcTreeGrip {
+  flex-shrink: 0; width: 5px; cursor: col-resize;
+  background: transparent;
+}
+#srcTreeGrip:hover, #srcTreeGrip.on { background: var(--accent); }
+/* 树收起时:树和拖拽条都不占地方,代码区吃满整个弹窗 */
+.src-layout.notree #srcTree, .src-layout.notree #srcTreeGrip { display: none; }
+/* 工具栏最左边的目录开关按钮,固定宽度,免得切换时整行按钮跟着跳 */
+#srcTreeToggle { flex-shrink: 0; white-space: nowrap; }
+/* 树节点：行内块按钮化，点击切换文件；目录名左侧的小箭头单独可点收起 */
+#srcTree .node {
+  display: block; width: 100%;
+  text-align: left; background: transparent; color: var(--fg);
+  border: 0; padding: .15rem .4rem; border-radius: 4px;
+  cursor: pointer; font: inherit;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#srcTree .node:hover { background: var(--line); }
+#srcTree .node.cur { background: color-mix(in oklab, var(--accent) 25%, transparent); }
+#srcTree .node .tw {
+  display: inline-block; width: 1em; color: var(--muted);
+  user-select: none;
+}
+#srcTree .kids { margin-left: 1.5rem; border-left: 1px solid var(--line); padding-left: .25rem; }
+/* 顶层容器就是整棵树的根,不吃缩进 */
+#srcTree > .kids { margin-left: 0; border-left: 0; padding-left: 0; }
+.src-right { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.src-toolbar {
+  display: flex; align-items: center; gap: .6rem;
+  padding: .5rem .8rem; border-bottom: 1px solid var(--line);
+}
+.src-toolbar .src-path {
+  flex: 1; min-width: 0;
+  font-family: ui-monospace, Consolas, monospace; font-size: .8rem;
+  color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.src-toolbar button { flex-shrink: 0; }
+/* pull/复制 的结果提示条，成功绿色失败红色，几秒后自动淡出 */
+.src-msg {
+  padding: .35rem .8rem; font-size: .8rem;
+  border-bottom: 1px solid var(--line);
+}
+.src-msg.ok { color: var(--on); }
+.src-msg.bad { color: var(--bad); }
+#srcBody {
+  flex: 1; min-height: 0; overflow: auto; margin: 0; padding: .65rem 0;
+  font: 12.5px/1.6 ui-monospace, Consolas, monospace;
+  tab-size: 4;
+  /* 源码可以折行吗?不折,一行 import 就能看出层次。太长横向滚动看 */
+  white-space: pre;
+  counter-reset: ln;
+  /* 行号与 token 调色板。深浅两套在 html.light 里整体换,语义到颜色的映射不变:
+     行号=灰,关键字=紫,函数=蓝,字符串=绿,数字=橙,类型=青,属性=琥珀,语言内建变量=红 */
+  --ln: #3d4466;
+  --tk-fg: #a9b1d6; --tk-kw: #bb9af7; --tk-fn: #7aa2f7; --tk-str: #9ece6a;
+  --tk-num: #ff9e64; --tk-com: #565f89; --tk-type: #2ac3de; --tk-attr: #e0af68;
+  --tk-var: #f7768e;
+}
+html.light #srcBody {
+  --ln: #a0a8b8;
+  --tk-fg: #2a2f3a; --tk-kw: #8250df; --tk-fn: #0550ae; --tk-str: #0a7d3f;
+  --tk-num: #b3541e; --tk-com: #6e7781; --tk-type: #0f7ea8; --tk-attr: #954f0e;
+  --tk-var: #cf222e;
+}
+/* ---------- 源码行:gutter 与代码两列 ----------
+   每行 .cl 是一行 flex:左列 ::before 是行号(右对齐、定宽,宽度 --ln-w 由 JS
+   按总行数位数设,几个字符就几 ch),右列 code 是代码。两列 baseline 对齐,
+   行号右边一道细分隔线 + 固定间距,和代码不挤在一起;
+   行号 sticky 钉在左边,横向滚长行时代码从行号底下滚过去 */
+#srcBody .cl { display: flex; align-items: baseline; }
+#srcBody .cl::before {
+  counter-increment: ln;
+  content: counter(ln);
+  flex: none; width: var(--ln-w, 3ch);
+  padding-right: .75rem; margin-right: 1.1rem;
+  text-align: right; color: var(--ln); user-select: none;
+  border-right: 1px solid var(--line);
+  position: sticky; left: 0; background: var(--card);
+}
+#srcBody .cl code { font: inherit; color: var(--tk-fg); }
+/* ---------- 语法高亮 ----------
+   用 highlight.js(本地 vendor,编译时嵌进二进制,不走 CDN——面板可能没外网)。
+   它输出的 HTML 已转义过,直接塞 innerHTML 安全。
+   token 配色不用官方主题:官方把十几类 token 挤成一两个颜色,分不出来;
+   这里自己按语义分色,深浅两套只换色值不换映射 */
+#srcBody .hljs-keyword, #srcBody .hljs-selector-tag { color: var(--tk-kw); }
+#srcBody .hljs-title, #srcBody .hljs-title.function_ { color: var(--tk-fn); }
+#srcBody .hljs-title.class_, #srcBody .hljs-title.class_.inherited__ { color: var(--tk-type); }
+#srcBody .hljs-section { color: var(--tk-fn); font-weight: 600; }
+#srcBody .hljs-string, #srcBody .hljs-regexp, #srcBody .hljs-quote,
+#srcBody .hljs-symbol, #srcBody .hljs-addition { color: var(--tk-str); }
+#srcBody .hljs-number, #srcBody .hljs-literal { color: var(--tk-num); }
+#srcBody .hljs-comment, #srcBody .hljs-meta { color: var(--tk-com); font-style: italic; }
+#srcBody .hljs-type, #srcBody .hljs-built_in { color: var(--tk-type); }
+#srcBody .hljs-attr, #srcBody .hljs-attribute, #srcBody .hljs-property,
+#srcBody .hljs-name, #srcBody .hljs-operator { color: var(--tk-attr); }
+#srcBody .hljs-variable.language_, #srcBody .hljs-tag,
+#srcBody .hljs-template-variable, #srcBody .hljs-deletion { color: var(--tk-var); }
+#srcBody .hljs-emphasis { font-style: italic; }
+#srcBody .hljs-strong { font-weight: 700; }
+/* 语言徽标:用各语言的社区品牌色,文件还没读就知道是个什么文件 */
+.lang-tag {
+  flex-shrink: 0; font-size: .68rem; font-weight: 700; letter-spacing: .03em;
+  padding: .1rem .55rem; border-radius: 99px; text-transform: uppercase;
+}
+/* 手机上树放不下 260px,收窄一点 */
+@media (max-width: 640px) {
+  #srcTree { width: 180px; }
+}
+@media (max-width: 640px) {
+  body { padding: .6rem; }
+  th, td { padding: .5rem .45rem; font-size: .85rem; }
+  th:nth-child(4), td:nth-child(4) { display: none; }
+  td.ops button { white-space: normal; }   /* 手机上让按钮可换行，避免顶出横向滚动条 */
+}
