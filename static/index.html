@@ -1164,15 +1164,32 @@ function treeNodes(nodes, expanded) {
   return wrap;
 }
 
-function showFile(n, row) {
+/// 文件内容前端缓存：树接口只给结构，点开文件时走 /file 拉内容。
+/// 同一次打开源码弹窗期间，来回切文件不用重复请求。
+const fileCache = new Map();
+
+async function showFile(n, row) {
   srcCur = n;
   $('srcTree').querySelectorAll('.node.cur').forEach(el => el.classList.remove('cur'));
   if (row) row.classList.add('cur');
   $('srcPath').textContent = n.path;
-  if (n.content == null) {
-    $('srcBody').textContent = '(二进制文件或超过 512KB,不展示内容)';
-  } else {
-    $('srcBody').textContent = n.content;
+  if (n.big) {
+    $('srcBody').textContent = '(超过 512KB,不展示内容)';
+    return;
+  }
+  if (fileCache.has(n.path)) {
+    const c = fileCache.get(n.path);
+    $('srcBody').textContent = c == null ? '(二进制文件,不展示内容)' : c;
+    return;
+  }
+  $('srcBody').textContent = '加载中…';
+  try {
+    const body = await (await req(`/api/units/${srcKey}/file?path=${encodeURIComponent(n.path)}`)).json();
+    fileCache.set(n.path, body.content);
+    if (srcCur !== n) return;   // 等待期间用户又点了别的文件，别覆盖
+    $('srcBody').textContent = body.content == null ? '(二进制文件,不展示内容)' : body.content;
+  } catch (e) {
+    if (e.message !== '未登录') srcMsg('读文件失败: ' + e.message, false);
   }
 }
 
@@ -1230,9 +1247,10 @@ function copyText(text) {
 
 $('srcCopy').onclick = async () => {
   if (!srcCur) return srcMsg('先在左边选一个文件', false);
-  if (srcCur.content == null) return srcMsg('这个文件没有可复制的内容', false);
+  const content = fileCache.get(srcCur.path);
+  if (content == null) return srcMsg('这个文件没有可复制的内容', false);
   try {
-    await copyText(srcCur.content);
+    await copyText(content);
     srcMsg(`已复制 ${srcCur.path}`, true);
   } catch {
     srcMsg('复制失败：浏览器拒绝了复制操作', false);
@@ -1243,6 +1261,7 @@ function closeSrcBox() {
   srcKey = null;
   srcCache = null;
   srcCur = null;
+  fileCache.clear();
   $('srcTree').replaceChildren();
   $('srcBody').textContent = '';
   $('srcPath').textContent = '';

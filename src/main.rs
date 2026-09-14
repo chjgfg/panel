@@ -1284,19 +1284,24 @@ async fn logs(
 
 // ---------- 查看源码 ----------
 
-/// 源码树里不放的名字：点开头的隐藏项（.git、.idea 之类）和 target（编译产物）。
+/// 源码树里不放的名字：点开头的隐藏项（.git、.idea 之类）、编译产物和依赖目录。
 /// 例外白名单：.env.example、.gitignore 这类常要看的点文件放行。
+/// node_modules/vendor 这类目录一个就好几万文件，进来树就废了。
 fn tree_skip(name: &str) -> bool {
     const DOTFILES_KEEP: &[&str] = &[
         ".env.example", ".env.local.example", ".env.sample",
         ".gitignore", ".gitattributes", ".dockerignore",
         ".editorconfig", ".npmrc", ".nvmrc", ".rustfmt.toml", ".rust-toolchain",
     ];
-    (name.starts_with('.') && !DOTFILES_KEEP.contains(&name)) || name == "target"
+    const DIRS_SKIP: &[&str] = &[
+        "target", "node_modules", "vendor", "dist", "build",
+        "out", "__pycache__", "venv", ".venv",
+    ];
+    (name.starts_with('.') && !DOTFILES_KEEP.contains(&name)) || DIRS_SKIP.contains(&name)
 }
 
 /// 提供文件内容的大小上限（512KB）。超了只列名字不给内容，
-/// 免得哪个大文件把整个 JSON 撑爆。
+/// 免得哪个大文件把响应撑爆。
 const MAX_SRC_FILE: u64 = 512 * 1024;
 
 #[derive(Serialize)]
@@ -1305,14 +1310,15 @@ struct Node {
     /// 相对项目根的路径，用 / 连接
     path: String,
     dir: bool,
-    /// 文件内容。None = 二进制（不是合法 UTF-8）或超过大小上限
-    #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    /// 文件超过 512KB：树里就标出来，前端点都不用点
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    big: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     children: Vec<Node>,
 }
 
-/// 递归扫一个目录成一列 Node。目录在前、文件在后,各自按名字排。
+/// 递归扫一个目录成一列 Node。只出结构不读内容——文件内容走 /file 懒加载，
+/// 否则项目一大，扫树就得把几百个文件挨个读一遍。
 /// 递归 async fn 必须装箱,否则 future 大小算不出来。
 fn walk<'a>(dir: &'a std::path::Path, rel: &'a str) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<Node>> + Send + 'a>> {
     Box::pin(async move {
@@ -1330,17 +1336,11 @@ fn walk<'a>(dir: &'a std::path::Path, rel: &'a str) -> std::pin::Pin<Box<dyn std
         let path = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
         let node = if ft.is_dir() {
             let kids = walk(&e.path(), &path).await;
-            Node { name, path, dir: true, content: None, children: kids }
+            Node { name, path, dir: true, big: false, children: kids }
         } else if ft.is_file() {
-            // metadata 读不到就没法判大小，干脆不给内容
+            // metadata 读不到就当大文件处理，免得点了报错
             let big = e.metadata().await.map_or(true, |m| m.len() > MAX_SRC_FILE);
-            let content = if big {
-                None
-            } else {
-                // 按 UTF-8 读不进来就是二进制，照样不给内容
-                tokio::fs::read(&e.path()).await.ok().and_then(|b| String::from_utf8(b).ok())
-            };
-            Node { name, path, dir: false, content, children: Vec::new() }
+            Node { name, path, dir: false, big, children: Vec::new() }
         } else {
             continue; // socket、fifo 之类
         };
@@ -1351,13 +1351,57 @@ fn walk<'a>(dir: &'a std::path::Path, rel: &'a str) -> std::pin::Pin<Box<dyn std
     })
 }
 
-/// 项目目录树（内容一并带上，前端切文件不用再发请求）
+/// 项目目录树（只给结构，内容点开文件时另走 /file，见下）
 async fn tree(State(app): State<Arc<App>>, Path(key): Path<String>) -> Response {
     let Some((name, dir)) = resolve(&app, &key).await else {
         return (StatusCode::NOT_FOUND, "未知项目").into_response();
     };
     let children = walk(&dir, "").await;
-    Json(Node { name, path: String::new(), dir: true, content: None, children }).into_response()
+    Json(Node { name, path: String::new(), dir: true, big: false, children }).into_response()
+}
+
+/// 懒加载取文件时的路径检查：必须是相对路径，不带 .. 穿越到项目外，
+/// 且路径上每段都是树里会显示的名字（node_modules 之类就算拼 URL 也读不到）
+fn file_path_ok(path: &str) -> bool {
+    !path.starts_with('/')
+        && path.split('/').all(|seg| !seg.is_empty() && seg != ".." && !tree_skip(seg))
+}
+
+#[derive(Serialize)]
+struct FileBody {
+    /// None = 二进制（不是合法 UTF-8）。大小上限在树里已标 big，这里再防一道
+    content: Option<String>,
+}
+
+/// 单个文件内容。树接口只给结构，这里点哪个文件读哪个
+async fn file(
+    State(app): State<Arc<App>>,
+    Path(key): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let Some((_, dir)) = resolve(&app, &key).await else {
+        return (StatusCode::NOT_FOUND, "未知项目").into_response();
+    };
+    let Some(path) = q.get("path") else {
+        return (StatusCode::BAD_REQUEST, "缺 path 参数").into_response();
+    };
+    if !file_path_ok(path) {
+        return (StatusCode::BAD_REQUEST, "非法路径").into_response();
+    }
+    let full = dir.join(path);
+    let Ok(meta) = tokio::fs::metadata(&full).await else {
+        return (StatusCode::NOT_FOUND, "文件不存在").into_response();
+    };
+    if !meta.is_file() {
+        return (StatusCode::BAD_REQUEST, "不是文件").into_response();
+    }
+    let content = if meta.len() > MAX_SRC_FILE {
+        None
+    } else {
+        // 按 UTF-8 读不进来就是二进制，照样不给内容
+        tokio::fs::read(&full).await.ok().and_then(|b| String::from_utf8(b).ok())
+    };
+    Json(FileBody { content }).into_response()
 }
 
 /// 在项目目录里 git pull 最新代码
@@ -1495,6 +1539,7 @@ async fn start() -> Result<(), BoxErr> {
         .route("/api/host", get(host))
         .route("/api/units/{key}/logs", get(logs))
         .route("/api/units/{key}/tree", get(tree))
+        .route("/api/units/{key}/file", get(file))
         .route("/api/units/{key}/pull", get(pull))
         .route("/api/units/{key}/bins/{bin}/{action}", post(bin_action))
         .route("/api/units/{key}/{action}", post(action))
@@ -1816,6 +1861,33 @@ mod tests {
         assert!(!tree_skip(".gitignore"));
         // 但 .env 本体是密钥，不放
         assert!(tree_skip(".env"));
+    }
+
+    #[test]
+    fn 依赖和构建目录也过滤() {
+        for d in ["node_modules", "vendor", "dist", "build", "out", "__pycache__", "venv", ".venv"] {
+            assert!(tree_skip(d), "{d} 该被过滤");
+        }
+        // 名字里含这些词但不完全相等的不误伤
+        assert!(!tree_skip("outbox"));
+        assert!(!tree_skip("dist_config"));
+        assert!(!tree_skip("build.rs"));
+    }
+
+    #[test]
+    fn 文件路径穿越挡在门外() {
+        // 相对路径、每段干净，放行
+        assert!(file_path_ok("src/main.rs"));
+        assert!(file_path_ok("a/b/c.txt"));
+        assert!(file_path_ok(".gitignore"));
+        // 绝对路径、.. 穿越、空段，都拒
+        assert!(!file_path_ok("/etc/passwd"));
+        assert!(!file_path_ok("src/../Cargo.toml"));
+        assert!(!file_path_ok("src//main.rs"));
+        assert!(!file_path_ok(""));
+        // 树里不显示的目录，拼 URL 也读不到
+        assert!(!file_path_ok("node_modules/x/index.js"));
+        assert!(!file_path_ok(".env"));
     }
 
     #[test]
