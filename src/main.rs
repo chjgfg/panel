@@ -760,6 +760,29 @@ async fn index() -> impl IntoResponse {
     )
 }
 
+// 语法高亮用 highlight.js，和页面一样编译时嵌进二进制，部署不依赖外网。
+// 文件名带版本号，升级换文件名即可让缓存失效，可以放心设长缓存
+// （no_cache 中间件里对 /vendor/ 单独放行）。
+async fn hljs_js() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        include_str!("../static/vendor/highlight.11.12.0.min.js"),
+    )
+}
+
+async fn hljs_css() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        include_str!("../static/vendor/highlight.11.12.0.min.css"),
+    )
+}
+
 #[derive(Deserialize)]
 struct LoginReq {
     password: String,
@@ -1441,10 +1464,14 @@ async fn main() {
 
 /// 页面和接口都不许缓存。网页是 include_str! 编译进二进制的，
 /// 面板升级后浏览器还拿着旧页面的话，症状会非常难查（后端新、前端旧）。
+/// vendor 下的静态资源除外：文件名带 hash，内容永远不会变。
 async fn no_cache(req: Request, next: Next) -> Response {
+    let vendor = req.uri().path().starts_with("/vendor/");
     let mut res = next.run(req).await;
-    res.headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    if !vendor {
+        res.headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
     res
 }
 
@@ -1547,6 +1574,8 @@ async fn start() -> Result<(), BoxErr> {
 
     let router = Router::new()
         .route("/", get(index))
+        .route("/vendor/highlight.11.12.0.min.js", get(hljs_js))
+        .route("/vendor/highlight.11.12.0.min.css", get(hljs_css))
         .route("/api/login", post(login))
         .merge(protected)
         .layer(middleware::from_fn(no_cache))

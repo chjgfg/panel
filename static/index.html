@@ -355,10 +355,44 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
 .src-msg.ok { color: var(--on); }
 .src-msg.bad { color: var(--bad); }
 #srcBody {
-  flex: 1; min-height: 0; overflow: auto; margin: 0; padding: .7rem;
+  flex: 1; min-height: 0; overflow: auto; margin: 0; padding: .6rem 0;
   font: 12.5px/1.5 ui-monospace, Consolas, monospace;
   /* 源码可以折行吗?不折,一行 import 就能看出层次。太长横向滚动看 */
   white-space: pre;
+  counter-reset: ln;
+}
+/* ---------- 语法高亮 ----------
+   用 highlight.js(本地 vendor,编译时嵌进二进制,不走 CDN——面板可能没外网)。
+   一行一个 .cl div(CSS 计数器出行号),token 的颜色由 tokyo-night-dark 主题上色。
+   主题只给深色一套:浅色模式下套 .light 作用域覆盖回面板自己的柔和色。 */
+#srcBody .cl { white-space: pre; padding-right: 1.2rem; }
+#srcBody .cl::before {
+  counter-increment: ln;
+  content: counter(ln);
+  display: inline-block; min-width: 3.2em; margin: 0 1rem 0 .9rem;
+  text-align: right; color: #3d4466; user-select: none;
+  /* 横向滚长行时,代码从行号底下滚过去,行号钉死在左边 */
+  position: sticky; left: 0; background: var(--card);
+}
+/* highlight.js 的 token 色直接用主题,只需接管行号/背景这些面板自己的部分 */
+#srcBody .hljs { background: transparent; padding: 0; }
+/* 浅色模式下 35 门语言的深色主题没法逐个换,统一压成面板自己的低饱和配色:
+   token 类名是 highlight.js 的语义类(keyword/string/number/comment/…) */
+html.light #srcBody .hljs-keyword { color: #8250df; }
+html.light #srcBody .hljs-title { color: #6f42c1; }
+html.light #srcBody .hljs-title.function_ { color: #6639ba; }
+html.light #srcBody .hljs-string, html.light #srcBody .hljs-regexp { color: #0a7d3f; }
+html.light #srcBody .hljs-number, html.light #srcBody .hljs-literal { color: #b3541e; }
+html.light #srcBody .hljs-comment, html.light #srcBody .hljs-meta { color: #6e7781; font-style: italic; }
+html.light #srcBody .hljs-type, html.light #srcBody .hljs-built_in { color: #0f7ea8; }
+html.light #srcBody .hljs-attr, html.light #srcBody .hljs-attribute { color: #954f0e; }
+html.light #srcBody .hljs-variable, html.light #srcBody .hljs-variable.language_ { color: #cf222e; }
+html.light #srcBody .hljs-symbol, html.light #srcBody .hljs-selector-tag { color: #116329; }
+html.light #srcBody .hljs-tag, html.light #srcBody .hljs-name { color: #116329; }
+/* 语言徽标:用各语言的社区品牌色,文件还没读就知道是个什么文件 */
+.lang-tag {
+  flex-shrink: 0; font-size: .68rem; font-weight: 700; letter-spacing: .03em;
+  padding: .1rem .55rem; border-radius: 99px; text-transform: uppercase;
 }
 /* 手机上树放不下 260px,收窄一点 */
 @media (max-width: 640px) {
@@ -371,6 +405,8 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
   td.ops button { white-space: normal; }   /* 手机上让按钮可换行，避免顶出横向滚动条 */
 }
 </style>
+<!-- 语法高亮主题：tokyo-night-dark，和面板深蓝黑底一脉相承；本地 vendor 不走 CDN -->
+<link rel="stylesheet" href="/vendor/highlight.11.12.0.min.css">
 </head>
 <body>
 <script>
@@ -478,6 +514,7 @@ if (document.documentElement.dataset.theme === 'auto'
         <div class="src-right">
           <div class="src-toolbar">
             <button id="srcTreeToggle" class="chip" title="隐藏/显示目录树">隐藏目录</button>
+            <span id="langTag" class="lang-tag" hidden></span>
             <span id="srcPath" class="src-path"></span>
             <button id="srcPull" class="chip">拉取代码</button>
             <button id="srcCopy" class="chip">一键复制</button>
@@ -490,6 +527,7 @@ if (document.documentElement.dataset.theme === 'auto'
   </div>
 </main>
 
+<script src="/vendor/highlight.11.12.0.min.js"></script>
 <script>
 const $ = id => document.getElementById(id);
 const POLL = 3000;
@@ -1168,26 +1206,134 @@ function treeNodes(nodes, expanded) {
 /// 同一次打开源码弹窗期间，来回切文件不用重复请求。
 const fileCache = new Map();
 
+/* ---------- 语法高亮 ----------
+   用 highlight.js(本地 vendor,35+ 门语言,别名的扩展名它自己认)。
+   它输出的 HTML 已转义过,直接塞 innerHTML 安全。 */
+
+/// 后缀 → highlight.js 语言名。没列出的后缀交 hljs.getLanguage 兜底,
+/// 再不行就纯文本不上色。
+const LANG_BY_EXT = {
+  rs: 'rust', py: 'python', pyw: 'python',
+  sh: 'bash', bash: 'bash', zsh: 'bash',
+  js: 'javascript', mjs: 'javascript', cjs: 'javascript',
+  ts: 'typescript', tsx: 'typescript', jsx: 'typescript',
+  toml: 'toml', json: 'json', yaml: 'yaml', yml: 'yaml',
+  html: 'xml', htm: 'xml', xml: 'xml', svg: 'xml',
+  css: 'css', scss: 'scss', less: 'less',
+  md: 'markdown', markdown: 'markdown',
+  c: 'c', h: 'c', cpp: 'cpp', cc: 'cpp', hpp: 'cpp', cxx: 'cpp',
+  cs: 'csharp', go: 'go', java: 'java', kt: 'kotlin', swift: 'swift',
+  php: 'php', rb: 'ruby', lua: 'lua', pl: 'perl', r: 'r',
+  sql: 'sql', graphql: 'graphql', gql: 'graphql',
+  mk: 'makefile', makefile: 'makefile',
+  diff: 'diff', patch: 'diff', wasm: 'wasm',
+};
+
+/// 各语言的徽标:名字 + 社区品牌色(深浅两个色:文字色/底色)。
+/// 未知后缀没有徽标,不显示。
+const LANG_TAG = {
+  rust:    ['Rust', '#e0af68'],
+  python:  ['Python', '#e8c268'],
+  bash:    ['Shell', '#9ece6a'],
+  javascript: ['JS', '#e8c170'],
+  typescript: ['TS', '#7aa2f7'],
+  toml:    ['TOML', '#7aa2f7'],
+  json:    ['JSON', '#2ac3de'],
+  xml:     ['HTML', '#f7768e'],
+  css:     ['CSS', '#bb9af7'],
+  scss:    ['SCSS', '#f7768e'],
+  yaml:    ['YAML', '#9ece6a'],
+  markdown: ['MD', '#c0caf5'],
+  c:       ['C', '#7aa2f7'],
+  cpp:     ['C++', '#7aa2f7'],
+  csharp:  ['C#', '#9ece6a'],
+  go:      ['Go', '#2ac3de'],
+  java:    ['Java', '#e8c170'],
+  kotlin:  ['Kotlin', '#f7768e'],
+  swift:   ['Swift', '#f7768e'],
+  php:     ['PHP', '#7aa2f7'],
+  ruby:    ['Ruby', '#f7768e'],
+  lua:     ['Lua', '#7aa2f7'],
+  perl:    ['Perl', '#2ac3de'],
+  sql:     ['SQL', '#e8c170'],
+  graphql: ['GraphQL', '#f7768e'],
+  makefile: ['Make', '#e8c170'],
+  diff:    ['Diff', '#f7768e'],
+  ini:     ['INI', '#9ece6a'],
+};
+
+/// 按扩展名挑语言。取文件名最后一个点后面的部分;
+/// 表里没有的再问 hljs(它自己认 ps1/makefile 等一堆别名),还不认识就 null。
+function langOf(path) {
+  const m = /\.([^.]+)$/.exec(path);
+  if (!m) return null;
+  const ext = m[1].toLowerCase();
+  return LANG_BY_EXT[ext] || (hljs.getLanguage(ext) ? ext : null);
+}
+
+/// 渲染整个文件:hljs 高亮过的 HTML 按行拆开,每行套一个 .cl div
+/// (CSS 计数器出行号)。多行 token(块注释/模板字符串)拆开后标签会断,
+/// 所以逐行高亮——每行独立走一遍 hljs,断不了。
+function renderCode(text, lang) {
+  const opt = lang ? { language: lang, ignoreIllegals: true } : undefined;
+  return text.split('\n')
+    .map(l => {
+      // 没认出语言就纯转义文本,别交给 hljs 猜(猜错还不如纯色)
+      const inner = lang
+        ? hljs.highlight(l, opt).value
+        : l.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+      return `<div class="cl"><code class="hljs">${inner}</code></div>`;
+    })
+    .join('');
+}
+
+/// 语言徽标上色:品牌色文字 + 微透底
+function setLangTag(lang) {
+  const tag = $('langTag');
+  if (!lang || !LANG_TAG[lang]) { tag.hidden = true; return; }
+  const [name, fg] = LANG_TAG[lang];
+  tag.textContent = name;
+  tag.style.color = fg;
+  tag.style.background = `color-mix(in oklab, ${fg} 16%, transparent)`;
+  tag.hidden = false;
+}
+
 async function showFile(n, row) {
   srcCur = n;
   $('srcTree').querySelectorAll('.node.cur').forEach(el => el.classList.remove('cur'));
   if (row) row.classList.add('cur');
   $('srcPath').textContent = n.path;
+  const lang = langOf(n.path);
+  setLangTag(lang);
   if (n.big) {
+    $('srcBody').replaceChildren();
     $('srcBody').textContent = '(超过 512KB,不展示内容)';
     return;
   }
   if (fileCache.has(n.path)) {
     const c = fileCache.get(n.path);
-    $('srcBody').textContent = c == null ? '(二进制文件,不展示内容)' : c;
+    $('srcBody').replaceChildren();
+    if (c == null) {
+      setLangTag(null);
+      $('srcBody').textContent = '(二进制文件,不展示内容)';
+    } else {
+      $('srcBody').innerHTML = renderCode(c, lang);
+    }
     return;
   }
+  $('srcBody').replaceChildren();
   $('srcBody').textContent = '加载中…';
   try {
     const body = await (await req(`/api/units/${srcKey}/file?path=${encodeURIComponent(n.path)}`)).json();
     fileCache.set(n.path, body.content);
     if (srcCur !== n) return;   // 等待期间用户又点了别的文件，别覆盖
-    $('srcBody').textContent = body.content == null ? '(二进制文件,不展示内容)' : body.content;
+    $('srcBody').replaceChildren();
+    if (body.content == null) {
+      setLangTag(null);
+      $('srcBody').textContent = '(二进制文件,不展示内容)';
+    } else {
+      $('srcBody').innerHTML = renderCode(body.content, lang);
+    }
   } catch (e) {
     if (e.message !== '未登录') srcMsg('读文件失败: ' + e.message, false);
   }
