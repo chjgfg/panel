@@ -212,6 +212,16 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
   font-size: .85rem;
   /* 树要自己滚，不能跟着右边代码一起滚 */
 }
+/* 拖拽调宽条：夹在树和代码之间的一条窄竖条，hover 高亮提示可拖 */
+#srcTreeGrip {
+  flex-shrink: 0; width: 5px; cursor: col-resize;
+  background: transparent;
+}
+#srcTreeGrip:hover, #srcTreeGrip.on { background: var(--accent); }
+/* 树收起时:树和拖拽条都不占地方,代码区吃满整个弹窗 */
+.src-layout.notree #srcTree, .src-layout.notree #srcTreeGrip { display: none; }
+/* 工具栏最左边的目录开关按钮,固定宽度,免得切换时整行按钮跟着跳 */
+#srcTreeToggle { flex-shrink: 0; white-space: nowrap; }
 /* 树节点：行内块按钮化，点击切换文件；目录名左侧的小箭头单独可点收起 */
 #srcTree .node {
   display: block; width: 100%;
@@ -356,8 +366,10 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
       </div>
       <div class="src-layout">
         <nav id="srcTree" aria-label="项目目录"></nav>
+        <div id="srcTreeGrip" title="拖拽调整宽度"></div>
         <div class="src-right">
           <div class="src-toolbar">
+            <button id="srcTreeToggle" class="ghost" title="隐藏/显示目录树">隐藏目录</button>
             <span id="srcPath" class="src-path"></span>
             <button id="srcPull" class="ghost">拉取代码</button>
             <button id="srcCopy" class="ghost">一键复制</button>
@@ -1089,6 +1101,58 @@ function closeSrcBox() {
   $('srcBox').hidden = true;
 }
 $('srcCloseX').onclick = closeSrcBox;
+
+// ---------- 目录树的拖拽调宽 + 显示/隐藏 ----------
+
+const TREE_MIN = 140, TREE_MAX = 480;   // 可拖的宽度范围（px）
+
+/// 拖拽条:mousedown 记下起点,mousemove 实时改树的宽度,松开时存进 localStorage,
+/// 下次打开弹窗还是你上次调好的宽度。
+(() => {
+  const grip = $('srcTreeGrip'), tree = $('srcTree'), layout = document.querySelector('.src-layout');
+  let dragging = false, startX = 0, startW = 0;
+  grip.addEventListener('mousedown', e => {
+    dragging = true;
+    startX = e.clientX;
+    startW = tree.getBoundingClientRect().width;
+    grip.classList.add('on');
+    document.body.style.cursor = 'col-resize';
+    // 拖拽期间全局禁掉文本选择,免得拖着拖着把代码选得满屏都是
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    const w = Math.min(TREE_MAX, Math.max(TREE_MIN, startW + e.clientX - startX));
+    tree.style.width = w + 'px';
+  });
+  document.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    grip.classList.remove('on');
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    localStorage.setItem('srcTreeW', tree.getBoundingClientRect().width);
+  });
+  // 打开时恢复上次宽度;没存过就用 CSS 里的默认值
+  const saved = +localStorage.getItem('srcTreeW');
+  if (saved >= TREE_MIN && saved <= TREE_MAX) tree.style.width = saved + 'px';
+})();
+
+/// 显示/隐藏目录树:隐藏后代码区占满整个弹窗。状态也记进 localStorage。
+$('srcTreeToggle').onclick = () => {
+  const layout = document.querySelector('.src-layout');
+  const hidden = layout.classList.toggle('notree');
+  $('srcTreeToggle').textContent = hidden ? '显示目录' : '隐藏目录';
+  localStorage.setItem('srcTreeHidden', hidden ? '1' : '');
+};
+(() => {
+  // 打开弹窗时应用上次的选择(写在 IIFE 里,打开时不闪一下树再消失)
+  if (localStorage.getItem('srcTreeHidden')) {
+    document.querySelector('.src-layout').classList.add('notree');
+    $('srcTreeToggle').textContent = '显示目录';
+  }
+})();
 
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 
