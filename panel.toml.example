@@ -35,4 +35,4 @@ exclude = []
 # 看到 404，扫描器和爆破工具发现不了这台机器上有面板。生成一个随机的：
 #   openssl rand -hex 8  # 比如 e4f9a1c2d3b4
 # 留空（或删掉这行）= 面板挂在根路径 http://你的IP/，和从前一样。
-#prefix = "e4f9a1c2d3b4"
+#prefix = "156e9b08156e4ecd"
