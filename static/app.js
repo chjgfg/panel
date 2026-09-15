@@ -555,23 +555,20 @@ $('ddia').onclick = () => window.open(
 );
 $('refresh').onclick = () => refresh();
 
-// ---------- 主题切换（跟随系统 → 白天 → 黑夜，循环）----------
+// ---------- 主题切换（黑夜 ↔ 白天）----------
 // html.light 这个 class 是唯一真源：CSS 变量全看它。data-theme 只是记录你选了哪档。
 function applyTheme() {
-  const t = document.documentElement.dataset.theme || 'auto';
-  const light = t === 'light' || (t === 'auto' && matchMedia('(prefers-color-scheme: light)').matches);
+  const t = document.documentElement.dataset.theme || 'dark';
+  const light = t === 'light';
   document.documentElement.classList.toggle('light', light);
-  $('themeBtn').textContent = t === 'auto' ? '主题·自动' : t === 'light' ? '主题·白天' : '主题·黑夜';
+  $('themeBtn').textContent = light ? '主题·白天' : '主题·黑夜';
 }
 $('themeBtn').onclick = () => {
-  const cur = document.documentElement.dataset.theme || 'auto';
-  const next = cur === 'auto' ? 'light' : cur === 'light' ? 'dark' : 'auto';
+  const next = (document.documentElement.dataset.theme || 'dark') === 'light' ? 'dark' : 'light';
   document.documentElement.dataset.theme = next;
   localStorage.setItem('theme', next);
   applyTheme();
 };
-// 自动档下系统切白天/黑夜时跟着变（比如日落定时切深的）
-matchMedia('(prefers-color-scheme: light)').addEventListener('change', applyTheme);
 applyTheme();
 
 // 切换日志源筛选：用上一次拉到的数据直接重渲染，不用重新请求

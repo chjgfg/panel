@@ -19,8 +19,7 @@ html.light {
   --on: #1a7f37; --off: #9aa0a6; --bad: #cf222e; --warn: #bf8700;
   --go: #1a7f37; --danger: #cf222e; --caution: #9a6700;
 }
-/* 「跟随系统」档（html 上没有 data-theme 时）：系统浅色 → 也加浅色变量。
-   JS 会维护 html.classList 的 light，所以这里其实只是兜底，真正干活的是脚本。 */
+/* JS 永远会设 data-theme，这个媒体查询只兜 JS 被禁用/加载失败的情况。 */
 @media (prefers-color-scheme: light) {
   html:not([data-theme]) {
     --bg: #f4f5f7; --card: #fff; --line: #e2e5ea;
