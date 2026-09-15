@@ -14,9 +14,12 @@ function banner(msg) {
   $('banner').hidden = !msg;
 }
 
-/// 弹窗滚动锁：模态弹窗打开时锁掉 body 滚动，否则滚轮在弹窗里滚到头之后
-/// 事件会冒泡给 body，后面的页面跟着一起滚（滚动穿透）。
-/// 按当前还有哪个弹窗开着来开关，关一个弹窗不会误解锁另一个还开着的。
+// 弹窗滚动锁：模态弹窗打开时锁掉 body 滚动，否则滚轮在弹窗里滚到头之后
+// 事件会冒泡给 body，后面的页面跟着一起滚（滚动穿透）。
+// 按当前还有哪个弹窗开着来开关，关一个弹窗不会误解锁另一个还开着的。
+// 注：目前所有调用点均已注释停用——移动端 body 锁滚动后 fixed 弹窗会
+// 保留滚动位置、头部（关闭按钮 ×）被挤出可视区，看不到 ×；宁可留着
+// 轻微滚动穿透，也要保证手机/平板能关掉弹窗。
 function syncScrollLock() {
   const open = ['runbox', 'confirmBox', 'logBox', 'srcBox']
     .some(id => !$(id).hidden);
@@ -33,7 +36,7 @@ function showLogin() {
   $('runbox').hidden = true;
   $('confirmBox').hidden = true;
   closeSrcBox();
-  syncScrollLock();
+  // syncScrollLock();
   $('app').hidden = true;
   $('login').hidden = false;
   $('pw').focus();
@@ -344,12 +347,12 @@ function openConfirm(title, msg, onOk, tone) {
   $('confirmMsg').textContent = msg;
   $('confirmOk').className = tone || 'primary';
   $('confirmBox').hidden = false;
-  syncScrollLock();
+  // syncScrollLock();
 }
 function closeConfirm() {
   confirmCb = null;
   $('confirmBox').hidden = true;
-  syncScrollLock();
+  // syncScrollLock();
 }
 $('confirmCloseX').onclick = closeConfirm;      // X 不执行操作
 $('confirmCancel').onclick = closeConfirm;      // 取消不执行操作
@@ -393,7 +396,7 @@ function openRun(u, bin) {
   $('runErr').textContent = '';
   $('runGo').disabled = false;
   $('runbox').hidden = false;
-  syncScrollLock();
+  // syncScrollLock();
   $('runArgs').focus();
 }
 
@@ -411,7 +414,7 @@ $('runGo').onclick = async () => {
     });
     // 执行完成自动关闭弹窗
     $('runbox').hidden = true;
-    syncScrollLock();
+    // syncScrollLock();
     runKey = null; runBin = null;
   } catch (e) {
     if (e.message !== '未登录') $('runErr').textContent = e.message;
@@ -427,7 +430,7 @@ function closeRunBox() {
   runBin = null;
   $('runbox').hidden = true;
   $('runErr').textContent = '';
-  syncScrollLock();
+  // syncScrollLock();
 }
 $('closeRunX').onclick = closeRunBox;
 $('closeRun').onclick = closeRunBox;
@@ -435,7 +438,7 @@ $('closeRun').onclick = closeRunBox;
 function openLogs(u, preselBin) {
   $('logName').textContent = u.name;
   $('logBox').hidden = false;
-  syncScrollLock();
+  // syncScrollLock();
   logKey = u.key;
   // 筛选项：全部 + 每个 bin。多 bin 同时跑时能只看某一个，或全部按时间混合看
   const sel = $('logFilter');
@@ -580,7 +583,7 @@ function closeLogBox() {
   logCache = null;
   $('logBody').replaceChildren();
   $('logBox').hidden = true;
-  syncScrollLock();
+  // syncScrollLock();
 }
 $('logCloseX').onclick = closeLogBox;
 $('logClose').onclick = closeLogBox;
@@ -600,7 +603,7 @@ function openSrc(u) {
   $('srcBody').textContent = '';
   srcMsg('');
   $('srcBox').hidden = false;
-  syncScrollLock();
+  // syncScrollLock();
   loadTree();
 }
 
@@ -898,7 +901,7 @@ function closeSrcBox() {
   $('srcPath').textContent = '';
   $('srcMsg').hidden = true;
   $('srcBox').hidden = true;
-  syncScrollLock();
+  // syncScrollLock();
 }
 $('srcCloseX').onclick = closeSrcBox;
 
