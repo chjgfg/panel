@@ -173,6 +173,98 @@ fn find_sub(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w == needle)
 }
 
+/// 公钥行的特征前缀（authorized_keys / *.pub / known_hosts 里这些开头）
+const PUBKEY_TOKENS: &[&[u8]] = &[
+    b"ssh-rsa ",
+    b"ssh-ed25519 ",
+    b"ssh-dss ",
+    b"ecdsa-sha2-",
+    b"sk-ssh-ed25519@",
+    b"sk-ecdsa-sha2-",
+];
+
+/// 输出侧的密钥拦截器：把流经终端的私钥 PEM 块、公钥行替换成提示，这样不管对方
+/// 用 cat / less / vi / base64 哪种方式去读，密钥内容都到不了浏览器。
+///
+/// 按行处理：完整行逐行判定；尾部那截还没换行的不完整行，只有在「看起来含密钥」
+/// 时才暂存等下一块，否则立即放行——否则交互式提示符、全屏程序（top/vim）会被卡住。
+///
+/// 这是**尽力而为**的遮挡，不是安全边界：控制台本质是 root 会话，真要绕过办法很多
+/// （改文件名、编码后再传、写脚本……）。要紧的私钥根本就不该留在这台机器上。
+struct KeyFilter {
+    /// 正处在一段要屏蔽的私钥 PEM 内（BEGIN 之后、END 之前）
+    in_pem: bool,
+    /// 跨 chunk 的不完整尾行缓冲
+    buf: Vec<u8>,
+}
+
+impl KeyFilter {
+    fn new() -> Self {
+        Self {
+            in_pem: false,
+            buf: Vec::new(),
+        }
+    }
+
+    /// 喂入一块原始输出，返回可以安全发给浏览器的字节
+    fn push(&mut self, chunk: &[u8]) -> Vec<u8> {
+        self.buf.extend_from_slice(chunk);
+        let mut out = Vec::new();
+        while let Some(nl) = self.buf.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = self.buf.drain(..=nl).collect();
+            self.filter_line(&line, &mut out);
+        }
+        // 处理尾部不完整行：含密钥迹象（或正在 PEM 内）才攥着等下一块，
+        // 否则立即放行以保交互。异常长的一行设个安全阀，别一直攥着不放。
+        if self.in_pem || Self::sensitive(&self.buf) {
+            if self.buf.len() > 4096 {
+                let line = std::mem::take(&mut self.buf);
+                self.filter_line(&line, &mut out);
+            }
+        } else {
+            out.append(&mut self.buf);
+        }
+        out
+    }
+
+    /// 连接结束时把攥着的尾行吐出来（若在 PEM 内则丢弃）
+    fn flush(&mut self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if !self.buf.is_empty() {
+            let line = std::mem::take(&mut self.buf);
+            self.filter_line(&line, &mut out);
+        }
+        out
+    }
+
+    fn filter_line(&mut self, line: &[u8], out: &mut Vec<u8>) {
+        if self.in_pem {
+            // PEM 体和 END 行一律丢弃；见到 END 就退出屏蔽态
+            if find_sub(line, b"-----END") {
+                self.in_pem = false;
+            }
+            return;
+        }
+        if find_sub(line, b"-----BEGIN") && find_sub(line, b"PRIVATE KEY") {
+            self.in_pem = true;
+            out.extend_from_slice("\r\n[已拦截：私钥内容不给读]\r\n".as_bytes());
+            return;
+        }
+        if PUBKEY_TOKENS.iter().any(|t| find_sub(line, t)) {
+            out.extend_from_slice("\r\n[已拦截：公钥内容不给读]\r\n".as_bytes());
+            return;
+        }
+        out.extend_from_slice(line);
+    }
+
+    /// 不完整尾行是否有密钥迹象（有就先攥着，等它成整行再判定）
+    fn sensitive(partial: &[u8]) -> bool {
+        find_sub(partial, b"-----BEGIN")
+            || find_sub(partial, b"PRIVATE KEY")
+            || PUBKEY_TOKENS.iter().any(|t| find_sub(partial, t))
+    }
+}
+
 async fn bridge(mut socket: WebSocket, target: String, keyfile: Option<PathBuf>) {
     // 造 PTY
     let pair = match native_pty_system().openpty(PtySize {
@@ -251,22 +343,31 @@ async fn bridge(mut socket: WebSocket, target: String, keyfile: Option<PathBuf>)
     let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
     let auth_fail_r = auth_fail.clone();
     std::thread::spawn(move || {
+        let mut filter = KeyFilter::new();
         let mut buf = [0u8; 8192];
         loop {
             match reader.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
                     let chunk = &buf[..n];
-                    // ssh 认证被拒时会打 "... Permission denied (publickey)."
+                    // ssh 认证被拒时会打 "... Permission denied (publickey)."。
+                    // 在原始输出上判定（它不是密钥，不会被下面的过滤器动到）。
                     if !auth_fail_r.load(Ordering::Relaxed) && find_sub(chunk, b"Permission denied")
                     {
                         auth_fail_r.store(true, Ordering::Relaxed);
                     }
-                    if out_tx.blocking_send(chunk.to_vec()).is_err() {
+                    // 过滤掉私钥/公钥内容再发给浏览器
+                    let filtered = filter.push(chunk);
+                    if !filtered.is_empty() && out_tx.blocking_send(filtered).is_err() {
                         break;
                     }
                 }
             }
+        }
+        // 收尾：把攥着的尾行吐出来（PEM 内的会被丢弃）
+        let rest = filter.flush();
+        if !rest.is_empty() {
+            let _ = out_tx.blocking_send(rest);
         }
     });
 
@@ -364,6 +465,62 @@ mod tests {
     fn 字节流子串查找() {
         assert!(find_sub(b"xx Permission denied (publickey).", b"Permission denied"));
         assert!(!find_sub(b"welcome to server", b"Permission denied"));
+    }
+
+    // 把若干块喂给过滤器，拼出最终转发给浏览器的文本
+    fn run_filter(chunks: &[&[u8]]) -> String {
+        let mut f = KeyFilter::new();
+        let mut out = Vec::new();
+        for c in chunks {
+            out.extend(f.push(c));
+        }
+        out.extend(f.flush());
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    #[test]
+    fn 私钥pem整块被拦掉() {
+        let dump = b"cat id_rsa\r\n\
+                     -----BEGIN OPENSSH PRIVATE KEY-----\r\n\
+                     b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAA=\r\n\
+                     AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\r\n\
+                     -----END OPENSSH PRIVATE KEY-----\r\n\
+                     $ ";
+        let out = run_filter(&[dump]);
+        // 命令回显和提示符还在，但私钥的头/体/尾都没了
+        assert!(out.contains("cat id_rsa"));
+        assert!(out.contains("已拦截"));
+        assert!(!out.contains("BEGIN OPENSSH PRIVATE KEY"));
+        assert!(!out.contains("b3BlbnNzaC1rZXk")); // base64 私钥体
+        assert!(out.ends_with("$ ")); // 提示符照常放行（末尾无换行）
+    }
+
+    #[test]
+    fn 私钥被拆成多块喂进来也拦得住() {
+        // 模拟 read() 把 PEM 切在奇怪的位置
+        let out = run_filter(&[
+            b"-----BEGIN RSA PRIV",
+            b"ATE KEY-----\nMIIEpAIBAAKC\nAQEA\n-----END RSA PRIVATE KEY-----\ndone\n",
+        ]);
+        assert!(!out.contains("MIIEpAIBAAKC"));
+        assert!(out.contains("已拦截"));
+        assert!(out.contains("done"));
+    }
+
+    #[test]
+    fn 公钥行被拦掉() {
+        let out = run_filter(&[b"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIabc user@host\n"]);
+        assert!(!out.contains("AAAAC3NzaC1lZDI1NTE5"));
+        assert!(out.contains("已拦截"));
+    }
+
+    #[test]
+    fn 普通输出与交互提示符照常放行() {
+        // 整行普通输出
+        assert_eq!(run_filter(&[b"hello world\n"]), "hello world\n");
+        // 不带换行的交互提示符：不能被攥住，必须立刻放行，否则终端像卡死
+        let mut f = KeyFilter::new();
+        assert_eq!(String::from_utf8_lossy(&f.push(b"root@host:~# ")), "root@host:~# ");
     }
 
     #[test]
