@@ -19,6 +19,7 @@ mod procs;
 mod srctree;
 mod state;
 mod systemd;
+mod terminal;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -105,6 +106,39 @@ async fn hljs_js() -> impl IntoResponse {
             (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
         ],
         include_str!("../static/vendor/highlight.11.12.0.min.js"),
+    )
+}
+
+// 网页控制台的终端库 xterm.js，同样本地 vendored、编译时嵌进二进制，部署不依赖外网。
+// 文件名带版本号，长缓存 immutable（no_cache 中间件对 /vendor/ 放行）。
+async fn xterm_js() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        include_str!("../static/vendor/xterm.5.5.0.min.js"),
+    )
+}
+
+async fn xterm_css() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        include_str!("../static/vendor/xterm.5.5.0.min.css"),
+    )
+}
+
+// fit addon：把终端自适应铺满弹窗
+async fn xterm_fit_js() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        include_str!("../static/vendor/xterm-addon-fit.0.10.0.min.js"),
     )
 }
 
@@ -751,6 +785,7 @@ async fn start() -> Result<(), BoxErr> {
         .route("/api/units/{key}/pull", get(pull))
         .route("/api/units/{key}/bins/{bin}/{action}", post(bin_action))
         .route("/api/units/{key}/{action}", post(action))
+        .route("/api/terminal", get(terminal::terminal_ws))
         .layer(middleware::from_fn_with_state(app.clone(), auth::require_auth));
 
     let panel = Router::new()
@@ -758,6 +793,9 @@ async fn start() -> Result<(), BoxErr> {
         .route("/static/style.css", get(style_css))
         .route("/static/app.js", get(app_js))
         .route("/vendor/highlight.11.12.0.min.js", get(hljs_js))
+        .route("/vendor/xterm.5.5.0.min.js", get(xterm_js))
+        .route("/vendor/xterm.5.5.0.min.css", get(xterm_css))
+        .route("/vendor/xterm-addon-fit.0.10.0.min.js", get(xterm_fit_js))
         .route("/api/login", post(auth::login))
         .merge(protected)
         .layer(middleware::from_fn(no_cache))

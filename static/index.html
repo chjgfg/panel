@@ -11,6 +11,8 @@
 <!-- 用相对路径引用：面板可能挂在秘密前缀下（panel.toml 的 prefix），
      相对路径天然带上前缀，前端不用感知前缀是什么。 -->
 <link rel="stylesheet" href="static/style.css?v=1">
+<!-- 网页控制台的终端样式，vendored、相对路径自动带前缀 -->
+<link rel="stylesheet" href="vendor/xterm.5.5.0.min.css">
 <script>
 // 防闪烁：必须在首次渲染前同步执行。
 // data-theme: "dark" / "light"。html.light 由主脚本维护。
@@ -34,6 +36,7 @@ if (document.documentElement.dataset.theme === 'light') {
   <header>
     <h1>项目面板</h1>
     <span id="tick"></span>
+    <button id="console" type="button" class="ghost">控制台</button>
     <button id="oracleCloud" type="button" class="ghost">Cloud</button>
     <button id="ddia" type="button" class="ghost">设计数据密集型应用</button>
     <button id="themeBtn" type="button" class="chip" title="切换黑夜/白天">主题</button>
@@ -128,7 +131,24 @@ if (document.documentElement.dataset.theme === 'light') {
   </div>
 </main>
 
+<!-- 网页控制台弹窗：复用宽屏 modal-log 样式，body 里挂 xterm 终端 -->
+<div id="termBox" class="overlay" hidden>
+  <div class="modal modal-log">
+    <div class="modal-head">
+      <h2>控制台 · <span id="termTarget"></span></h2>
+      <button id="termCloseX" class="close-x" aria-label="关闭" title="关闭">×</button>
+    </div>
+    <div id="termBody"></div>
+    <div class="modal-foot">
+      <button id="termReconnect" class="chip">重连</button>
+      <button id="termClose" class="chip">关闭</button>
+    </div>
+  </div>
+</div>
+
 <script src="vendor/highlight.11.12.0.min.js"></script>
+<script src="vendor/xterm.5.5.0.min.js"></script>
+<script src="vendor/xterm-addon-fit.0.10.0.min.js"></script>
 <script src="static/app.js?v=1"></script>
 </body>
 </html>

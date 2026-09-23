@@ -275,6 +275,14 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
 }
 .modal-head .log-src { display: inline-flex; align-items: center; gap: .4rem; color: var(--muted); font-size: .85rem; }
 .modal-head .log-src select { padding: .3rem .5rem; font-size: .85rem; }
+/* 网页控制台：xterm 终端容器，占满 modal-log 的剩余高度（弹窗是 flex 纵向布局） */
+#termBody {
+  flex: 1; min-height: 0;
+  padding: .4rem .5rem;
+  background: #000;
+  overflow: hidden;
+}
+#termBody .xterm { height: 100%; }
 /* 每条日志标来源 bin，用不同于正文的 muted 色，一眼分清归属 */
 #logBody .src { color: var(--accent); font-weight: 600; }
 #logBody {

@@ -36,6 +36,7 @@ function showLogin() {
   $('runbox').hidden = true;
   $('confirmBox').hidden = true;
   closeSrcBox();
+  closeTerm();
   // syncScrollLock();
   $('app').hidden = true;
   $('login').hidden = false;
@@ -570,6 +571,84 @@ $('themeBtn').onclick = () => {
   applyTheme();
 };
 applyTheme();
+
+// ---------- 网页控制台（xterm 终端 + WebSocket，后端在 PTY 里跑 ssh root@本机）----------
+// term/fitAddon 懒创建一次后复用；每次打开/重连各建一条 WebSocket。
+let term = null, fitAddon = null, termWs = null, termResizeHandler = null;
+
+// WebSocket 地址：从当前页所在目录拼，天然带上秘密前缀；http→ws / https→wss
+function termUrl() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const base = location.pathname.replace(/[^/]*$/, '');
+  return `${proto}//${location.host}${base}api/terminal`;
+}
+
+function ensureTerm() {
+  if (term) return;
+  term = new Terminal({
+    cursorBlink: true,
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+    fontSize: 13,
+    theme: { background: '#000000' }
+  });
+  fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  term.open($('termBody'));
+  const enc = new TextEncoder();
+  // 击键走二进制帧；缩放走 "R cols rows" 文本帧（后端按帧类型区分）
+  term.onData(d => { if (termWs && termWs.readyState === 1) termWs.send(enc.encode(d)); });
+  term.onResize(({ cols, rows }) => {
+    if (termWs && termWs.readyState === 1) termWs.send('R ' + cols + ' ' + rows);
+  });
+}
+
+function fitTerm() {
+  if (fitAddon) { try { fitAddon.fit(); } catch {} }
+}
+
+function connectTerm() {
+  const ws = new WebSocket(termUrl());
+  ws.binaryType = 'arraybuffer';
+  termWs = ws;
+  ws.onopen = () => { fitTerm(); term.focus(); };
+  ws.onmessage = e => {
+    term.write(typeof e.data === 'string' ? e.data : new Uint8Array(e.data));
+  };
+  ws.onclose = () => {
+    if (termWs === ws) {
+      termWs = null;
+      term.write('\r\n\x1b[2m[连接已断开，点“重连”重新连接]\x1b[0m\r\n');
+    }
+  };
+}
+
+function openTerm() {
+  $('termTarget').textContent = location.hostname;
+  $('termBox').hidden = false;
+  ensureTerm();
+  // 先让弹窗渲染出尺寸再 fit + 连接，否则终端行列数算不对
+  requestAnimationFrame(() => { fitTerm(); connectTerm(); });
+  if (!termResizeHandler) {
+    termResizeHandler = () => { if (!$('termBox').hidden) fitTerm(); };
+    window.addEventListener('resize', termResizeHandler);
+  }
+}
+
+function closeTerm() {
+  if (termWs) { try { termWs.close(); } catch {} termWs = null; }
+  $('termBox').hidden = true;
+}
+
+function reconnectTerm() {
+  if (termWs) { try { termWs.close(); } catch {} termWs = null; }
+  if (term) term.reset();
+  requestAnimationFrame(() => { fitTerm(); connectTerm(); });
+}
+
+$('console').onclick = openTerm;
+$('termClose').onclick = closeTerm;
+$('termCloseX').onclick = closeTerm;
+$('termReconnect').onclick = reconnectTerm;
 
 // 切换日志源筛选：用上一次拉到的数据直接重渲染，不用重新请求
 $('logFilter').onchange = () => { if (logCache) renderLogs(true); };
