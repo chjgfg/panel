@@ -37,6 +37,7 @@ function showLogin() {
   $('confirmBox').hidden = true;
   closeSrcBox();
   closeTerm();
+  $('keyBox').hidden = true;
   // syncScrollLock();
   $('app').hidden = true;
   $('login').hidden = false;
@@ -574,7 +575,19 @@ applyTheme();
 
 // ---------- 网页控制台（xterm 终端 + WebSocket，后端在 PTY 里跑 ssh root@本机）----------
 // term/fitAddon 懒创建一次后复用；每次打开/重连各建一条 WebSocket。
-let term = null, fitAddon = null, termWs = null, termResizeHandler = null;
+let term = null, fitAddon = null, termWs = null, termResizeHandler = null, termAuthFail = false;
+
+// SSH 私钥：只存当前浏览器标签的会话（sessionStorage），关标签即失效
+const SSH_KEY = 'panel_ssh_key';
+const getSshKey = () => sessionStorage.getItem(SSH_KEY) || '';
+const setSshKey = v => { v ? sessionStorage.setItem(SSH_KEY, v) : sessionStorage.removeItem(SSH_KEY); };
+
+function updateKeyHint() {
+  const has = !!getSshKey();
+  const el = $('termKeyHint');
+  el.textContent = has ? '已配置私钥（公钥认证）' : '未配置私钥';
+  el.classList.toggle('on', has);
+}
 
 // WebSocket 地址：从当前页所在目录拼，天然带上秘密前缀；http→ws / https→wss
 function termUrl() {
@@ -607,16 +620,30 @@ function fitTerm() {
 }
 
 function connectTerm() {
+  termAuthFail = false;
   const ws = new WebSocket(termUrl());
   ws.binaryType = 'arraybuffer';
   termWs = ws;
-  ws.onopen = () => { fitTerm(); term.focus(); };
+  ws.onopen = () => {
+    // 握手第一帧：初始配置。有私钥就发 "K\n<私钥>"，否则发 "N"（后端据此拼 ssh -i）
+    const key = getSshKey();
+    ws.send(key ? ('K\n' + key) : 'N');
+    fitTerm();
+    term.focus();
+  };
   ws.onmessage = e => {
-    term.write(typeof e.data === 'string' ? e.data : new Uint8Array(e.data));
+    // 二进制帧 = 终端内容；文本帧 = 后端状态消息
+    if (typeof e.data !== 'string') { term.write(new Uint8Array(e.data)); return; }
+    if (e.data === 'AUTHFAIL') { termAuthFail = true; return; }
+    term.write(e.data); // 其它文本（后端错误提示）直接显示到终端
   };
   ws.onclose = () => {
-    if (termWs === ws) {
-      termWs = null;
+    if (termWs !== ws) return;
+    termWs = null;
+    if (termAuthFail) {
+      term.write('\r\n\x1b[31m[公钥认证失败] 服务器拒绝了这把私钥。请点“配置密钥”检查：'
+        + '私钥是否完整、是否与服务器 authorized_keys 里的公钥匹配、是否选对了这台机器的钥匙。\x1b[0m\r\n');
+    } else {
       term.write('\r\n\x1b[2m[连接已断开，点“重连”重新连接]\x1b[0m\r\n');
     }
   };
@@ -625,6 +652,7 @@ function connectTerm() {
 function openTerm() {
   $('termTarget').textContent = location.hostname;
   $('termBox').hidden = false;
+  updateKeyHint();
   ensureTerm();
   // 先让弹窗渲染出尺寸再 fit + 连接，否则终端行列数算不对
   requestAnimationFrame(() => { fitTerm(); connectTerm(); });
@@ -649,6 +677,30 @@ $('console').onclick = openTerm;
 $('termClose').onclick = closeTerm;
 $('termCloseX').onclick = closeTerm;
 $('termReconnect').onclick = reconnectTerm;
+
+// 私钥配置弹窗
+$('termKey').onclick = () => {
+  $('keyText').value = getSshKey();
+  $('keyErr').textContent = '';
+  $('keyBox').hidden = false;
+  $('keyText').focus();
+};
+$('keyCloseX').onclick = $('keyCancel').onclick = () => { $('keyBox').hidden = true; };
+$('keyClear').onclick = () => { setSshKey(''); $('keyText').value = ''; $('keyErr').textContent = ''; updateKeyHint(); };
+$('keySave').onclick = () => {
+  const v = $('keyText').value.trim();
+  // 轻校验：像不像一把私钥，早点拦下明显贴错的内容
+  if (v && !/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/.test(v)) {
+    $('keyErr').textContent = '这看起来不是 SSH 私钥（应包含 “BEGIN ... PRIVATE KEY”）';
+    return;
+  }
+  setSshKey(v);
+  updateKeyHint();
+  $('keyBox').hidden = true;
+  // 用新私钥立刻重连（若控制台已打开）
+  if (!$('termBox').hidden) reconnectTerm();
+};
+
 
 // 切换日志源筛选：用上一次拉到的数据直接重渲染，不用重新请求
 $('logFilter').onchange = () => { if (logCache) renderLogs(true); };

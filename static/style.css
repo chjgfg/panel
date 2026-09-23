@@ -283,6 +283,16 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
   overflow: hidden;
 }
 #termBody .xterm { height: 100%; }
+/* 私钥提示（在控制台弹窗底部靠左），已配/未配一目了然 */
+.term-key-hint { margin-right: auto; font-size: .82rem; color: var(--muted); }
+.term-key-hint.on { color: var(--go); }
+/* 私钥输入框：等宽、够高，方便整段粘贴 */
+#keyText {
+  width: 100%; box-sizing: border-box; resize: vertical;
+  min-height: 12rem; padding: .5rem .6rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .8rem; line-height: 1.4;
+}
 /* 每条日志标来源 bin，用不同于正文的 muted 色，一眼分清归属 */
 #logBody .src { color: var(--accent); font-weight: 600; }
 #logBody {

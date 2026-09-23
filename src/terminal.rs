@@ -1,19 +1,28 @@
 // 网页版控制台：把一个 `ssh root@<本机IP>` 会话桥到浏览器里的 WebSocket 终端。
 //
-// 为什么要 PTY：ssh 检测到没有 tty 就不肯交互（密码提示直接失败），vim/top
-// 这类全屏程序也要 tty 才能画界面。所以这里用 portable-pty 造一个伪终端，
-// 让 ssh 挂上去，它就以为自己在真终端里跑。
+// 为什么要 PTY：ssh 检测到没有 tty 就不肯交互（密码/私钥口令提示直接失败），
+// vim/top 这类全屏程序也要 tty 才能画界面。所以这里用 portable-pty 造一个伪
+// 终端，让 ssh 挂上去，它就以为自己在真终端里跑。
+//
+// 认证方式：前端可在「配置密钥」里粘贴 SSH 私钥。连接握手时前端先发一帧
+// 初始配置（含私钥或「无钥」），后端把私钥落成一个 0600 的临时文件，用
+// `ssh -i 临时文件 -o IdentitiesOnly=yes -o PreferredAuthentications=publickey`
+// 发起公钥认证，连接结束后立刻删掉该临时文件。
 //
 // 桥接分三条线：
-//   reader 线程  —— 阻塞读 PTY 输出，塞进 tokio channel，主循环再发给浏览器
+//   reader 线程  —— 阻塞读 PTY 输出，塞进 tokio channel，主循环再发给浏览器；
+//                   顺便扫一眼有没有「Permission denied」，有就置公钥认证失败标记
 //   writer 线程  —— 从 channel 取浏览器击键，阻塞写进 PTY
 //   waiter 线程  —— 等 ssh 进程退出，通过 oneshot 通知主循环收摊
 // portable-pty 的读写是阻塞式的，不能直接在 async 里调，所以各开一个系统线程。
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
@@ -65,7 +74,7 @@ fn ssh_target(host: Option<&str>) -> String {
             None => return fallback,
         }
     } else {
-        // 普通 host[:port]，从右边切掉端口（IPv6 无括号时不含单个冒号规则，这里只切最后一段数字端口）
+        // 普通 host[:port]，从右边切掉端口
         h.rsplit_once(':').map_or(h, |(a, _)| a)
     };
     let ok = !bare.is_empty()
@@ -86,8 +95,65 @@ fn parse_resize(t: &str) -> Option<(u16, u16)> {
     Some((cols.max(1), rows.max(1)))
 }
 
+/// 从初始配置帧解析私钥：文本以 `K\n` 开头则其余为私钥内容，其它（如 `N`）表示无钥。
+/// trim 后为空也当无钥。
+fn parse_init_key(t: &str) -> Option<String> {
+    let k = t.strip_prefix("K\n")?;
+    let k = k.trim();
+    (!k.is_empty()).then(|| k.to_string())
+}
+
+/// 等前端发来的第一帧初始配置（含私钥或无钥）。带超时兜底：
+/// 拿到正常文本帧 -> Ok(Some(key)/None)；对端关闭 -> Err(())；超时按无钥放行。
+async fn recv_init(socket: &mut WebSocket) -> Result<Option<String>, ()> {
+    match tokio::time::timeout(Duration::from_secs(15), socket.recv()).await {
+        Ok(Some(Ok(Message::Text(t)))) => Ok(parse_init_key(t.as_str())),
+        Ok(Some(Ok(Message::Close(_)))) | Ok(None) => Err(()),
+        Ok(Some(Ok(_))) => Ok(None),      // 非文本先到（不该发生），当无钥
+        Ok(Some(Err(_))) => Err(()),      // 连接错误
+        Err(_) => Ok(None),               // 超时：不卡住，按无钥继续
+    }
+}
+
+/// 把私钥写成一个仅本次连接使用的临时文件，权限 0600（ssh 对宽松权限的私钥会拒绝加载）。
+/// ssh 只能从文件读 identity，没法走 stdin/env，所以必须落地；用完由调用方删除。
+fn write_temp_key(content: &str) -> Option<PathBuf> {
+    let mut rand = [0u8; 16];
+    getrandom::fill(&mut rand).ok()?;
+    let hex: String = rand.iter().map(|b| format!("{b:02x}")).collect();
+    let path = std::env::temp_dir().join(format!("panel-sshkey-{hex}"));
+
+    let mut f = std::fs::File::create(&path).ok()?;
+    // 收摊时才谈权限没意义——先把权限收紧到 0600，再写入内容
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    f.write_all(content.as_bytes()).ok()?;
+    // 私钥必须以换行结尾，否则部分 ssh 版本会报 "invalid format"
+    if !content.ends_with('\n') {
+        f.write_all(b"\n").ok()?;
+    }
+    Some(path)
+}
+
 async fn bridge(mut socket: WebSocket, target: String) {
-    // 造 PTY
+    // 1) 先收初始配置帧，拿到（可选的）私钥
+    let key = match recv_init(&mut socket).await {
+        Ok(k) => k,
+        Err(()) => return, // 对端已关/出错，没什么可做
+    };
+    let keyfile = key.as_deref().and_then(write_temp_key);
+    // 让主动断连/异常路径也能删掉私钥文件：结束前统一 remove
+    let cleanup_key = keyfile.clone();
+    let cleanup = || {
+        if let Some(p) = &cleanup_key {
+            let _ = std::fs::remove_file(p);
+        }
+    };
+
+    // 2) 造 PTY
     let pair = match native_pty_system().openpty(PtySize {
         rows: 24,
         cols: 80,
@@ -99,12 +165,24 @@ async fn bridge(mut socket: WebSocket, target: String) {
             let _ = socket
                 .send(Message::Text(format!("开不了终端：{e}\r\n").into()))
                 .await;
+            cleanup();
             return;
         }
     };
 
-    // ssh root@目标。accept-new：首次连自动记住 host key，不卡在 yes/no 提示上。
+    // 3) 拼 ssh 命令。accept-new：首次连自动记住 host key，不卡在 yes/no 提示上。
+    //    有私钥就强制走公钥认证（IdentitiesOnly 只用这把钥、不掺 agent 里的），
+    //    这样认证失败会干脆利落地报 publickey，前端好据此提示。
+    //    私钥若带口令，ssh 会在这个 PTY 里提示输入，用户照常输即可。
     let mut cmd = CommandBuilder::new("ssh");
+    if let Some(kf) = &keyfile {
+        cmd.arg("-i");
+        cmd.arg(kf.display().to_string());
+        cmd.arg("-o");
+        cmd.arg("IdentitiesOnly=yes");
+        cmd.arg("-o");
+        cmd.arg("PreferredAuthentications=publickey");
+    }
     cmd.arg("-o");
     cmd.arg("StrictHostKeyChecking=accept-new");
     cmd.arg("-o");
@@ -119,6 +197,7 @@ async fn bridge(mut socket: WebSocket, target: String) {
             let _ = socket
                 .send(Message::Text(format!("起不了 ssh：{e}\r\n").into()))
                 .await;
+            cleanup();
             return;
         }
     };
@@ -133,6 +212,7 @@ async fn bridge(mut socket: WebSocket, target: String) {
                 .send(Message::Text(format!("读不了终端：{e}\r\n").into()))
                 .await;
             let _ = child.kill();
+            cleanup();
             return;
         }
     };
@@ -143,19 +223,31 @@ async fn bridge(mut socket: WebSocket, target: String) {
                 .send(Message::Text(format!("写不了终端：{e}\r\n").into()))
                 .await;
             let _ = child.kill();
+            cleanup();
             return;
         }
     };
 
+    // 公钥认证失败标记：reader 线程扫到 "Permission denied" 就置位，结束时告诉前端
+    let auth_fail = Arc::new(AtomicBool::new(false));
+
     // reader：阻塞读 PTY 输出 -> tokio channel
     let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+    let auth_fail_r = auth_fail.clone();
     std::thread::spawn(move || {
         let mut buf = [0u8; 8192];
         loop {
             match reader.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    if out_tx.blocking_send(buf[..n].to_vec()).is_err() {
+                    let chunk = &buf[..n];
+                    // ssh 认证被拒时会打 "... Permission denied (publickey)."
+                    if !auth_fail_r.load(Ordering::Relaxed)
+                        && find_sub(chunk, b"Permission denied")
+                    {
+                        auth_fail_r.store(true, Ordering::Relaxed);
+                    }
+                    if out_tx.blocking_send(chunk.to_vec()).is_err() {
                         break;
                     }
                 }
@@ -220,10 +312,19 @@ async fn bridge(mut socket: WebSocket, target: String) {
         }
     }
 
-    // 收摊：杀掉 ssh（浏览器关弹窗/断线时别让它挂着），关掉 WebSocket。
-    // in_tx / out_rx 在这里 drop，两个 IO 线程随之因 channel 关闭而退出。
+    // 收摊：认证失败的话先给前端发一个状态帧（文本帧=状态，二进制帧才是终端内容），
+    // 前端据此弹「公钥认证失败，检查私钥配置」。然后杀 ssh、关连接、删私钥文件。
+    if auth_fail.load(Ordering::Relaxed) {
+        let _ = ws_tx.send(Message::Text("AUTHFAIL".into())).await;
+    }
     let _ = killer.kill();
     let _ = ws_tx.send(Message::Close(None)).await;
+    cleanup();
+}
+
+/// 在字节流里找子串（认证失败特征串很短，朴素查找足够）
+fn find_sub(hay: &[u8], needle: &[u8]) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle)
 }
 
 #[cfg(test)]
@@ -248,5 +349,22 @@ mod tests {
         assert_eq!(parse_resize("R 0 0"), Some((1, 1))); // 下限保护
         assert_eq!(parse_resize("hello"), None);
         assert_eq!(parse_resize("R 120"), None);
+    }
+
+    #[test]
+    fn 解析初始配置帧里的私钥() {
+        assert_eq!(
+            parse_init_key("K\n-----BEGIN KEY-----\nabc\n"),
+            Some("-----BEGIN KEY-----\nabc".to_string())
+        );
+        assert_eq!(parse_init_key("N"), None); // 无钥
+        assert_eq!(parse_init_key("K\n   \n"), None); // 空白当无钥
+        assert_eq!(parse_init_key("R 80 24"), None); // 非初始帧
+    }
+
+    #[test]
+    fn 字节流子串查找() {
+        assert!(find_sub(b"xx Permission denied (publickey).", b"Permission denied"));
+        assert!(!find_sub(b"welcome to server", b"Permission denied"));
     }
 }

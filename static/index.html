@@ -140,8 +140,30 @@ if (document.documentElement.dataset.theme === 'light') {
     </div>
     <div id="termBody"></div>
     <div class="modal-foot">
+      <span id="termKeyHint" class="term-key-hint"></span>
+      <button id="termKey" class="chip">配置密钥</button>
       <button id="termReconnect" class="chip">重连</button>
       <button id="termClose" class="chip">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- SSH 私钥配置弹窗：粘贴私钥，仅存当前浏览器会话（sessionStorage） -->
+<div id="keyBox" class="overlay" hidden>
+  <div class="modal">
+    <div class="modal-head">
+      <h2>SSH 私钥配置</h2>
+      <button id="keyCloseX" class="close-x" aria-label="关闭" title="关闭">×</button>
+    </div>
+    <div class="modal-body">
+      <p class="confirm-msg">粘贴用于公钥认证的 SSH 私钥（OpenSSH 或 PEM 格式）。私钥只保存在当前浏览器标签的会话里，关闭标签即失效，不会写入服务器磁盘以外的任何地方。连接时用它做 <code>ssh root@服务器</code> 的公钥认证。</p>
+      <textarea id="keyText" rows="12" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;......&#10;-----END OPENSSH PRIVATE KEY-----" spellcheck="false" autocomplete="off"></textarea>
+      <p id="keyErr" class="err"></p>
+    </div>
+    <div class="modal-foot">
+      <button id="keySave" class="primary">保存并重连</button>
+      <button id="keyClear" class="chip">清除</button>
+      <button id="keyCancel" class="chip">取消</button>
     </div>
   </div>
 </div>
