@@ -183,10 +183,16 @@ const PUBKEY_TOKENS: &[&[u8]] = &[
     b"sk-ecdsa-sha2-",
 ];
 
-/// 输出侧的密钥拦截器：把流经终端的私钥 PEM 块、公钥行替换成提示，这样不管对方
-/// 用 cat / less / vi / base64 哪种方式去读，密钥内容都到不了浏览器。
+/// 口令哈希的特征串（/etc/shadow、mkpasswd/openssl passwd 输出里就长这样）。
+/// crypt 格式 `$id$...`：6=sha512、5=sha256、1=md5、2a/2b/2y=bcrypt、y=yescrypt、7=scrypt。
+const HASH_TOKENS: &[&[u8]] = &[
+    b"$6$", b"$5$", b"$2a$", b"$2b$", b"$2y$", b"$y$", b"$7$", b"$argon2",
+];
+
+/// 输出侧的敏感内容拦截器：把流经终端的私钥 PEM 块、公钥行、口令哈希行替换成提示，
+/// 这样不管对方用 cat / less / vi / base64 哪种方式去读，敏感内容都到不了浏览器。
 ///
-/// 按行处理：完整行逐行判定；尾部那截还没换行的不完整行，只有在「看起来含密钥」
+/// 按行处理：完整行逐行判定；尾部那截还没换行的不完整行，只有在「看起来敏感」
 /// 时才暂存等下一块，否则立即放行——否则交互式提示符、全屏程序（top/vim）会被卡住。
 ///
 /// 这是**尽力而为**的遮挡，不是安全边界：控制台本质是 root 会话，真要绕过办法很多
@@ -194,6 +200,8 @@ const PUBKEY_TOKENS: &[&[u8]] = &[
 struct KeyFilter {
     /// 正处在一段要屏蔽的私钥 PEM 内（BEGIN 之后、END 之前）
     in_pem: bool,
+    /// 上一行是否被拦掉了——连续多行敏感（如整份 shadow）只提示一次，不刷屏
+    prev_redacted: bool,
     /// 跨 chunk 的不完整尾行缓冲
     buf: Vec<u8>,
 }
@@ -202,6 +210,7 @@ impl KeyFilter {
     fn new() -> Self {
         Self {
             in_pem: false,
+            prev_redacted: false,
             buf: Vec::new(),
         }
     }
@@ -214,7 +223,7 @@ impl KeyFilter {
             let line: Vec<u8> = self.buf.drain(..=nl).collect();
             self.filter_line(&line, &mut out);
         }
-        // 处理尾部不完整行：含密钥迹象（或正在 PEM 内）才攥着等下一块，
+        // 处理尾部不完整行：含敏感迹象（或正在 PEM 内）才攥着等下一块，
         // 否则立即放行以保交互。异常长的一行设个安全阀，别一直攥着不放。
         if self.in_pem || Self::sensitive(&self.buf) {
             if self.buf.len() > 4096 {
@@ -243,25 +252,150 @@ impl KeyFilter {
             if find_sub(line, b"-----END") {
                 self.in_pem = false;
             }
+            self.prev_redacted = true;
             return;
         }
-        if find_sub(line, b"-----BEGIN") && find_sub(line, b"PRIVATE KEY") {
-            self.in_pem = true;
-            out.extend_from_slice("\r\n[已拦截：私钥内容不给读]\r\n".as_bytes());
-            return;
+        let notice: Option<&[u8]> =
+            if find_sub(line, b"-----BEGIN") && find_sub(line, b"PRIVATE KEY") {
+                self.in_pem = true;
+                Some("\r\n[已拦截：私钥内容不给读]\r\n".as_bytes())
+            } else if PUBKEY_TOKENS.iter().any(|t| find_sub(line, t)) {
+                Some("\r\n[已拦截：公钥内容不给读]\r\n".as_bytes())
+            } else if HASH_TOKENS.iter().any(|t| find_sub(line, t)) {
+                Some("\r\n[已拦截：疑似口令哈希不给读]\r\n".as_bytes())
+            } else {
+                None
+            };
+        match notice {
+            Some(msg) => {
+                // 连续多行敏感只在头一行提示，避免整份 shadow 刷一屏「已拦截」
+                if !self.prev_redacted {
+                    out.extend_from_slice(msg);
+                }
+                self.prev_redacted = true;
+            }
+            None => {
+                out.extend_from_slice(line);
+                self.prev_redacted = false;
+            }
         }
-        if PUBKEY_TOKENS.iter().any(|t| find_sub(line, t)) {
-            out.extend_from_slice("\r\n[已拦截：公钥内容不给读]\r\n".as_bytes());
-            return;
-        }
-        out.extend_from_slice(line);
     }
 
-    /// 不完整尾行是否有密钥迹象（有就先攥着，等它成整行再判定）
+    /// 不完整尾行是否有敏感迹象（有就先攥着，等它成整行再判定）
     fn sensitive(partial: &[u8]) -> bool {
         find_sub(partial, b"-----BEGIN")
             || find_sub(partial, b"PRIVATE KEY")
             || PUBKEY_TOKENS.iter().any(|t| find_sub(partial, t))
+            || HASH_TOKENS.iter().any(|t| find_sub(partial, t))
+    }
+}
+
+/// 黑客爱翻的敏感文件/目录（口令、密钥、凭证、历史记录）。命令行里一旦引用到
+/// 这些路径就整条拦掉、不放行——挡的是「随手 cat 一下」这类顺手的窥探。
+const SENSITIVE_PATHS: &[&[u8]] = &[
+    b"/etc/shadow",
+    b"/etc/gshadow",
+    b"/etc/sudoers",
+    b"/etc/ssh/ssh_host_", // sshd 的主机私钥
+    b"id_rsa",
+    b"id_dsa",
+    b"id_ecdsa",
+    b"id_ed25519",
+    b"authorized_keys",
+    b"known_hosts",
+    b".aws/credentials",
+    b".git-credentials",
+    b".netrc",
+    b".pgpass",
+    b".my.cnf",
+    b".kube/config",
+    b"kubeconfig",
+    b".docker/config.json",
+    b".bash_history",
+    b".zsh_history",
+    b".mysql_history",
+    b".python_history",
+    b".gnupg",
+    b".password-store",
+    b"panel_ssh_key", // 面板自己存的私钥
+    b"panel.toml",    // 面板配置，里面有明文密码
+    b".env",
+];
+
+/// 一行命令是否碰了敏感路径
+fn cmd_touches_secret(line: &[u8]) -> bool {
+    SENSITIVE_PATHS.iter().any(|p| find_sub(line, p))
+}
+
+/// 输入侧的命令拦截器：逐字节跟一行命令，回车时若这行引用了敏感路径，就吞掉回车
+/// （命令不执行），由调用方再发个 Ctrl-U 把已回显的命令抹掉。
+///
+/// 只跟得住「一个字一个字敲出来」的简单命令：一旦出现方向键/历史翻页（ESC 序列）
+/// 或 Tab 补全，就置 dirty、这行放弃拦截（宁可放过，也不误伤）。同样是尽力而为。
+struct InputGuard {
+    line: Vec<u8>,
+    /// 这行掺进了没法可靠还原的编辑操作（方向键/补全等），本行不拦
+    dirty: bool,
+}
+
+impl InputGuard {
+    fn new() -> Self {
+        Self {
+            line: Vec::new(),
+            dirty: false,
+        }
+    }
+
+    /// 处理一块浏览器击键，返回 (要转发给 PTY 的字节, 是否拦下了某条命令)
+    fn feed(&mut self, chunk: &[u8]) -> (Vec<u8>, bool) {
+        let mut fwd = Vec::with_capacity(chunk.len());
+        let mut blocked = false;
+        for &b in chunk {
+            match b {
+                b'\r' | b'\n' => {
+                    if !self.dirty && cmd_touches_secret(&self.line) {
+                        blocked = true; // 吞掉这个回车，命令不执行
+                    } else {
+                        fwd.push(b);
+                    }
+                    self.line.clear();
+                    self.dirty = false;
+                }
+                0x1b => {
+                    // ESC 序列（方向键/历史等），没法可靠跟踪，本行放弃拦截
+                    self.dirty = true;
+                    self.line.clear();
+                    fwd.push(b);
+                }
+                0x09 => {
+                    // Tab 补全会改写命令行，放弃跟踪
+                    self.dirty = true;
+                    fwd.push(b);
+                }
+                0x03 => {
+                    // Ctrl-C：放弃当前行
+                    self.line.clear();
+                    self.dirty = false;
+                    fwd.push(b);
+                }
+                0x15 => {
+                    // Ctrl-U：清空当前行
+                    self.line.clear();
+                    fwd.push(b);
+                }
+                0x7f | 0x08 => {
+                    // 退格
+                    self.line.pop();
+                    fwd.push(b);
+                }
+                b if b >= 0x20 => {
+                    self.line.push(b);
+                    fwd.push(b);
+                }
+                b => fwd.push(b), // 其它控制字符原样透传，不动 line
+            }
+        }
+        (fwd, blocked)
     }
 }
 
@@ -390,6 +524,8 @@ async fn bridge(mut socket: WebSocket, target: String, keyfile: Option<PathBuf>)
     });
 
     let (mut ws_tx, mut ws_rx) = socket.split();
+    // 输入侧命令拦截：命令行里引用敏感路径时拦下该命令（尽力而为，见 InputGuard）
+    let mut guard = InputGuard::new();
     loop {
         tokio::select! {
             // PTY 有输出 -> 发给浏览器（二进制原样透传）
@@ -404,8 +540,25 @@ async fn bridge(mut socket: WebSocket, target: String, keyfile: Option<PathBuf>)
             // 浏览器来消息
             msg = ws_rx.next() => match msg {
                 Some(Ok(Message::Binary(b))) => {
-                    if in_tx.send(b.to_vec()).is_err() {
+                    let (fwd, blocked) = guard.feed(&b);
+                    if !fwd.is_empty() && in_tx.send(fwd).is_err() {
                         break;
+                    }
+                    if blocked {
+                        // 命令被拦：发个 Ctrl-U 抹掉已回显的命令（回车已被吞、没换行），
+                        // 再发个换行把这次被拦回显到终端，然后补一句提示。
+                        // 已知小瑕疵：从换行到 Ctrl-U 到达之间，shell 可能把提示符也回显出来，
+                        // 于是提示符后面跟着提示语——不影响功能，能接受。
+                        let _ = in_tx.send(vec![0x15]);
+                        let notice = "\r\n\x1b[31m[已拦截：这条命令引用了受保护的敏感文件/目录，未执行]\x1b[0m\r\n";
+                        if ws_tx
+                            .send(Message::Binary(notice.as_bytes().to_vec().into()))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                        let _ = in_tx.send(vec![b'\r']);
                     }
                 }
                 Some(Ok(Message::Text(t))) => {
@@ -521,6 +674,56 @@ mod tests {
         // 不带换行的交互提示符：不能被攥住，必须立刻放行，否则终端像卡死
         let mut f = KeyFilter::new();
         assert_eq!(String::from_utf8_lossy(&f.push(b"root@host:~# ")), "root@host:~# ");
+    }
+
+    #[test]
+    fn 口令哈希行被拦掉() {
+        let out = run_filter(&[b"root:$6$abcDEF123$xyz...:19000:0:99999:7:::\n"]);
+        assert!(!out.contains("$6$abcDEF123"));
+        assert!(out.contains("已拦截"));
+    }
+
+    #[test]
+    fn 整份shadow连续敏感只提示一次() {
+        let dump = b"root:$6$aaaa$bbbb:19000:0:99999:7:::\n\
+                     daemon:*:19000:0:99999:7:::\n\
+                     bin:*:19000:0:99999:7:::\n";
+        let out = run_filter(&[dump]);
+        assert_eq!(out.matches("已拦截").count(), 1); // 连着的敏感行只提示一次
+    }
+
+    #[test]
+    fn 命令行引用敏感路径被拦() {
+        let mut g = InputGuard::new();
+        // 敲 "cat /etc/shadow" 再回车 -> 回车被吞、报告拦下
+        let (fwd, blocked) = g.feed(b"cat /etc/shadow\r");
+        assert!(blocked);
+        assert!(!fwd.contains(&b'\r')); // 回车没转发出去，命令不会执行
+        assert_eq!(fwd, b"cat /etc/shadow"); // 已敲的字符照常回显
+
+        // 退格把敏感词删掉后回车，就该放行
+        let mut g = InputGuard::new();
+        g.feed(b"cat /etc/shadow");
+        g.feed(&[0x7f; 14]); // 删掉 "/etc/shadow"
+        let (fwd, blocked) = g.feed(b"\r");
+        assert!(!blocked);
+        assert_eq!(fwd, b"\r");
+    }
+
+    #[test]
+    fn 普通命令不被拦() {
+        let mut g = InputGuard::new();
+        let (fwd, blocked) = g.feed(b"ls -la /opt/apps\r");
+        assert!(!blocked);
+        assert_eq!(fwd, b"ls -la /opt/apps\r");
+    }
+
+    #[test]
+    fn 命令行碰了面板私钥和配置也得拦() {
+        assert!(cmd_touches_secret(b"cat panel_ssh_key"));
+        assert!(cmd_touches_secret(b"vim /opt/panel/panel.toml"));
+        assert!(cmd_touches_secret(b"tail -f ~/.bash_history"));
+        assert!(!cmd_touches_secret(b"ls /opt/apps"));
     }
 
     #[test]
