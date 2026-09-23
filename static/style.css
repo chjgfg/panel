@@ -275,17 +275,53 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
 }
 .modal-head .log-src { display: inline-flex; align-items: center; gap: .4rem; color: var(--muted); font-size: .85rem; }
 .modal-head .log-src select { padding: .3rem .5rem; font-size: .85rem; }
-/* 网页控制台：xterm 终端容器，占满 modal-log 的剩余高度（弹窗是 flex 纵向布局） */
+/* 网页控制台弹窗：比日志窄一些、居中，终端区自己占满剩余高度 */
+.modal-term {
+  width: min(1040px, 94vw);
+  height: min(74vh, 700px);
+  max-height: none;
+}
+/* 标题里的目标主机名用等宽 + accent 色，一眼看清连的是哪台 */
+.modal-term .modal-head h2 { display: flex; align-items: center; gap: .5rem; }
+.term-target {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .9rem; font-weight: 600; color: var(--accent);
+}
+/* 连接状态小圆点：灰=未连/断开，绿=已连上 */
+.term-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--muted); flex: none;
+  transition: background .2s;
+}
+.term-dot.on {
+  background: var(--go);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--go) 25%, transparent);
+}
+/* xterm 终端容器：深色但不纯黑，和面板协调；内边距 + 圆角让它像个卡片 */
 #termBody {
   flex: 1; min-height: 0;
-  padding: .4rem .5rem;
-  background: #000;
+  margin: .75rem; padding: .55rem .7rem;
+  background: #0b0e14;
+  border: 1px solid var(--line);
+  border-radius: 10px;
   overflow: hidden;
 }
 #termBody .xterm { height: 100%; }
+/* xterm 自带滚动条细一点，别抢眼 */
+#termBody .xterm-viewport::-webkit-scrollbar { width: 10px; }
+#termBody .xterm-viewport::-webkit-scrollbar-thumb {
+  background: #2b313c; border-radius: 6px; border: 2px solid #0b0e14;
+}
+#termBody .xterm-viewport { scrollbar-width: thin; scrollbar-color: #2b313c #0b0e14; }
 /* 私钥提示（在控制台弹窗底部靠左），已配/未配一目了然 */
 .term-key-hint { margin-right: auto; font-size: .82rem; color: var(--muted); }
+.term-key-hint::before {
+  content: ''; display: inline-block; vertical-align: middle;
+  width: 7px; height: 7px; margin-right: .4rem; border-radius: 50%;
+  background: var(--muted);
+}
 .term-key-hint.on { color: var(--go); }
+.term-key-hint.on::before { background: var(--go); }
 /* 私钥输入框：等宽、够高，方便整段粘贴 */
 #keyText {
   width: 100%; box-sizing: border-box; resize: vertical;

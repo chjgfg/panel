@@ -36,9 +36,9 @@ if (document.documentElement.dataset.theme === 'light') {
   <header>
     <h1>项目面板</h1>
     <span id="tick"></span>
-    <button id="console" type="button" class="ghost">控制台</button>
     <button id="oracleCloud" type="button" class="ghost">Cloud</button>
     <button id="ddia" type="button" class="ghost">设计数据密集型应用</button>
+    <button id="console" type="button" class="chip">控制台</button>
     <button id="themeBtn" type="button" class="chip" title="切换黑夜/白天">主题</button>
     <button id="refresh" class="chip">刷新</button>
     <button id="logout" class="ghost">退出</button>
@@ -131,11 +131,11 @@ if (document.documentElement.dataset.theme === 'light') {
   </div>
 </main>
 
-<!-- 网页控制台弹窗：复用宽屏 modal-log 样式，body 里挂 xterm 终端 -->
+<!-- 网页控制台弹窗：xterm 终端 -->
 <div id="termBox" class="overlay" hidden>
-  <div class="modal modal-log">
+  <div class="modal modal-term">
     <div class="modal-head">
-      <h2>控制台 · <span id="termTarget"></span></h2>
+      <h2>控制台 <span id="termDot" class="term-dot"></span> <span id="termTarget" class="term-target"></span></h2>
       <button id="termCloseX" class="close-x" aria-label="关闭" title="关闭">×</button>
     </div>
     <div id="termBody"></div>

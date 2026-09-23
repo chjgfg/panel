@@ -602,9 +602,23 @@ function ensureTerm() {
   if (term) return;
   term = new Terminal({
     cursorBlink: true,
-    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Cascadia Code", monospace',
     fontSize: 13,
-    theme: { background: '#000000' }
+    lineHeight: 1.15,
+    letterSpacing: 0,
+    scrollback: 5000,
+    // GitHub 暗色调色板，和面板的深色卡片协调，比默认纯黑更耐看
+    theme: {
+      background: '#0b0e14',
+      foreground: '#c9d1d9',
+      cursor: '#58a6ff',
+      cursorAccent: '#0b0e14',
+      selectionBackground: 'rgba(88,166,255,0.30)',
+      black: '#484f58', red: '#ff7b72', green: '#3fb950', yellow: '#d29922',
+      blue: '#58a6ff', magenta: '#bc8cff', cyan: '#39c5cf', white: '#b1bac4',
+      brightBlack: '#6e7681', brightRed: '#ffa198', brightGreen: '#56d364', brightYellow: '#e3b341',
+      brightBlue: '#79c0ff', brightMagenta: '#d2a8ff', brightCyan: '#56d4dd', brightWhite: '#f0f6fc'
+    }
   });
   fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);
@@ -627,7 +641,7 @@ function connectTerm() {
   ws.binaryType = 'arraybuffer';
   termWs = ws;
   // 私钥在服务器上，后端连接时自己读取，前端不用再发。连上直接 fit。
-  ws.onopen = () => { fitTerm(); term.focus(); };
+  ws.onopen = () => { $('termDot').classList.add('on'); fitTerm(); term.focus(); };
   ws.onmessage = e => {
     // 二进制帧 = 终端内容；文本帧 = 后端状态消息
     if (typeof e.data !== 'string') { term.write(new Uint8Array(e.data)); return; }
@@ -637,6 +651,7 @@ function connectTerm() {
   ws.onclose = () => {
     if (termWs !== ws) return;
     termWs = null;
+    $('termDot').classList.remove('on');
     if (termAuthFail) {
       term.write('\r\n\x1b[31m[公钥认证失败] 服务器拒绝了这把私钥。请点“配置密钥”检查：'
         + '私钥是否完整、是否与服务器 authorized_keys 里的公钥匹配、是否选对了这台机器的钥匙。\x1b[0m\r\n');
