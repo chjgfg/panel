@@ -770,8 +770,15 @@ async fn start() -> Result<(), BoxErr> {
     let exclude = cfg.exclude.clone();
     let dirs = cfg.dirs.clone();
     let prefix = cfg.prefix.trim().to_string();
+    // 控制台 SSH 私钥落盘路径：跟配置文件同目录的 panel_ssh_key（存服务器上，换浏览器也不丢）。
+    // path 是解析到的配置文件路径；取不到父目录（裸相对名）就退到当前目录。
+    let ssh_key_path = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.join("panel_ssh_key"))
+        .unwrap_or_else(|| PathBuf::from("panel_ssh_key"));
     // App 拿走 cfg 所有权，之后想再读配置就从 App 里读
-    let app = App::new(cfg, cargo.clone());
+    let app = App::new(cfg, cargo.clone(), ssh_key_path);
 
     // 除了首页和登录接口，其它一律要带有效 cookie
     let protected = Router::new()
@@ -786,6 +793,12 @@ async fn start() -> Result<(), BoxErr> {
         .route("/api/units/{key}/bins/{bin}/{action}", post(bin_action))
         .route("/api/units/{key}/{action}", post(action))
         .route("/api/terminal", get(terminal::terminal_ws))
+        .route(
+            "/api/sshkey",
+            get(terminal::sshkey_status)
+                .put(terminal::sshkey_save)
+                .delete(terminal::sshkey_clear),
+        )
         .layer(middleware::from_fn_with_state(app.clone(), auth::require_auth));
 
     let panel = Router::new()

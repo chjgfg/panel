@@ -1,5 +1,6 @@
 // 全局共享状态：配置、会话表、各类采样缓存。
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -14,6 +15,9 @@ pub struct App {
     pub cfg: Config,
     /// cargo 的绝对路径，启动时定好
     pub cargo: String,
+    /// 网页控制台用的 SSH 私钥落盘路径（跟配置文件同目录的 panel_ssh_key）。
+    /// 存服务器上而不是浏览器里，换个浏览器也不用重配。文件权限 0600。
+    pub ssh_key_path: PathBuf,
     /// token -> 过期时刻
     pub sessions: Mutex<HashMap<String, Instant>>,
     /// (连续失败次数, 最后一次失败时刻)
@@ -30,10 +34,11 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(cfg: Config, cargo: String) -> Arc<Self> {
+    pub fn new(cfg: Config, cargo: String, ssh_key_path: PathBuf) -> Arc<Self> {
         Arc::new(App {
             cfg,
             cargo,
+            ssh_key_path,
             sessions: Mutex::new(HashMap::new()),
             fails: Mutex::new((0, Instant::now())),
             cpu_prev: Mutex::new(HashMap::new()),

@@ -2,6 +2,8 @@
 
 # 真实配置里有密码哈希，别进仓库；示例见 panel.toml.example
 /panel.toml
+# 网页控制台保存的 SSH 私钥，绝不能进仓库
+/panel_ssh_key
 panel.log
 .omc
 Cargo.lock

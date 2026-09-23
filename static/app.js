@@ -575,18 +575,20 @@ applyTheme();
 
 // ---------- 网页控制台（xterm 终端 + WebSocket，后端在 PTY 里跑 ssh root@本机）----------
 // term/fitAddon 懒创建一次后复用；每次打开/重连各建一条 WebSocket。
+// SSH 私钥存在服务器上（/api/sshkey），换浏览器也不用重配。
 let term = null, fitAddon = null, termWs = null, termResizeHandler = null, termAuthFail = false;
 
-// SSH 私钥：只存当前浏览器标签的会话（sessionStorage），关标签即失效
-const SSH_KEY = 'panel_ssh_key';
-const getSshKey = () => sessionStorage.getItem(SSH_KEY) || '';
-const setSshKey = v => { v ? sessionStorage.setItem(SSH_KEY, v) : sessionStorage.removeItem(SSH_KEY); };
-
-function updateKeyHint() {
-  const has = !!getSshKey();
+// 查服务器上配没配私钥，刷新底部提示（出于安全，后端不回显私钥内容）
+async function updateKeyHint() {
   const el = $('termKeyHint');
-  el.textContent = has ? '已配置私钥（公钥认证）' : '未配置私钥';
-  el.classList.toggle('on', has);
+  try {
+    const { configured } = await (await req('api/sshkey')).json();
+    el.textContent = configured ? '已配置私钥（公钥认证）' : '未配置私钥';
+    el.classList.toggle('on', configured);
+  } catch {
+    el.textContent = '';
+    el.classList.remove('on');
+  }
 }
 
 // WebSocket 地址：从当前页所在目录拼，天然带上秘密前缀；http→ws / https→wss
@@ -624,13 +626,8 @@ function connectTerm() {
   const ws = new WebSocket(termUrl());
   ws.binaryType = 'arraybuffer';
   termWs = ws;
-  ws.onopen = () => {
-    // 握手第一帧：初始配置。有私钥就发 "K\n<私钥>"，否则发 "N"（后端据此拼 ssh -i）
-    const key = getSshKey();
-    ws.send(key ? ('K\n' + key) : 'N');
-    fitTerm();
-    term.focus();
-  };
+  // 私钥在服务器上，后端连接时自己读取，前端不用再发。连上直接 fit。
+  ws.onopen = () => { fitTerm(); term.focus(); };
   ws.onmessage = e => {
     // 二进制帧 = 终端内容；文本帧 = 后端状态消息
     if (typeof e.data !== 'string') { term.write(new Uint8Array(e.data)); return; }
@@ -678,28 +675,47 @@ $('termClose').onclick = closeTerm;
 $('termCloseX').onclick = closeTerm;
 $('termReconnect').onclick = reconnectTerm;
 
-// 私钥配置弹窗
+// 私钥配置弹窗。私钥存服务器（不回显），所以打开时输入框留空，保存即覆盖。
 $('termKey').onclick = () => {
-  $('keyText').value = getSshKey();
+  $('keyText').value = '';
   $('keyErr').textContent = '';
   $('keyBox').hidden = false;
   $('keyText').focus();
 };
 $('keyCloseX').onclick = $('keyCancel').onclick = () => { $('keyBox').hidden = true; };
-$('keyClear').onclick = () => { setSshKey(''); $('keyText').value = ''; $('keyErr').textContent = ''; updateKeyHint(); };
-$('keySave').onclick = () => {
+$('keyClear').onclick = async () => {
+  $('keyErr').textContent = '';
+  try {
+    await req('api/sshkey', { method: 'DELETE' });
+    $('keyText').value = '';
+    await updateKeyHint();
+  } catch (e) {
+    if (e.message !== '未登录') $('keyErr').textContent = '清除失败：' + e.message;
+  }
+};
+$('keySave').onclick = async () => {
   const v = $('keyText').value.trim();
+  $('keyErr').textContent = '';
   // 轻校验：像不像一把私钥，早点拦下明显贴错的内容
-  if (v && !/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/.test(v)) {
+  if (!v || !/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/.test(v)) {
     $('keyErr').textContent = '这看起来不是 SSH 私钥（应包含 “BEGIN ... PRIVATE KEY”）';
     return;
   }
-  setSshKey(v);
-  updateKeyHint();
-  $('keyBox').hidden = true;
-  // 用新私钥立刻重连（若控制台已打开）
-  if (!$('termBox').hidden) reconnectTerm();
+  try {
+    await req('api/sshkey', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+      body: v
+    });
+    $('keyBox').hidden = true;
+    await updateKeyHint();
+    // 用新私钥立刻重连（若控制台已打开）
+    if (!$('termBox').hidden) reconnectTerm();
+  } catch (e) {
+    if (e.message !== '未登录') $('keyErr').textContent = '保存失败：' + e.message;
+  }
 };
+
 
 
 // 切换日志源筛选：用上一次拉到的数据直接重渲染，不用重新请求
