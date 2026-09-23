@@ -162,7 +162,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn 文件夹名只放行安全字符() {
+    fn dir_name_allows_only_safe_chars() {
         assert!(ok_name("blog"));
         assert!(ok_name("my-api_2.0"));
         assert!(ok_name("tpl@inst"));
@@ -176,7 +176,7 @@ mod tests {
     }
 
     #[test]
-    fn 通配符只认星号() {
+    fn glob_only_supports_star() {
         assert!(glob_match("panel", "panel"));
         assert!(!glob_match("panel", "panel2"));
         assert!(glob_match("test-*", "test-a"));
@@ -193,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn 黑名单按名字或路径匹配() {
+    fn blacklist_matches_by_name_or_path() {
         let dir = PathBuf::from("/root/rust_project/panel");
         // 不带 / 的按项目名比
         assert!(excluded(&["panel".into()], "panel", &dir));

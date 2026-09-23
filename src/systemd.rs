@@ -193,7 +193,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn 一次show多个unit按id分段() {
+    fn show_many_units_split_by_id() {
         // systemctl show 多个 unit 时，每段之间是一个空行
         let out = "Id=panel-xau.service\nLoadState=not-found\nActiveState=inactive\n\
                    SubState=dead\nUnitFileState=\nMainPID=0\nMemoryCurrent=[not set]\n\
@@ -235,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn 多bin同时起着各自归进running_bins且以面板unit为主() {
+    fn multiple_running_bins_tracked_with_panel_unit_primary() {
         let mk = |load: &str, active: &str| Raw {
             load: load.into(),
             active: active.into(),

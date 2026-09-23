@@ -104,7 +104,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn 源码树过滤隐藏目录和target() {
+    fn tree_filters_hidden_and_target() {
         assert!(tree_skip(".git"));
         assert!(tree_skip(".idea"));
         assert!(tree_skip("target"));
@@ -120,7 +120,7 @@ mod tests {
     }
 
     #[test]
-    fn 依赖和构建目录也过滤() {
+    fn deps_and_build_dirs_filtered() {
         for d in ["node_modules", "vendor", "dist", "build", "out", "__pycache__", "venv", ".venv"] {
             assert!(tree_skip(d), "{d} 该被过滤");
         }
@@ -131,7 +131,7 @@ mod tests {
     }
 
     #[test]
-    fn 文件路径穿越挡在门外() {
+    fn path_traversal_blocked() {
         // 相对路径、每段干净，放行
         assert!(file_path_ok("src/main.rs"));
         assert!(file_path_ok("a/b/c.txt"));

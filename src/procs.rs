@@ -87,7 +87,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn 僵尸进程算死的() {
+    fn zombie_process_treated_as_dead() {
         assert!(alive_from_stat("69968 (xau) R 1 69968 69968 0 -1 4194560"));
         assert!(alive_from_stat("69968 (xau) S 1 69968"));
         assert!(!alive_from_stat("69968 (xau) Z 1 69968"));
@@ -100,7 +100,7 @@ mod tests {
     }
 
     #[test]
-    fn 只认target目录下的进程() {
+    fn only_processes_under_target_dir() {
         let exes = vec![
             (
                 1u32,

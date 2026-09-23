@@ -869,7 +869,7 @@ mod tests {
     /// 端到端验证前缀路由：/前缀（301 补斜杠）、/前缀/（首页）、
     /// 前缀外（404，扫描器看不出这里有面板）
     #[tokio::test]
-    async fn 前缀外一律404前缀内正常() {
+    async fn outside_prefix_404_inside_ok() {
         use tower::ServiceExt;
 
         let inner = Router::new()
@@ -908,7 +908,7 @@ mod tests {
     }
 
     #[test]
-    fn 前缀清洗去掉斜杠并拒绝非法字符() {
+    fn clean_prefix_strips_slashes_rejects_invalid() {
         assert_eq!(clean_prefix("/abc/").unwrap(), "abc");
         assert_eq!(clean_prefix("a-b9").unwrap(), "a-b9");
         assert!(clean_prefix("a/b").is_err());
@@ -917,7 +917,7 @@ mod tests {
     }
 
     #[test]
-    fn 不带参数时不加双横线() {
+    fn no_double_dash_when_no_args() {
         let v = systemd_run_argv(
             "/root/.cargo/bin/cargo",
             "panel-blog.service",
@@ -940,7 +940,7 @@ mod tests {
     }
 
     #[test]
-    fn 参数原样透传不按空格拆分() {
+    fn args_passed_through_without_splitting() {
         let v = systemd_run_argv(
             "/usr/bin/cargo",
             "panel-a.service",
@@ -953,7 +953,7 @@ mod tests {
     }
 
     #[test]
-    fn transient文件没了的噪声行不进日志() {
+    fn transient_gone_noise_lines_dropped() {
         let out = "2026-08-29T09:34:09+00:00 h systemd[1]: panel-xau.service: \
                    Failed to open /run/systemd/transient/panel-xau.service: \
                    No such file or directory\n\

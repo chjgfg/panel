@@ -595,7 +595,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn 从host头解析ssh目标() {
+    fn ssh_target_from_host_header() {
         assert_eq!(ssh_target(Some("1.2.3.4:80")), "1.2.3.4");
         assert_eq!(ssh_target(Some("1.2.3.4")), "1.2.3.4");
         assert_eq!(ssh_target(Some("panel.example.com:8080")), "panel.example.com");
@@ -607,7 +607,7 @@ mod tests {
     }
 
     #[test]
-    fn 解析缩放控制帧() {
+    fn parse_resize_frame() {
         assert_eq!(parse_resize("R 120 40"), Some((120, 40)));
         assert_eq!(parse_resize("R 0 0"), Some((1, 1))); // 下限保护
         assert_eq!(parse_resize("hello"), None);
@@ -615,7 +615,7 @@ mod tests {
     }
 
     #[test]
-    fn 字节流子串查找() {
+    fn byte_substring_search() {
         assert!(find_sub(b"xx Permission denied (publickey).", b"Permission denied"));
         assert!(!find_sub(b"welcome to server", b"Permission denied"));
     }
@@ -632,7 +632,7 @@ mod tests {
     }
 
     #[test]
-    fn 私钥pem整块被拦掉() {
+    fn private_key_pem_block_redacted() {
         let dump = b"cat id_rsa\r\n\
                      -----BEGIN OPENSSH PRIVATE KEY-----\r\n\
                      b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAA=\r\n\
@@ -649,7 +649,7 @@ mod tests {
     }
 
     #[test]
-    fn 私钥被拆成多块喂进来也拦得住() {
+    fn private_key_split_across_chunks_redacted() {
         // 模拟 read() 把 PEM 切在奇怪的位置
         let out = run_filter(&[
             b"-----BEGIN RSA PRIV",
@@ -661,14 +661,14 @@ mod tests {
     }
 
     #[test]
-    fn 公钥行被拦掉() {
+    fn public_key_line_redacted() {
         let out = run_filter(&[b"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIabc user@host\n"]);
         assert!(!out.contains("AAAAC3NzaC1lZDI1NTE5"));
         assert!(out.contains("已拦截"));
     }
 
     #[test]
-    fn 普通输出与交互提示符照常放行() {
+    fn normal_output_and_prompt_pass_through() {
         // 整行普通输出
         assert_eq!(run_filter(&[b"hello world\n"]), "hello world\n");
         // 不带换行的交互提示符：不能被攥住，必须立刻放行，否则终端像卡死
@@ -677,14 +677,14 @@ mod tests {
     }
 
     #[test]
-    fn 口令哈希行被拦掉() {
+    fn password_hash_line_redacted() {
         let out = run_filter(&[b"root:$6$abcDEF123$xyz...:19000:0:99999:7:::\n"]);
         assert!(!out.contains("$6$abcDEF123"));
         assert!(out.contains("已拦截"));
     }
 
     #[test]
-    fn 整份shadow连续敏感只提示一次() {
+    fn consecutive_secret_lines_notice_once() {
         let dump = b"root:$6$aaaa$bbbb:19000:0:99999:7:::\n\
                      daemon:*:19000:0:99999:7:::\n\
                      bin:*:19000:0:99999:7:::\n";
@@ -693,7 +693,7 @@ mod tests {
     }
 
     #[test]
-    fn 命令行引用敏感路径被拦() {
+    fn command_touching_secret_path_blocked() {
         let mut g = InputGuard::new();
         // 敲 "cat /etc/shadow" 再回车 -> 回车被吞、报告拦下
         let (fwd, blocked) = g.feed(b"cat /etc/shadow\r");
@@ -711,7 +711,7 @@ mod tests {
     }
 
     #[test]
-    fn 普通命令不被拦() {
+    fn normal_command_not_blocked() {
         let mut g = InputGuard::new();
         let (fwd, blocked) = g.feed(b"ls -la /opt/apps\r");
         assert!(!blocked);
@@ -719,7 +719,7 @@ mod tests {
     }
 
     #[test]
-    fn 命令行碰了面板私钥和配置也得拦() {
+    fn command_touching_panel_key_and_config_blocked() {
         assert!(cmd_touches_secret(b"cat panel_ssh_key"));
         assert!(cmd_touches_secret(b"vim /opt/panel/panel.toml"));
         assert!(cmd_touches_secret(b"tail -f ~/.bash_history"));
@@ -727,14 +727,14 @@ mod tests {
     }
 
     #[test]
-    fn 规整私钥统一换行且补尾换行() {
+    fn normalize_key_unifies_newlines() {
         assert_eq!(normalize_key("-----BEGIN-----\r\nabc\r\n"), "-----BEGIN-----\nabc\n");
         assert_eq!(normalize_key("key\n\n\n"), "key\n"); // 去尾部多余空白后补一个
         assert_eq!(normalize_key("   "), ""); // 全空白 -> 空
     }
 
     #[test]
-    fn 存查清私钥走一遍() {
+    fn save_check_clear_key_roundtrip() {
         let mut path = std::env::temp_dir();
         path.push(format!("panel-test-key-{}", std::process::id()));
         let _ = std::fs::remove_file(&path);

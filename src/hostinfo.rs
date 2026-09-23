@@ -161,7 +161,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn 整机cpu两次采样做差() {
+    fn host_cpu_diff_of_two_samples() {
         // idle(3) 和 iowait(4) 算没干活，其余都算忙
         let a = "cpu  100 0 100 800 0 0 0 0 0 0\nintr 1\n";
         let b = "cpu  200 0 100 1000 0 0 0 0 0 0\nintr 1\n";
@@ -179,7 +179,7 @@ mod tests {
     }
 
     #[test]
-    fn 内存按可用量算已用() {
+    fn memory_used_from_available() {
         let s = "MemTotal:        4030464 kB\n\
                  MemFree:          123456 kB\n\
                  MemAvailable:    3000000 kB\n\
@@ -194,7 +194,7 @@ mod tests {
     }
 
     #[test]
-    fn 负载取前三个数() {
+    fn loadavg_takes_first_three() {
         assert_eq!(
             parse_loadavg("0.42 0.30 0.25 1/234 5678\n"),
             [0.42, 0.30, 0.25]
@@ -203,7 +203,7 @@ mod tests {
     }
 
     #[test]
-    fn df输出解析且挂载点去重() {
+    fn df_output_parsed_and_mounts_deduped() {
         let s = "Filesystem     1024-blocks     Used Available Capacity Mounted on\n\
                  /dev/sda1         50432764 18000000  29000000      39% /\n\
                  /dev/sda1         50432764 18000000  29000000      39% /\n\
