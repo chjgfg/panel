@@ -189,15 +189,23 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
 /* 项目块：每个项目 = 一张项目行表（放表格里）+ 下方表格外的 bin 独立面板 */
 #projList { display: flex; flex-direction: column; gap: .4rem; margin-top: .4rem; }
 .proj-block > table { margin: 0; }
-/* 主表格（表头 + 每个项目行）列宽统一钉死：table-layout:fixed 让每一列都按下面
-   的百分比走，表头和各项目行表格列宽完全一致，绝不因内容长度漂移错位。 */
+/* 主表格（表头 + 每个项目行）列宽统一钉死：table-layout:fixed 让每一列都按下面的
+   百分比走，表头和各项目行表格列宽完全一致，绝不因内容长度漂移错位。
+   数字按实测内容宽度定的（1600px 宽时）：状态「运行中（面板外）」需 159px、
+   时长「25天 6小时」需 122、CPU「0.0%」需 56、内存「1284.3MB」需 94、
+   操作四个按钮需 304（外部 unit 那行六个按钮需 454）。
+   操作给到 30% 是为了六个按钮也放得下一行；项目名列不设宽度 = 吃剩下全部。
+   注意别用 max(下限, 百分比)：fixed 布局的单元格宽度里百分比是不定值，
+   Chrome 解析不出 max() 会把该列直接压成 0 宽。 */
 .stack-table { table-layout: fixed; width: 100%; }
-.stack-table th:nth-child(1), .stack-table td:nth-child(1) { width: 30%; }
-.stack-table th:nth-child(2), .stack-table td:nth-child(2) { width: 16%; }
-.stack-table th:nth-child(3), .stack-table td:nth-child(3) { width: 14%; }
-.stack-table th:nth-child(4), .stack-table td:nth-child(4) { width: 10%; }
-.stack-table th:nth-child(5), .stack-table td:nth-child(5) { width: 15%; }
-.stack-table th:nth-child(6), .stack-table td:nth-child(6) { width: 15%; }
+.stack-table th:nth-child(2), .stack-table td:nth-child(2) { width: 11%; }
+.stack-table th:nth-child(3), .stack-table td:nth-child(3) { width: 8%; }
+.stack-table th:nth-child(4), .stack-table td:nth-child(4) { width: 4%; }
+.stack-table th:nth-child(5), .stack-table td:nth-child(5) { width: 6%; }
+.stack-table th:nth-child(6), .stack-table td:nth-child(6) { width: 30%; }
+/* 窄屏（列被百分比压到比内容还窄）时这两列允许换行：
+   普通单元格是 white-space:nowrap，列一窄文字不换行而是压到隔壁列上去。 */
+.stack-table td.ops, .stack-table td:nth-child(2) { white-space: normal; }
 /* bin 独立面板：缩进一点，跟上方项目行区分开；内部列表，行数多时自己滚，不碰外层表格。
    左右两侧 margin 取同一个值，左右留白对称：左侧跟上方父项目容器保持一致的缩进，
    右侧留出一模一样的同等留白，展开/收起时面板始终水平居中，不会左右偏移晃动。 */

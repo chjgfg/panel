@@ -10,6 +10,9 @@
 // -o PreferredAuthentications=publickey` 发起公钥认证；私钥带口令的话 ssh 会在
 // 这个 PTY 里提示输入。
 //
+// 两种控制台：不带 key = 通用控制台，落在 root 的家目录；带 ?key=项目名 =
+// 项目控制台，一进去就在该项目目录里（见 cd_command）。
+//
 // 桥接分三条线：
 //   reader 线程  —— 阻塞读 PTY 输出，塞进 tokio channel，主循环再发给浏览器；
 //                   顺便扫一眼有没有「Permission denied」，有就置公钥认证失败标记
@@ -22,7 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -31,8 +34,15 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
 use crate::state::App;
 
+/// 前端能传的只有一个项目名：目录由服务器自己扫（resolve），不接受前端传路径
+#[derive(serde::Deserialize)]
+pub struct TermQuery {
+    key: Option<String>,
+}
+
 pub async fn terminal_ws(
     State(app): State<Arc<App>>,
+    Query(q): Query<TermQuery>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
@@ -42,7 +52,7 @@ pub async fn terminal_ws(
         .map(str::to_string);
 
     // 同源校验，防跨站 WebSocket 劫持（CSWSH）：cookie 是 SameSite=Lax 本就挡住了
-    // 跨站脚本发起的连接，这里再核一遍 Origin 的 host 必须和 Host 一致，纵深防御。
+    // 跨站脚本发起的连接，这里再核一遍 Origin 的 Host 必须和 Host 一致，纵深防御。
     // 非浏览器客户端（无 Origin）已被 require_auth 的 cookie 拦在外面，放行。
     if let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
         let same = origin
@@ -54,12 +64,22 @@ pub async fn terminal_ws(
         }
     }
 
+    // 带 key = 项目级控制台。目录只认服务器自己扫出来的那个，未知项目直接 404，
+    // 不升级成 WebSocket（免得前端拿到一个连上又立刻断开的终端）。
+    let remote_cmd = match q.key.as_deref() {
+        None => None,
+        Some(key) => match crate::resolve(&app, key).await {
+            None => return (StatusCode::NOT_FOUND, "未知项目").into_response(),
+            Some((_, dir)) => cd_command(&dir.display().to_string()),
+        },
+    };
+
     // ssh 的目标 = 浏览器访问面板用的主机名（Host 头去掉端口）。
     // 用户就是冲着这个 IP 开的面板，ssh root@它 正好是需求要的「连本机」。
     let target = ssh_target(host.as_deref());
     // 已配好私钥就把它的路径交给 ssh -i；没配就走默认认证（可能失败或走密码）。
     let keyfile = key_configured(&app.ssh_key_path).then(|| app.ssh_key_path.clone());
-    ws.on_upgrade(move |socket| bridge(socket, target, keyfile))
+    ws.on_upgrade(move |socket| bridge(socket, target, keyfile, remote_cmd))
 }
 
 // ---------- SSH 私钥的存/查/清（都落在服务器上，换浏览器不丢）----------
@@ -155,6 +175,47 @@ fn ssh_target(host: Option<&str>) -> String {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':'));
     if ok { bare.to_string() } else { fallback }
+}
+
+/// 项目级控制台的远端命令：让 shell 一起来就在项目目录里。
+///
+/// 目录用单引号包住，交给**远端** shell 解析（本地这侧是直接 exec，不过 shell）。
+/// 路径里出现单引号或换行会破坏这层引号、拼出一条语义不明的命令，那就干脆放弃 cd，
+/// 退回 ssh 默认的 root 家目录——通用控制台本来也是那个位置，不算功能缺失。
+/// 后半句 `exec "$SHELL" -l` 不能省：sshd 是拿 `<shell> -c "<这串>"` 跑的，
+/// 不 exec 出去的话 cd 完这个非交互 shell 就退出、连接立刻断；`-l` 顺带把
+/// PATH 恢复成登录时那套（cargo/rustc 才在）。`$SHELL` 由 sshd 按 passwd 设好，
+/// 万一没设（精简镜像）退到 bash，而不是 exec 一个空命令把终端闪断。
+fn cd_command(dir: &str) -> Option<String> {
+    (!dir.is_empty() && !dir.contains(['\'', '\n', '\r'])).then(|| {
+        format!(r#"cd '{dir}' && exec "${{SHELL:-/bin/bash}}" -l"#)
+    })
+}
+
+/// 拼 ssh 的命令行。抽成纯函数是为了单测能验参数**顺序**：
+/// 选项必须在目标之前，远端命令必须在目标之后，弄反了 ssh 会把命令当成主机名。
+fn ssh_argv(target: &str, keyfile: Option<&Path>, remote_cmd: Option<&str>) -> Vec<String> {
+    let mut v = Vec::new();
+    if let Some(kf) = keyfile {
+        v.push("-i".into());
+        v.push(kf.display().to_string());
+        // 只用这把钥、不掺 agent 里的，认证失败才干脆地报 publickey
+        v.extend(["-o".into(), "IdentitiesOnly=yes".into()]);
+        v.extend(["-o".into(), "PreferredAuthentications=publickey".into()]);
+    }
+    // accept-new：首次连自动记住 host key，不卡在 yes/no 提示上
+    v.extend(["-o".into(), "StrictHostKeyChecking=accept-new".into()]);
+    v.extend(["-o".into(), "ConnectTimeout=10".into()]);
+    // 关键：一旦带了远端命令，ssh 就不再自动分配远端 pty（哪怕本地 stdin 是 tty），
+    // 于是 vim/top 这类全屏程序起不来 —— 必须显式 -t 把 pty 要回来。
+    if remote_cmd.is_some() {
+        v.push("-t".into());
+    }
+    v.push(format!("root@{target}"));
+    if let Some(c) = remote_cmd {
+        v.push(c.to_string());
+    }
+    v
 }
 
 /// 解析前端发来的缩放控制帧：文本 `R <cols> <rows>`。返回 (cols, rows)。
@@ -399,7 +460,12 @@ impl InputGuard {
     }
 }
 
-async fn bridge(mut socket: WebSocket, target: String, keyfile: Option<PathBuf>) {
+async fn bridge(
+    mut socket: WebSocket,
+    target: String,
+    keyfile: Option<PathBuf>,
+    remote_cmd: Option<String>,
+) {
     // 造 PTY
     let pair = match native_pty_system().openpty(PtySize {
         rows: 24,
@@ -416,23 +482,10 @@ async fn bridge(mut socket: WebSocket, target: String, keyfile: Option<PathBuf>)
         }
     };
 
-    // 拼 ssh 命令。accept-new：首次连自动记住 host key，不卡在 yes/no 提示上。
-    // 有私钥就强制走公钥认证（IdentitiesOnly 只用这把钥、不掺 agent 里的），
-    // 这样认证失败会干脆利落地报 publickey，前端好据此提示。
     let mut cmd = CommandBuilder::new("ssh");
-    if let Some(kf) = &keyfile {
-        cmd.arg("-i");
-        cmd.arg(kf.display().to_string());
-        cmd.arg("-o");
-        cmd.arg("IdentitiesOnly=yes");
-        cmd.arg("-o");
-        cmd.arg("PreferredAuthentications=publickey");
+    for a in ssh_argv(&target, keyfile.as_deref(), remote_cmd.as_deref()) {
+        cmd.arg(a);
     }
-    cmd.arg("-o");
-    cmd.arg("StrictHostKeyChecking=accept-new");
-    cmd.arg("-o");
-    cmd.arg("ConnectTimeout=10");
-    cmd.arg(format!("root@{target}"));
     cmd.env("TERM", "xterm-256color");
     cmd.cwd("/root");
 
@@ -604,6 +657,75 @@ mod tests {
         // 非法字符（可能夹带注入意图）一律回退，绝不原样拼进命令行
         assert_eq!(ssh_target(Some("a b c")), "127.0.0.1");
         assert_eq!(ssh_target(Some("a;rm -rf/")), "127.0.0.1");
+    }
+
+    #[test]
+    fn cd_command_quotes_dir_and_login_shell() {
+        assert_eq!(
+            cd_command("/opt/apps/xau").as_deref(),
+            Some(r#"cd '/opt/apps/xau' && exec "${SHELL:-/bin/bash}" -l"#)
+        );
+        // 空格是合法的目录名，单引号包住就行
+        assert_eq!(
+            cd_command("/opt/my apps").as_deref(),
+            Some(r#"cd '/opt/my apps' && exec "${SHELL:-/bin/bash}" -l"#)
+        );
+    }
+
+    #[test]
+    fn cd_command_gives_up_on_unquotable_path() {
+        // 路径里带单引号会破坏我们那层引号 -> 不 cd（退回 /root），而不是拼出条看不懂的命令
+        assert_eq!(cd_command("/opt/it's"), None);
+        assert_eq!(cd_command("/opt/a\nrm -rf /"), None);
+        assert_eq!(cd_command(""), None);
+    }
+
+    #[test]
+    fn ssh_argv_keeps_option_order() {
+        // 无 keyfile、无远端命令：和改造前完全一致
+        assert_eq!(
+            ssh_argv("1.2.3.4", None, None),
+            vec![
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-o",
+                "ConnectTimeout=10",
+                "root@1.2.3.4",
+            ]
+        );
+        // 带远端命令：-t 必须在目标之前，命令必须在目标之后（反了 ssh 会把命令当主机名）
+        let v = ssh_argv("1.2.3.4", None, Some("cd '/x' && exec bash -l"));
+        assert_eq!(
+            v,
+            vec![
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-o",
+                "ConnectTimeout=10",
+                "-t",
+                "root@1.2.3.4",
+                "cd '/x' && exec bash -l",
+            ]
+        );
+        // 私钥那组参数照旧，且仍排在最前
+        let key = std::path::Path::new("/etc/panel/panel_ssh_key");
+        let v = ssh_argv("h", Some(key), None);
+        assert_eq!(
+            v.iter().map(String::as_str).collect::<Vec<_>>(),
+            vec![
+                "-i",
+                "/etc/panel/panel_ssh_key",
+                "-o",
+                "IdentitiesOnly=yes",
+                "-o",
+                "PreferredAuthentications=publickey",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-o",
+                "ConnectTimeout=10",
+                "root@h",
+            ]
+        );
     }
 
     #[test]

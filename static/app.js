@@ -145,6 +145,7 @@ function btn(ops, label, disabled, onclick, cls) {
   b.onclick = onclick;
   if (cls) b.className = cls;
   ops.appendChild(b);
+  return b;   // 回传：点下去要临时禁用自己的按钮（如拉取代码）用得上
 }
 
 let lastList = null;              // 最近一次拿到的项目列表，展开/折叠重绘用
@@ -179,8 +180,9 @@ function render(list) {
   $('projList').replaceChildren(frag);
 }
 
-/// 项目一级的行：名称（带展开箭头）、汇总状态、资源、仅【运行…】和【展开/收起】。
-/// 停止/重启/日志都在下方独立的 bin 面板里，不在项目行放，避免「点到项目还是点到 bin」混淆。
+/// 项目一级的行：名称（带展开箭头）、汇总状态、资源、操作。
+/// 停止/重启/日志在下方独立的 bin 面板里，不在项目行放，避免「点到项目还是点到 bin」混淆；
+/// 但【拉取代码】和【控制台】是项目级的（一个 git 仓库、一个工作目录），每行都放。
 function projectRow(u) {
   const running = u.active === 'active';
   const outside = u.outside_pid != null;
@@ -243,6 +245,9 @@ function projectRow(u) {
     if (expandable) btn(ops, expanded.has(u.key) ? '收起' : '展开', false, toggleExpand, 'chip');
     btn(ops, '源码', false, () => openSrc(u), 'chip');
   }
+  // 项目级的两个快捷入口，外部 unit 和普通项目都有
+  const pull = btn(ops, '拉取代码', false, () => rowPull(u, pull), 'chip');
+  btn(ops, '控制台', false, () => openTerm(u), 'chip');
   return tr;
 
   // 展开/收起：切换 key 的展开态并整表重绘
@@ -382,6 +387,32 @@ function binAction(u, inst, act) {
     }
     refresh();
   }, tone);
+}
+
+// ---------- 拉取代码（git pull）----------
+
+/// 对一个项目 git pull。show(text, ok) 决定结果提示显示在哪：
+/// 源码弹窗里传 srcMsg，列表行上传一个走顶部横幅的。
+/// 返回是否成功，调用方据此决定要不要重画（列表要，弹窗只重扫目录树）。
+async function pullCode(key, show) {
+  show('正在 git pull…', true);
+  try {
+    await req(`api/units/${key}/pull`);
+    show('拉取成功', true);
+    return true;
+  } catch (e) {
+    if (e.message !== '未登录') show('拉取失败: ' + e.message, false);
+    return false;
+  }
+}
+
+/// 列表行上的拉取：提示走横幅，成功后整表刷一次
+/// （拉下来的新代码可能增删了 src/bin/ 下的程序，bin 列表得跟着变）。
+function rowPull(u, b) {
+  b.disabled = true;
+  pullCode(u.key, t => banner(`${u.name}: ${t}`))
+    .then(ok => { if (ok) refresh(); })
+    .finally(() => { b.disabled = false; });
 }
 
 // ---------- 选程序（多选，每行独立参数）+ 填参数 ----------
@@ -576,7 +607,9 @@ applyTheme();
 // ---------- 网页控制台（xterm 终端 + WebSocket，后端在 PTY 里跑 ssh root@本机）----------
 // term/fitAddon 懒创建一次后复用；每次打开/重连各建一条 WebSocket。
 // SSH 私钥存在服务器上（/api/sshkey），换浏览器也不用重配。
+// termKey = 这条终端绑定的项目；null = 导航栏那个通用控制台（不 cd，落在 /root）。
 let term = null, fitAddon = null, termWs = null, termResizeHandler = null, termAuthFail = false;
+let termKey = null;
 
 // 查服务器上配没配私钥，刷新底部提示（出于安全，后端不回显私钥内容）
 async function updateKeyHint() {
@@ -591,11 +624,13 @@ async function updateKeyHint() {
   }
 }
 
-// WebSocket 地址：从当前页所在目录拼，天然带上秘密前缀；http→ws / https→wss
+// WebSocket 地址：从当前页所在目录拼，天然带上秘密前缀；http→ws / https→wss。
+// 绑了项目就把 key 带上，后端据此 cd 到该项目目录（目录由服务器自己扫，不传路径）。
 function termUrl() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const base = location.pathname.replace(/[^/]*$/, '');
-  return `${proto}//${location.host}${base}api/terminal`;
+  const q = termKey ? '?key=' + encodeURIComponent(termKey) : '';
+  return `${proto}//${location.host}${base}api/terminal${q}`;
 }
 
 function ensureTerm() {
@@ -661,17 +696,24 @@ function connectTerm() {
   };
 }
 
-function openTerm() {
-  $('termTarget').textContent = location.hostname;
+/// 打开控制台。传项目 = 这个项目的专属控制台（一进去就在它目录里）；
+/// 不传 = 导航栏那个通用控制台（不 cd，落在 root 家目录）。
+function openTerm(u) {
+  const prev = termKey;
+  termKey = u ? u.key : null;
+  $('termTarget').textContent = u ? `${location.hostname} · ${u.name}` : location.hostname;
   $('termBox').hidden = false;
   updateKeyHint();
   ensureTerm();
-  // 先让弹窗渲染出尺寸再 fit + 连接，否则终端行列数算不对
-  requestAnimationFrame(() => { fitTerm(); connectTerm(); });
   if (!termResizeHandler) {
     termResizeHandler = () => { if (!$('termBox').hidden) fitTerm(); };
     window.addEventListener('resize', termResizeHandler);
   }
+  // 已经连着一条：换项目就得先断掉重连，否则两条 WebSocket 同时往同一个终端里写，
+  // 输出互相穿插；没换项目则保持这条会话不断（点两下不该把人家正在跑的程序打断）。
+  if (termWs) { if (prev !== termKey) reconnectTerm(); return; }
+  // 先让弹窗渲染出尺寸再 fit + 连接，否则终端行列数算不对
+  requestAnimationFrame(() => { fitTerm(); connectTerm(); });
 }
 
 function closeTerm() {
@@ -685,7 +727,8 @@ function reconnectTerm() {
   requestAnimationFrame(() => { fitTerm(); connectTerm(); });
 }
 
-$('console').onclick = openTerm;
+// 导航栏那个是通用控制台：不绑项目。必须包一层，别把点击事件当成项目传进去
+$('console').onclick = () => openTerm();
 $('termClose').onclick = closeTerm;
 $('termCloseX').onclick = closeTerm;
 $('termReconnect').onclick = reconnectTerm;
@@ -1001,16 +1044,8 @@ $('srcPull').onclick = async () => {
   if (!srcKey) return;
   const b = $('srcPull');
   b.disabled = true;
-  srcMsg('正在 git pull…', true);
-  try {
-    const r = await req(`api/units/${srcKey}/pull`);
-    srcMsg('拉取成功', true);
-    await loadTree();   // 代码变了,目录树重新拉一遍
-  } catch (e) {
-    if (e.message !== '未登录') srcMsg('拉取失败: ' + e.message, false);
-  } finally {
-    b.disabled = false;
-  }
+  if (await pullCode(srcKey, srcMsg)) await loadTree();   // 代码变了,目录树重新拉一遍
+  b.disabled = false;
 };
 
 /// 复制文本。navigator.clipboard 只在安全上下文(HTTPS/localhost)可用，
