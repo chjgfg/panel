@@ -5,7 +5,8 @@ use std::process::Stdio;
 use tokio::process::Command;
 
 pub const PROPS: &str = "Id,LoadState,ActiveState,SubState,UnitFileState,MainPID,\
-                         MemoryCurrent,CPUUsageNSec,ActiveEnterTimestampMonotonic";
+                         MemoryCurrent,CPUUsageNSec,ActiveEnterTimestampMonotonic,\
+                         Result,ExecMainStatus";
 
 /// 一次 systemctl show 要查的属性之外的公共部分
 #[derive(Clone, Default)]
@@ -18,6 +19,30 @@ pub struct Raw {
     pub memory: Option<u64>,
     pub cpu_nsec: Option<u64>,
     pub active_since_us: Option<u64>,
+    /// 死法：exit-code / signal / timeout / start-limit / success。空 = 没报
+    pub result: String,
+    /// 主进程退出码（没跑过或 systemd 报 u64::MAX 时为 None）
+    pub exit: Option<u64>,
+}
+
+/// 一句话说明「为什么是失败」。systemd 把原因拆在两个属性里：Result 说死法、
+/// ExecMainStatus 说退出码。以前界面上只有一个「失败」，为什么挂的必须点进日志
+/// 翻到底才知道。不失败返回 None。
+pub fn fail_reason(r: &Raw) -> Option<String> {
+    if r.active != "failed" {
+        return None;
+    }
+    let res = match r.result.as_str() {
+        "" | "success" => "",
+        other => other,
+    };
+    let code = r.exit.filter(|c| *c != 0).map(|c| c.to_string());
+    Some(match (res, code) {
+        ("", None) => "失败（原因见日志）".to_string(),
+        ("", Some(c)) => format!("失败 code {c}"),
+        (r, None) => format!("失败 · {r}"),
+        (r, Some(c)) => format!("失败 · {r} {c}"),
+    })
 }
 
 /// systemd 对「未设置」的数值属性会返回 u64::MAX 或 [not set]，都要当 None
@@ -55,6 +80,8 @@ pub fn parse_show(block: &str) -> Raw {
         memory: num(g("MemoryCurrent")).filter(|&n| n > 0),
         cpu_nsec: num(g("CPUUsageNSec")),
         active_since_us: num(g("ActiveEnterTimestampMonotonic")).filter(|&n| n > 0),
+        result: g("Result").into(),
+        exit: num(g("ExecMainStatus")),
     }
 }
 
@@ -191,6 +218,48 @@ pub async fn pick_project_checked(project: &str, bins: &[String]) -> Picked {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_show_reads_result_and_exit_code() {
+        let raw = parse_show(
+            "Id=x.service\nActiveState=failed\nResult=exit-code\nExecMainStatus=101\n",
+        );
+        assert_eq!(raw.result, "exit-code");
+        assert_eq!(raw.exit, Some(101));
+        // 没跑过的 unit 会报 u64::MAX，要当「没有退出码」而不是一个巨大的数
+        let never = parse_show("Id=y.service\nActiveState=inactive\nExecMainStatus=18446744073709551615\n");
+        assert_eq!(never.exit, None);
+    }
+
+    #[test]
+    fn fail_reason_combines_result_and_code() {
+        let r = |active: &str, result: &str, exit: Option<u64>| Raw {
+            active: active.into(),
+            result: result.into(),
+            exit,
+            ..Raw::default()
+        };
+        assert_eq!(
+            fail_reason(&r("failed", "exit-code", Some(101))).as_deref(),
+            Some("失败 · exit-code 101")
+        );
+        assert_eq!(
+            fail_reason(&r("failed", "signal", Some(9))).as_deref(),
+            Some("失败 · signal 9")
+        );
+        // 两个属性都没给有用信息时也要有话可说，别显示成「失败 · 」
+        assert_eq!(
+            fail_reason(&r("failed", "", Some(0))).as_deref(),
+            Some("失败（原因见日志）")
+        );
+        assert_eq!(
+            fail_reason(&r("failed", "success", Some(3))).as_deref(),
+            Some("失败 code 3")
+        );
+        // 没失败就不该有原因
+        assert_eq!(fail_reason(&r("active", "success", Some(0))), None);
+        assert_eq!(fail_reason(&r("inactive", "", None)), None);
+    }
 
     #[test]
     fn show_many_units_split_by_id() {

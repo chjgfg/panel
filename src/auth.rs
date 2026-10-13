@@ -1,7 +1,8 @@
-// 登录/登出/会话校验：cookie 解析、登录限速。
+// 登录/登出/会话校验：cookie 解析、登录限速、登录审计。
+use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::extract::{Request, State};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -22,17 +23,33 @@ pub(crate) fn cookie_token(headers: &HeaderMap) -> Option<&str> {
         .map(|(_, v)| v)
 }
 
+/// 审计里的「谁」：对端 IP + 会话 token 前 8 位。不记密码，也够把同一个人的
+/// 几条操作串起来。直连时 IP 就是真对端；将来挂反向代理的话要改成读 XFF。
+pub(crate) fn who(ip: SocketAddr, tok: Option<&str>) -> String {
+    match tok {
+        Some(t) if !t.is_empty() => {
+            format!("{ip} · {}", t.chars().take(8).collect::<String>())
+        }
+        _ => format!("{ip}"),
+    }
+}
+
 #[derive(serde::Deserialize)]
 pub struct LoginReq {
     password: String,
 }
 
-pub async fn login(State(app): State<Arc<App>>, Json(body): Json<LoginReq>) -> Response {
+pub async fn login(
+    State(app): State<Arc<App>>,
+    ConnectInfo(ip): ConnectInfo<SocketAddr>,
+    Json(body): Json<LoginReq>,
+) -> Response {
     // 先验密码，再决定要不要摆脸色。反过来写（先查锁定）的话，任何拿到登录页的人
     // 只要持续送错密码，就能把「拿着正确密码的你」也挡在门外 —— 每错一次锁定窗口
     // 就续期，等于把限速做成了拒绝服务。限速只该拦猜不中的人。
     if body.password != app.cfg.password {
         app.on_fail();
+        app.note(&who(ip, None), "登录失败");
         return match app.lockout() {
             Some(wait) => (
                 StatusCode::TOO_MANY_REQUESTS,
@@ -47,13 +64,19 @@ pub async fn login(State(app): State<Arc<App>>, Json(body): Json<LoginReq>) -> R
     let Some(tok) = app.new_session() else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "无法生成会话").into_response();
     };
+    app.note(&who(ip, Some(&tok)), "登录成功");
     let c = format!("{COOKIE}={tok}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_SECS}");
     (StatusCode::NO_CONTENT, [(header::SET_COOKIE, c)]).into_response()
 }
 
-pub async fn logout(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
+pub async fn logout(
+    State(app): State<Arc<App>>,
+    ConnectInfo(ip): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
     if let Some(t) = cookie_token(&headers) {
         lock(&app.sessions).remove(t);
+        app.note(&who(ip, Some(t)), "登出");
     }
     let c = format!("{COOKIE}=; Path=/; Max-Age=0");
     (StatusCode::NO_CONTENT, [(header::SET_COOKIE, c)]).into_response()

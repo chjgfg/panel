@@ -20,12 +20,13 @@
 //   waiter 线程  —— 等 ssh 进程退出，通过 oneshot 通知主循环收摊
 // portable-pty 的读写是阻塞式的，不能直接在 async 里调，所以各开一个系统线程。
 use std::io::{Read, Write};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::Json;
-use axum::extract::{Query, State};
+use axum::extract::{ConnectInfo, Query, State};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -62,6 +63,7 @@ impl Drop for TermSlot {
 
 pub async fn terminal_ws(
     State(app): State<Arc<App>>,
+    ConnectInfo(ip): ConnectInfo<SocketAddr>,
     Query(q): Query<TermQuery>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
@@ -102,6 +104,13 @@ pub async fn terminal_ws(
         )
             .into_response();
     };
+    app.note(
+        &crate::auth::who(ip, crate::auth::cookie_token(&headers)),
+        match q.key.as_deref() {
+            Some(k) => format!("打开控制台 · 项目「{k}」"),
+            None => "打开控制台 · 通用".to_string(),
+        },
+    );
     // 已配好私钥就把它的路径交给 ssh -i；没配就走默认认证（可能失败或走密码）。
     let keyfile = key_configured(&app.ssh_key_path).then(|| app.ssh_key_path.clone());
     ws.on_upgrade(move |socket| bridge(socket, SSH_LOCAL, keyfile, remote_cmd, slot))
@@ -122,7 +131,13 @@ pub async fn sshkey_status(State(app): State<Arc<App>>) -> Json<KeyStatus> {
 }
 
 /// 保存私钥：body 是私钥明文。落成 0600 文件，覆盖旧的。
-pub async fn sshkey_save(State(app): State<Arc<App>>, body: String) -> Response {
+/// 审计只记「存了一把 N 字节的私钥」，绝不把内容或指纹写进去。
+pub async fn sshkey_save(
+    State(app): State<Arc<App>>,
+    ConnectInfo(ip): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     let norm = normalize_key(&body);
     if norm.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, "私钥不能为空").into_response();
@@ -132,18 +147,39 @@ pub async fn sshkey_save(State(app): State<Arc<App>>, body: String) -> Response 
         return (StatusCode::BAD_REQUEST, "这看起来不是 SSH 私钥（应含 PRIVATE KEY）")
             .into_response();
     }
+    let w = crate::auth::who(ip, crate::auth::cookie_token(&headers));
     match write_key_file(&app.ssh_key_path, &norm) {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("保存失败：{e}")).into_response(),
+        Ok(()) => {
+            app.note(&w, format!("存 SSH 私钥（{} 字节）", norm.len()));
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(e) => {
+            app.note(&w, format!("存 SSH 私钥 失败：{e}"));
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("保存失败：{e}")).into_response()
+        }
     }
 }
 
 /// 清除已保存的私钥（没配过也算成功，幂等）
-pub async fn sshkey_clear(State(app): State<Arc<App>>) -> Response {
+pub async fn sshkey_clear(
+    State(app): State<Arc<App>>,
+    ConnectInfo(ip): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    let w = crate::auth::who(ip, crate::auth::cookie_token(&headers));
     match std::fs::remove_file(&app.ssh_key_path) {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("清除失败：{e}")).into_response(),
+        Ok(()) => {
+            app.note(&w, "清除 SSH 私钥");
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            app.note(&w, "清除 SSH 私钥（本来就没配）");
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(e) => {
+            app.note(&w, format!("清除 SSH 私钥 失败：{e}"));
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("清除失败：{e}")).into_response()
+        }
     }
 }
 

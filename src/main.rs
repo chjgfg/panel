@@ -22,25 +22,60 @@ mod systemd;
 mod terminal;
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, Request, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::extract::{ConnectInfo, Path, Query, Request, State};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
+use crate::auth::cookie_token;
 use crate::config::{BoxErr, Config, config_path};
 use crate::discover::{bins, discover, find_cargo, ok_name};
 use crate::procs::{find_outside, proc_exes, stop_pids};
 use crate::state::{lock, App};
 use crate::srctree::{Node, file_path_ok, read_file, walk_tree};
 use crate::systemd::{
-    Picked, boot_secs, pick_project, pick_project_checked, project_units, run, show_many, unit_of,
+    Picked, boot_secs, fail_reason, pick_project, pick_project_checked, project_units, run,
+    show_many, unit_of,
 };
+
+/// 记审计用的「谁」：对端 IP + 会话前缀。实现在 auth::who（登录处也要用）
+fn who(ip: SocketAddr, hdrs: &HeaderMap) -> String {
+    auth::who(ip, cookie_token(hdrs))
+}
+
+/// 版本信息：编译时 build.rs 注进来的 git 短 sha（工作区脏会带 -dirty）、
+/// 构建时刻，加上进程启动时刻。用来一眼确认「服务器上跑的是哪一版」。
+#[derive(Serialize)]
+struct Version {
+    ver: &'static str,
+    git: &'static str,
+    /// 构建时刻（unix 秒）
+    built: u64,
+    /// 本次启动时刻（unix 秒）
+    started: u64,
+}
+
+async fn version(State(app): State<Arc<App>>) -> Json<Version> {
+    Json(Version {
+        ver: env!("CARGO_PKG_VERSION"),
+        git: env!("PANEL_GIT"),
+        built: env!("PANEL_BUILT").parse().unwrap_or(0),
+        started: app.started,
+    })
+}
+
+/// 操作审计（内存环形，最新在最后）。重启即丢，别当长期留痕用。
+async fn audit(State(app): State<Arc<App>>) -> Json<Vec<crate::state::AuditItem>> {
+    Json(lock(&app.audit).iter().cloned().collect())
+}
+
 
 #[derive(Serialize)]
 struct Status {
@@ -69,6 +104,9 @@ struct Status {
     /// 面板外启动的进程 pid（终端里 cargo run 那种）。
     /// 有值就说明它在跑，但日志不在 journald 里，看不到。
     outside_pid: Option<u32>,
+    /// 失败时的一句话原因（systemd 的 Result + 退出码）。不失败为 null。
+    /// 省得看到「失败」还得点进日志翻到底才知道为什么挂。
+    fail: Option<String>,
 }
 
 /// 一个项目下某个 bin 的实例明细。面板让每个 bin 独立成 unit，
@@ -83,6 +121,8 @@ struct BinInst {
     memory: Option<u64>,
     cpu: Option<f64>,
     uptime: Option<f64>,
+    /// 该 bin 的 unit 失败时的一句话原因
+    fail: Option<String>,
 }
 
 // ---------- 接口 ----------
@@ -236,6 +276,7 @@ async fn units(State(app): State<Arc<App>>) -> Json<Vec<Status>> {
                     memory: raw.and_then(|r| r.memory),
                     cpu: raw.and_then(|r| app.cpu(&unit_of(&name, b), r.cpu_nsec)),
                     uptime,
+                    fail: raw.and_then(fail_reason),
                 }
             })
             .collect();
@@ -261,6 +302,8 @@ async fn units(State(app): State<Arc<App>>) -> Json<Vec<Status>> {
             (app.cpu(&p.unit, p.raw.cpu_nsec), p.raw.memory, uptime)
         };
 
+        // 下面 Status 的字面量会把 p.raw 的几个字段搬走（move），失败原因必须先取好
+        let fail = fail_reason(&p.raw);
         v.push(Status {
             key: name.clone(),
             bins,
@@ -284,6 +327,7 @@ async fn units(State(app): State<Arc<App>>) -> Json<Vec<Status>> {
             cur_args,
             running_bins: p.running_bins,
             outside_pid,
+            fail,
         });
     }
     Json(v)
@@ -422,6 +466,8 @@ async fn spawn(
 
 async fn action(
     State(app): State<Arc<App>>,
+    ConnectInfo(ip): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Path((key, act)): Path<(String, String)>,
     body: Option<Json<ActionReq>>,
 ) -> Response {
@@ -550,6 +596,11 @@ async fn action(
         _ => return (StatusCode::BAD_REQUEST, "非法操作").into_response(),
     };
 
+    // 谁、对哪个项目、做了什么、成没成 —— 记进审计环形缓冲
+    app.note(
+        &who(ip, &headers),
+        format!("{act} 「{project}」{}", if ok { String::new() } else { format!(" 失败：{}", msg.trim()) }),
+    );
     if ok {
         StatusCode::NO_CONTENT.into_response()
     } else {
@@ -563,6 +614,8 @@ async fn action(
 /// 不影响同项目其它在跑的 bin。前端 bin 条目的停止/重启按钮都走这里。
 async fn bin_action(
     State(app): State<Arc<App>>,
+    ConnectInfo(ip): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Path((key, bin, act)): Path<(String, String, String)>,
 ) -> Response {
     let Some((project, dir)) = resolve(&app, &key).await else {
@@ -602,6 +655,10 @@ async fn bin_action(
         }
     };
 
+    app.note(
+        &who(ip, &headers),
+        format!("{act} 「{project}」的 bin「{bin}」{}", if ok { String::new() } else { format!(" 失败：{}", msg.trim()) }),
+    );
     if ok {
         StatusCode::NO_CONTENT.into_response()
     } else {
@@ -709,19 +766,43 @@ async fn file(
     Json(read_file(&dir.join(path)).await).into_response()
 }
 
+/// 审计只留第一行：git pull 能刷几十行，全塞进环形缓冲会把别的记录挤掉
+fn first_line(s: &str) -> String {
+    s.lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .take(120)
+        .collect()
+}
+
 /// 在项目目录里 git pull 最新代码
-async fn pull(State(app): State<Arc<App>>, Path(key): Path<String>) -> Response {
+async fn pull(
+    State(app): State<Arc<App>>,
+    ConnectInfo(ip): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(key): Path<String>,
+) -> Response {
     let Some((_, dir)) = resolve(&app, &key).await else {
         return (StatusCode::NOT_FOUND, "未知项目").into_response();
     };
     let d = dir.display().to_string();
+    let w = who(ip, &headers);
     match run("git", &["-C", &d, "pull"]).await {
-        Ok((true, out, _)) => (StatusCode::OK, out).into_response(),
+        Ok((true, out, _)) => {
+            app.note(&w, format!("拉取代码 「{key}」：{}", first_line(&out)));
+            (StatusCode::OK, out).into_response()
+        }
         Ok((false, out, err)) => {
             let msg = if err.trim().is_empty() { out } else { err };
+            app.note(&w, format!("拉取代码 「{key}」 失败：{}", first_line(&msg)));
             (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => {
+            app.note(&w, format!("拉取代码 「{key}」 失败：{e}"));
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+        }
     }
 }
 
@@ -833,6 +914,8 @@ async fn start() -> Result<(), BoxErr> {
         .route("/api/units/{key}/pull", post(pull))
         .route("/api/units/{key}/bins/{bin}/{action}", post(bin_action))
         .route("/api/units/{key}/{action}", post(action))
+        .route("/api/version", get(version))
+        .route("/api/audit", get(audit))
         .route("/api/terminal", get(terminal::terminal_ws))
         .route(
             "/api/sshkey",
@@ -899,7 +982,8 @@ async fn start() -> Result<(), BoxErr> {
         // 提前校验过了，这里只是启动日志再报一遍方便对账
         println!("秘密路径: /{}/ （其余路径一律 404）", clean_prefix(&prefix)?);
     }
-    axum::serve(listener, router).await?;
+    // 带上对端地址：审计要记「谁干的」。直连时这就是真的客户端 IP
+    axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).await?;
     Ok(())
 }
 

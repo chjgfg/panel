@@ -1,5 +1,5 @@
-// 全局共享状态：配置、会话表、各类采样缓存、启动参数的落盘。
-use std::collections::HashMap;
+// 全局共享状态：配置、会话表、各类采样缓存、启动参数的落盘、操作审计。
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -17,6 +17,18 @@ const LOCK_SECS: u64 = 600;
 /// 同时最多开几路网页控制台。每路都是一个 PTY + 一个 ssh 子进程，
 /// 单核机器上开十几路就是白送的资源和文件描述符。
 pub const MAX_TERMS: usize = 4;
+/// 审计缓冲条数。内存环形，重启即丢 —— 它解决的是「刚才谁点了什么」，
+/// 不是合规留痕；要留痕得写文件（暂未做，别把它当审计日志长期依赖）。
+const AUDIT_MAX: usize = 200;
+
+/// 一条操作记录。who = 对端 IP + 会话 token 前缀（不记密码，也无法反推身份）
+#[derive(Serialize, Clone)]
+pub struct AuditItem {
+    /// unix 秒
+    pub at: u64,
+    pub who: String,
+    pub what: String,
+}
 
 /// 取锁：就算锁被前一次 panic 弄中毒了，也把里面的值拿出来继续用。
 /// 用 lock().unwrap() 的话，一次 panic 恰好发生在持锁期间，之后每一次
@@ -51,6 +63,18 @@ pub struct App {
     pub disks: Mutex<Option<(Instant, Vec<Disk>)>>,
     /// 当前开着的控制台路数，terminal.rs 进出时加减
     pub terms: AtomicUsize,
+    /// 面板启动时刻（unix 秒）：页面显示「启动于」，用来判断有没有真的重启过
+    pub started: u64,
+    /// 操作审计环形缓冲，新的在尾部
+    pub audit: Mutex<VecDeque<AuditItem>>,
+}
+
+/// 当前 unix 秒。页面要显示绝对时间，所以不能用 Instant
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// 落盘格式。用 struct 而不是裸 map，是为了以后要加字段时旧文件还能读
@@ -86,9 +110,20 @@ impl App {
             host_cpu: Mutex::new(None),
             disks: Mutex::new(None),
             terms: AtomicUsize::new(0),
+            started: now_secs(),
+            audit: Mutex::new(VecDeque::new()),
         });
         app.load_last();
         app
+    }
+
+    /// 记一条操作审计。who 用「IP · 会话前 8 位」，不记密码也够回溯是谁干的。
+    pub fn note(&self, who: &str, what: impl Into<String>) {
+        let mut q = lock(&self.audit);
+        q.push_back(AuditItem { at: now_secs(), who: who.to_string(), what: what.into() });
+        while q.len() > AUDIT_MAX {
+            q.pop_front();
+        }
     }
 
     /// 读回上次那组 (bin, 参数)。文件不存在、读不动、格式不认识都当「没记过」，
@@ -250,6 +285,8 @@ mod tests {
             host_cpu: Mutex::new(None),
             disks: Mutex::new(None),
             terms: AtomicUsize::new(0),
+            started: now_secs(),
+            audit: Mutex::new(VecDeque::new()),
         }
     }
 
