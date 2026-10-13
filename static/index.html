@@ -36,6 +36,8 @@ if (document.documentElement.dataset.theme === 'light') {
   <header>
     <h1>项目面板</h1>
     <span id="tick"></span>
+    <!-- 版本 / 构建 / 启动时刻：确认服务器上跑的到底是哪一版，不用靠猜 -->
+    <span id="ver" title="构建与启动时刻"></span>
     <button id="oracleCloud" type="button" class="ghost">Cloud</button>
     <button id="ddia" type="button" class="ghost">设计数据密集型应用</button>
     <!-- 一条发丝分隔线：左边是外链，右边是面板自己的操作，混在一排时六个
@@ -43,13 +45,32 @@ if (document.documentElement.dataset.theme === 'light') {
     <span class="hsep" aria-hidden="true"></span>
     <button id="console" type="button" class="chip">控制台</button>
     <button id="themeBtn" type="button" class="chip" title="切换黑夜/白天">主题</button>
-    <button id="refresh" class="chip">刷新</button>
+    <button id="refresh" class="chip" title="快捷键 r">刷新</button>
+    <button id="auditBtn" class="chip" title="谁在什么时候点了什么（内存里留 200 条，重启即丢）">操作记录</button>
     <button id="logout" class="ghost">退出</button>
   </header>
 
   <p id="banner" class="err" hidden></p>
 
   <div class="stats" id="stats"></div>
+
+  <!-- 列表控制条：项目一多，「只看跑着的」「按内存排」比滚动有用 -->
+  <div class="listbar">
+    <input id="fltName" type="search" placeholder="筛项目名" autocomplete="off" aria-label="按项目名筛选">
+    <select id="fltState" aria-label="按状态筛选">
+      <option value="">全部状态</option>
+      <option value="on">运行中</option>
+      <option value="off">没在跑</option>
+      <option value="failed">失败</option>
+    </select>
+    <select id="sortBy" aria-label="排序方式">
+      <option value="name">按名称</option>
+      <option value="mem">按内存</option>
+      <option value="cpu">按 CPU</option>
+      <option value="up">按运行时长</option>
+    </select>
+    <span id="listCount" class="list-count"></span>
+  </div>
 
   <table class="stack-table">
     <thead>
@@ -100,10 +121,13 @@ if (document.documentElement.dataset.theme === 'light') {
       <div class="modal-head">
         <h2>日志 · <span id="logName"></span></h2>
         <label class="log-src">来源 <select id="logFilter"></select></label>
+        <input id="logSearch" type="search" placeholder="筛关键字，如 panic / Failed" autocomplete="off" aria-label="按关键字筛日志">
+        <label class="log-follow"><input id="logFollow" type="checkbox" checked> 跟随底部</label>
         <button id="logCloseX" class="close-x" aria-label="关闭" title="关闭">×</button>
       </div>
       <pre id="logBody"></pre>
       <div class="modal-foot">
+        <span id="logCount" class="log-count"></span>
         <button id="logClose" class="chip">关闭</button>
       </div>
     </div>
@@ -130,6 +154,21 @@ if (document.documentElement.dataset.theme === 'light') {
           <div id="srcMsg" class="src-msg" hidden></div>
           <pre id="srcBody"></pre>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 操作记录：谁在什么时候点了什么。内存环形缓冲，面板重启就清空 -->
+  <div id="auditBox" class="overlay" hidden>
+    <div class="modal modal-audit">
+      <div class="modal-head">
+        <h2>操作记录 <span id="auditNote" class="audit-note"></span></h2>
+        <button id="auditCloseX" class="close-x" aria-label="关闭" title="关闭">×</button>
+      </div>
+      <div class="audit-body" id="auditBody"></div>
+      <div class="modal-foot">
+        <button id="auditRefresh" class="chip">刷新</button>
+        <button id="auditClose" class="chip">关闭</button>
       </div>
     </div>
   </div>

@@ -40,6 +40,7 @@ function showLogin() {
   closeSrcBox();
   closeTerm();
   $('keyBox').hidden = true;
+  $('auditBox').hidden = true;
   // syncScrollLock();
   $('app').hidden = true;
   $('login').hidden = false;
@@ -50,6 +51,7 @@ function showApp() {
   $('login').hidden = true;
   $('app').hidden = false;
   refresh();
+  loadVersion();
   timer ||= setInterval(refresh, POLL);
 }
 
@@ -173,13 +175,114 @@ const expanded = new Set();       // 已展开（显示 bin 子行）的项目 k
 const views = new Map();   // 项目 key -> view
 let emptyNode = null;      // 列表为空时的引导条，只在这时候挂在容器上
 
+// ---------- 列表的筛选、排序、展开记忆、趋势线 ----------
+
+// 这三样都记进 localStorage：面板天天开，不该每次重新筛一遍
+const filters = {
+  name: localStorage.getItem('fltName') || '',
+  state: localStorage.getItem('fltState') || '',
+  sort: localStorage.getItem('sortBy') || 'name',
+};
+
+/// 展开状态以前只在内存里，刷新一次就得重新点一遍
+function saveExpanded() {
+  localStorage.setItem('expanded', JSON.stringify([...expanded]));
+}
+try {
+  for (const k of JSON.parse(localStorage.getItem('expanded') || '[]')) expanded.add(k);
+} catch { /* 存坏了就当没记过 */ }
+
+// 每个项目最近若干次的 CPU / 内存采样，只画趋势用（内存里存，刷新重来）。
+// 40 个点 × 3 秒 ≈ 两分钟窗口，够看出「在涨」。
+const HIST = 40;
+const hist = new Map();
+
+// 一次轮询只采一个点。render() 不只轮询会调（筛选、展开都调），
+// 不设这道闸的话：连着敲八个字筛项目，趋势线就被八根重复采样拉平了。
+let lastSample = 0;
+
+function pushHist(list) {
+  const t = Date.now();
+  if (t - lastSample < POLL - 300) return;
+  lastSample = t;
+  for (const u of list) {
+    let h = hist.get(u.key);
+    if (!h) { h = { cpu: [], mem: [] }; hist.set(u.key, h); }
+    h.cpu.push(u.cpu || 0);
+    h.mem.push(u.memory || 0);
+    if (h.cpu.length > HIST) { h.cpu.shift(); h.mem.shift(); }
+  }
+}
+
+/// 迷你折线。用 SVG 不用 canvas：不必管设备像素比，也不会因重绘闪一下。
+/// 走 createElementNS 而不是拼 innerHTML —— 这页其它地方全程 textContent，
+/// 不给注入留口子（这里虽然只有数字，但坏了惯例更糟）
+function spark(vals, cls) {
+  // 全 0 不画：没跑着的项目攒一整条底线，看着像「趋势平稳」，其实是根本没数据
+  if (!vals || vals.length < 2 || vals.every(v => !v)) return null;
+  const w = 30, h = 11, ns = 'http://www.w3.org/2000/svg';
+  const max = Math.max(...vals, 1);
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  svg.setAttribute('width', w);
+  svg.setAttribute('height', h);
+  svg.setAttribute('class', 'spark ' + cls);
+  const pl = document.createElementNS(ns, 'polyline');
+  pl.setAttribute('points', vals.map((v, i) =>
+    `${(i * w / (vals.length - 1)).toFixed(1)},${(h - 0.5 - v / max * (h - 1)).toFixed(1)}`
+  ).join(' '));
+  svg.appendChild(pl);
+  return svg;
+}
+
+/// 按当前的筛选/排序条件挑出要显示的项目。排序键取负数是为了「大的在前」
+function visible(list) {
+  const q = filters.name.trim().toLowerCase();
+  const out = list.filter(u => {
+    if (q && !u.name.toLowerCase().includes(q)) return false;
+    const on = u.active === 'active' || u.outside_pid != null;
+    if (filters.state === 'on' && !on) return false;
+    if (filters.state === 'off' && on) return false;
+    if (filters.state === 'failed' && u.active !== 'failed') return false;
+    return true;
+  });
+  const k = { name: u => u.name, mem: u => u.memory || 0, cpu: u => u.cpu || 0, up: u => u.uptime || 0 }[filters.sort]
+    || (u => u.name);
+  if (filters.sort === 'name') out.sort((a, b) => k(a).localeCompare(k(b)));
+  else out.sort((a, b) => k(b) - k(a));
+  return out;
+}
+
+// 控件初值 = 上次存的选择。在第一次 render 之前挂好，首屏直接是你上次看的那副样子
+$('fltName').value = filters.name;
+$('fltState').value = filters.state;
+$('sortBy').value = filters.sort;
+function onFilterChange() {
+  filters.name = $('fltName').value;
+  filters.state = $('fltState').value;
+  filters.sort = $('sortBy').value;
+  localStorage.setItem('fltName', filters.name);
+  localStorage.setItem('fltState', filters.state);
+  localStorage.setItem('sortBy', filters.sort);
+  // 重排全靠复用节点做，打字筛的时候不会闪
+  if (lastList) render(lastList);
+}
+$('fltName').oninput = onFilterChange;
+$('fltState').onchange = onFilterChange;
+$('sortBy').onchange = onFilterChange;
+
 function render(list) {
   lastList = list;
+  pushHist(list);
+  const shown = visible(list);
   const holder = $('projList');
-  if (emptyNode && list.length) { emptyNode.remove(); emptyNode = null; }
+  $('listCount').textContent = shown.length === list.length
+    ? `${list.length} 个项目`
+    : `显示 ${shown.length} / 共 ${list.length}`;
+  if (emptyNode && shown.length) { emptyNode.remove(); emptyNode = null; }
   const seen = new Set();
   let i = 0;
-  for (const u of list) {
+  for (const u of shown) {
     seen.add(u.key);
     let v = views.get(u.key);
     // 外部 unit 与否决定操作列的按钮构成，变了只能重建（极少发生）
@@ -191,11 +294,13 @@ function render(list) {
     i++;
   }
   for (const [k, v] of [...views]) if (!seen.has(k)) { v.block.remove(); views.delete(k); }
-  if (!list.length && !emptyNode) {
+  if (!shown.length && !emptyNode) {
     // 新机器上打开面板是一片空白，看着像坏了：说清去哪儿加项目
     emptyNode = document.createElement('div');
     emptyNode.className = 'empty';
-    emptyNode.textContent = '扫描目录里还没有项目：往 panel.toml 的 dirs 指的目录里放（或 git clone）一个子目录，刷新就有';
+    emptyNode.textContent = list.length
+      ? '没有符合当前筛选条件的项目'
+      : '扫描目录里还没有项目：往 panel.toml 的 dirs 指的目录里放（或 git clone）一个子目录，刷新就有';
   }
   if (emptyNode) holder.appendChild(emptyNode);
 }
@@ -204,6 +309,7 @@ function render(list) {
 function toggleExpand(key) {
   const opening = !expanded.has(key);
   opening ? expanded.add(key) : expanded.delete(key);
+  saveExpanded();
   if (lastList) render(lastList);
 }
 
@@ -250,8 +356,14 @@ function buildView(u) {
   v.badge = b.badge;
   v.badgeText = b.text;
   v.dur = cell(v.tr, '');
+  // CPU / 内存两格：数字后面挂一条迷你趋势线。挂在同一格里是为了不改行高 ——
+  // 单独开一列会把刚调好的六列宽度全部推翻
+  v.cpuText = document.createTextNode('');
+  v.memText = document.createTextNode('');
   v.cpu = cell(v.tr, '');
+  v.cpu.appendChild(v.cpuText);
   v.mem = cell(v.tr, '');
+  v.mem.appendChild(v.memText);
 
   v.ops = cell(v.tr, '');
   v.ops.className = 'ops';
@@ -300,6 +412,9 @@ function syncView(v, u) {
   } else {
     v.sub.textContent = `${(u.bins || []).length} 个可运行程序`;
   }
+  // 失败时把 systemd 给的原因（Result + 退出码）直接缀在后面：以前只有一个
+  // 「失败」，为什么挂的必须点进日志翻到底才知道
+  if (u.fail) v.sub.textContent = v.sub.textContent ? `${v.sub.textContent} · ${u.fail}` : u.fail;
 
   let statusText;
   if (outside) statusText = '运行中（面板外）';
@@ -311,8 +426,16 @@ function syncView(v, u) {
   v.badgeText.nodeValue = statusText;
 
   v.dur.textContent = fmtDur(u.uptime);
-  v.cpu.textContent = u.cpu == null ? '—' : u.cpu.toFixed(1) + '%';
-  v.mem.textContent = fmtMemMB(u.memory);
+  v.cpuText.nodeValue = u.cpu == null ? '—' : u.cpu.toFixed(1) + '%';
+  v.memText.nodeValue = fmtMemMB(u.memory);
+  // 趋势线要攒够两个点才画（一条横线没有信息量）
+  const h = hist.get(u.key);
+  if (v.cpuSvg) { v.cpuSvg.remove(); v.cpuSvg = null; }
+  if (v.memSvg) { v.memSvg.remove(); v.memSvg = null; }
+  v.cpuSvg = spark(h && h.cpu, 'cpu');
+  v.memSvg = spark(h && h.mem, 'mem');
+  if (v.cpuSvg) v.cpu.appendChild(v.cpuSvg);
+  if (v.memSvg) v.mem.appendChild(v.memSvg);
 
   if (v.btn.expand) {
     v.btn.expand.hidden = !expandable;
@@ -393,7 +516,7 @@ function syncBinRows(v, u) {
     if (!r) { r = buildBinRow(v, inst.bin); v.binRows.set(inst.bin, r); }
     r.inst = inst;
     r.sub.textContent = inst.running ? (inst.pid ? `pid ${inst.pid}` : '运行中')
-      : inst.active === 'failed' ? '上次失败' : '未运行';
+      : (inst.fail || (inst.active === 'failed' ? '上次失败' : '未运行'));
     r.badge.className = 'badge ' + (inst.running ? 'on' : inst.active === 'failed' ? 'bad' : 'off');
     r.badgeText.nodeValue = inst.running ? '运行中' : inst.active === 'failed' ? '失败' : '未运行';
     r.dur.textContent = fmtDur(inst.uptime);
@@ -486,11 +609,20 @@ async function pullCode(key, show) {
   try {
     // 状态变更走 POST：GET 的话 SameSite=Lax 会带着 cookie 放行跨站的顶层导航，
     // 聊天里一个链接点进来就能替你 git pull
-    await req(`api/units/${key}/pull`, { method: 'POST' });
-    show('拉取成功', true);
+    const r = await req(`api/units/${key}/pull`, { method: 'POST' });
+    // 后端把 git 的 stdout 原样返回，之前整个扔掉只说「拉取成功」。
+    // 「Already up to date.」和「真的更新了」是两回事，前者说明这次白点
+    const out = (await r.text()).trim();
+    const head = (out.split('\n').find(l => l.trim()) || '').trim();
+    show(head ? `拉取成功：${head}` : '拉取成功', true);
     return true;
   } catch (e) {
-    if (e.message !== '未登录') show('拉取失败: ' + e.message, false);
+    if (e.message !== '未登录') {
+      // 失败时后端把 git 的 stderr 原样回传，可能一大段；横幅只留第一行，
+      // 要看全文点进项目里（横幅是单行通道，堆六行会把页面顶歪）
+      const head = (e.message.split('\n').find(l => l.trim()) || '').trim();
+      show('拉取失败: ' + head, false);
+    }
     return false;
   }
 }
@@ -613,11 +745,15 @@ const WARN_RE = /(warn|deprecat|timed out|timeout|retry|retrying|throttl|too man
 /// 单 bin 模式只看那一个。用 DOM 文本节点渲染，日志里再怪的字符也不怕被当成 HTML。
 function renderLogs(jump) {
   const filter = $('logFilter').value;
+  const q = $('logSearch').value.trim().toLowerCase();
   const p = $('logBody');
+  // 跟随开关：想停在中间看某一行时，每 3 秒的轮询不该把你顶回底部
+  const follow = $('logFollow').checked;
   // 保持在底部时才跟随滚动（轮询时定位不会被顶到底部打断）
   const atBottom = p.scrollHeight - p.scrollTop - p.clientHeight < 40;
   p.replaceChildren();
   if (!logCache || logCache.length === 0) {
+    $('logCount').textContent = '';
     p.append('(暂无日志)');
     return;
   }
@@ -634,8 +770,14 @@ function renderLogs(jump) {
       rows.push({ time: last, src: one.bin, text: line });
     }
   }
-  const keep = filter ? rows.filter(r => r.src === filter) : rows;
-  if (keep.length === 0) { p.append('(暂无日志)'); return; }
+  const keep1 = filter ? rows.filter(r => r.src === filter) : rows;
+  // 关键字筛：日志里翻一行 panic 不该靠肉眼扫 300 行
+  const keep = q ? keep1.filter(r => r.text.toLowerCase().includes(q)) : keep1;
+  if (keep.length === 0) {
+    $('logCount').textContent = q ? `这 ${keep1.length} 行里没有「${$('logSearch').value.trim()}」` : '';
+    p.append('(暂无日志)');
+    return;
+  }
   // 全部模式按 ISO 时间戳字符串排序（字符串序即时间序）；单 bin 模式保持原序不用排
   if (!filter) keep.sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
   for (const r of keep) {
@@ -661,7 +803,11 @@ function renderLogs(jump) {
     }
     p.appendChild(ln);
   }
-  if (jump || atBottom) p.scrollTop = p.scrollHeight;   // 首开/切筛选直接到底；轮询也跟随
+  $('logCount').textContent = q
+    ? `匹配 ${keep.length} / ${keep1.length} 行`
+    : `共 ${keep.length} 行`;
+  // 关闭「跟随底部」后，轮询不再把你顶回底部；主动打开/切筛选（jump）仍然直达最新
+  if (jump || (follow && atBottom)) p.scrollTop = p.scrollHeight;
 }
 
 async function refresh() {
@@ -943,12 +1089,16 @@ $('keySave').onclick = async () => {
 
 // 切换日志源筛选：用上一次拉到的数据直接重渲染，不用重新请求
 $('logFilter').onchange = () => { if (logCache) renderLogs(true); };
+// 关键字筛选是纯前端的：只在已经拉到的那几百行里挑，打字时不该回头敲服务器
+$('logSearch').oninput = () => { if (logCache) renderLogs(false); };
 
 // 关闭日志弹窗：清空日志内容，下次再点日志按钮重新拉取
 function closeLogBox() {
   logKey = null;
   logCache = null;
   $('logBody').replaceChildren();
+  $('logSearch').value = '';
+  $('logCount').textContent = '';
   $('logBox').hidden = true;
   // syncScrollLock();
 }
@@ -1316,6 +1466,87 @@ $('srcTreeToggle').onclick = () => {
     $('srcTreeToggle').textContent = '显示目录';
   }
 })();
+
+/// 版本 / 构建 / 启动时刻：怀疑服务器上跑的不是最新一版时，先看这行，别靠猜
+async function loadVersion() {
+  try {
+    const v = await (await req('api/version')).json();
+    const el = $('ver');
+    el.textContent = `v${v.ver} · ${v.git} · 起于 ${shortTime(v.started)}`;
+    el.title = `代码 ${v.git}\n构建于 ${fullTime(v.built)}\n本次启动 ${fullTime(v.started)}`;
+  } catch { /* 读不到版本不影响主界面，留着空位就行 */ }
+}
+
+const pad2 = n => String(n).padStart(2, '0');
+function shortTime(secs) {
+  const d = new Date(secs * 1000);
+  return `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+function fullTime(secs) {
+  return new Date(secs * 1000).toLocaleString('zh-CN', { hour12: false });
+}
+
+// ---------- 操作记录 ----------
+// 后端是内存环形（200 条，重启即丢），所以每次打开都重新拉，不做缓存
+async function loadAudit() {
+  const body = $('auditBody');
+  try {
+    const list = await (await req('api/audit')).json();
+    $('auditNote').textContent = `${list.length} 条`;
+    body.replaceChildren();
+    if (!list.length) {
+      body.appendChild(document.createTextNode('还没有记录。（面板重启就清空，不当长期留痕用）'));
+      return;
+    }
+    // 最新一条放最上面：想知道「刚才谁点了什么」不该翻到底再倒着读
+    for (const it of [...list].reverse()) {
+      const row = document.createElement('div');
+      row.className = 'audit-row';
+      for (const [cls, text] of [['ts', fullTime(it.at)], ['who', it.who], ['what', it.what]]) {
+        const s = document.createElement('span');
+        s.className = cls;
+        s.textContent = text;
+        row.appendChild(s);
+      }
+      body.appendChild(row);
+    }
+  } catch (e) {
+    if (e.message !== '未登录') body.textContent = '读取失败：' + e.message;
+  }
+}
+
+$('auditBtn').onclick = () => { $('auditBox').hidden = false; loadAudit(); };
+$('auditRefresh').onclick = loadAudit;
+$('auditClose').onclick = $('auditCloseX').onclick = () => { $('auditBox').hidden = true; };
+
+// ---------- 快捷键 ----------
+// r 刷新、Esc 关弹窗。两种情况必须放行，否则是抢键：
+//   1) 焦点在输入框/下拉里（筛项目名、贴私钥、日志框里打字），r 就是字母 r；
+//   2) 控制台开着，按键属于里面那个 shell，被当成快捷键会莫名刷新一次页面。
+const isTyping = () => ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName);
+
+document.addEventListener('keydown', e => {
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.key === 'Escape') {
+    // 从最上层往下找，一次只关一层（配私钥弹窗开在控制台上头，得先关它）
+    for (const box of ['keyBox', 'termBox', 'auditBox', 'confirmBox', 'runbox', 'logBox', 'srcBox']) {
+      const el = $(box);
+      if (!el || el.hidden) continue;
+      if (box === 'termBox') closeTerm();
+      else if (box === 'srcBox') closeSrcBox();
+      else if (box === 'logBox') closeLogBox();
+      else el.hidden = true;
+      e.preventDefault();
+      return;
+    }
+    return;
+  }
+  if ($('app').hidden || isTyping() || !$('termBox').hidden) return;
+  if (e.key === 'r' || e.key === 'R') {
+    e.preventDefault();
+    refresh();
+  }
+});
 
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 

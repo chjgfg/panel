@@ -26,11 +26,14 @@ pub(crate) fn cookie_token(headers: &HeaderMap) -> Option<&str> {
 /// 审计里的「谁」：对端 IP + 会话 token 前 8 位。不记密码，也够把同一个人的
 /// 几条操作串起来。直连时 IP 就是真对端；将来挂反向代理的话要改成读 XFF。
 pub(crate) fn who(ip: SocketAddr, tok: Option<&str>) -> String {
+    // 只留 IP，丢掉端口：端口每换一个连接都变，记进审计既没信息量，
+    // 反而让人认不出「这几条其实是同一个人点的」
+    let host = ip.ip();
     match tok {
         Some(t) if !t.is_empty() => {
-            format!("{ip} · {}", t.chars().take(8).collect::<String>())
+            format!("{host} · {}", t.chars().take(8).collect::<String>())
         }
-        _ => format!("{ip}"),
+        _ => format!("{host}"),
     }
 }
 
