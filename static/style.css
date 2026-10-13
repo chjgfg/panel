@@ -302,18 +302,14 @@ main > table.stack-table::after {
 .bin-panel :is(th, td):nth-child(n+3):nth-child(-n+5) { text-align: right; }
 td { font-variant-numeric: tabular-nums; }
 /* 行 hover：表格是页面主体，之前鼠标划上去一点反馈都没有。
-   .hov 是给 JS 补的同一套样式：列表每 3 秒重建节点，浏览器不会把 :hover 补给
-   新节点（要等鼠标真的动一下才恢复），手停在那行上就会每 3 秒失去一次高亮 */
+   节点复用（见 app.js 的 views）之后，:hover 能一直跟着鼠标，不再需要 JS 补类 */
 .stack-table tbody tr, .bin-panel tbody tr { transition: background-color .12s ease; }
-.stack-table tbody tr:hover, .bin-panel tbody tr:hover,
-.stack-table tbody tr.hov, .bin-panel tbody tr.hov {
+.stack-table tbody tr:hover, .bin-panel tbody tr:hover {
   background: color-mix(in oklab, var(--fg) 5%, var(--card));
 }
 /* 深色下光有 5% 底色不够明显，左缘再补一道 accent，明确「是这一行」 */
-.stack-table tbody tr:hover > td:first-child, .bin-panel tbody tr:hover > td:first-child,
-.stack-table tbody tr.hov > td:first-child, .bin-panel tbody tr.hov > td:first-child {
-  box-shadow: inset 2px 0 0 var(--accent);
-}
+.stack-table tbody tr:hover > td:first-child,
+.bin-panel tbody tr:hover > td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
 /* 状态胶囊：原来一个灰点 + 一行普通字，跟旁边的时长同权重，扫一眼看不出谁在跑。
    沿用按钮那三档 color-mix 语义构造：点、字、底同一色相，只是底很淡 */
 .badge {

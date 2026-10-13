@@ -142,19 +142,6 @@ function cell(tr, text) {
   return td;
 }
 
-/// 状态单元格：圆点 + 文案包成胶囊，state 取 on/bad/off。
-/// 点和字都取胶囊的 currentColor，三档色相一致，改一处 CSS 就全跟着变。
-function statusCell(tr, state, text) {
-  const td = cell(tr, '');
-  const b = document.createElement('span');
-  b.className = 'badge ' + state;
-  const d = document.createElement('i');
-  d.className = 'dot';
-  b.append(d, text);
-  td.appendChild(b);
-  return td;
-}
-
 function btn(ops, label, disabled, onclick, cls) {
   const b = document.createElement('button');
   b.textContent = label;
@@ -175,124 +162,148 @@ function opsGap(ops) {
 
 let lastList = null;              // 最近一次拿到的项目列表，展开/折叠重绘用
 const expanded = new Set();       // 已展开（显示 bin 子行）的项目 key
-// 面板入场动画只在「用户自己点展开」那一次放。列表每 3 秒重建一次 DOM，
-// 动画若常驻在 .bin-panel 上，每次轮询都会重播，看着就是面板自己在跳。
+// 面板入场动画只在「用户自己点展开」那一次放
 let panelAnim = false;
 
-// 鼠标正压着哪一行（按 rowKey 记，不记节点：节点每 3 秒就被换掉）。
-// 浏览器在节点被替换后不会把 :hover 补给新节点，要等鼠标真的动一下才恢复，
-// 于是手停在那行上时，每 3 秒就失去一次 hover 高亮——看着就是「一跳一跳」。
-// 这里自己记账，重建完把 .hov 补回给同一行，样式跟 :hover 那条完全一致。
-let hovRow = null;
-
-/// 每行一个稳定标识：项目行用 key，bin 行用 key + bin 名
-function rowKey(tr, key) {
-  tr.dataset.rowKey = key;
-  return tr;
-}
+// 每个项目一块常驻 DOM，轮询只改文字、不换节点。
+// 以前每 3 秒 replaceChildren 整表重建，代价有三个，全都表现为「一跳一跳」：
+//   1) 浏览器不把 :hover 补给新节点（要等鼠标真的动一下）——鼠标停在行上或
+//      「展开/收起」按钮上，高亮每 3 秒丢一次；
+//   2) bin 面板的滚动位置被清零；
+//   3) CSS 动画从头重播。
+// 复用节点把这三条一次性解决，也是以后想给列表加任何动效的前提。
+const views = new Map();   // 项目 key -> view
+let emptyNode = null;      // 列表为空时的引导条，只在这时候挂在容器上
 
 function render(list) {
   lastList = list;
-  // 整表重建会把 bin 面板的滚动位置清零（实测：设成 120，一次轮询后回到 0）。
-  // 先按项目 key 记下各面板的 scrollTop，重建后原样恢复
-  const keepScroll = new Map();
-  for (const blk of $('projList').querySelectorAll('.proj-block')) {
-    const p = blk.querySelector('.bin-panel');
-    if (p && p.scrollTop) keepScroll.set(blk.dataset.key, p.scrollTop);
-  }
-  const frag = document.createDocumentFragment();
+  const holder = $('projList');
+  if (emptyNode && list.length) { emptyNode.remove(); emptyNode = null; }
+  const seen = new Set();
+  let i = 0;
   for (const u of list) {
-    const block = document.createElement('div');
-    block.className = 'proj-block';
-    block.dataset.key = u.key;   // 认得回是哪个项目，滚动位置才存得回来
-
-    // 项目行：一张自身的表格，行内容保留表格语义（名称/状态/时长/CPU/内存/操作）。
-    // 样式类跟表头表格一致，列宽被 table-layout:fixed 钉死，多行永不错位
-    const tbl = document.createElement('table');
-    tbl.className = 'stack-table';
-    const tb = document.createElement('tbody');
-    tb.appendChild(projectRow(u));
-    tbl.appendChild(tb);
-    block.appendChild(tbl);
-
-    // bin 独立面板：在表格之外、项目行下方；只有展开时显示
-    if (!u.external) {
-      const panel = document.createElement('div');
-      panel.className = 'bin-panel' + (panelAnim ? ' in' : '');
-      panel.hidden = !expanded.has(u.key);
-      panel.appendChild(binPanel(u));
-      block.appendChild(panel);
-    }
-    frag.appendChild(block);
+    seen.add(u.key);
+    let v = views.get(u.key);
+    // 外部 unit 与否决定操作列的按钮构成，变了只能重建（极少发生）
+    if (v && v.external !== !!u.external) { v.block.remove(); views.delete(u.key); v = null; }
+    if (!v) { v = buildView(u); views.set(u.key, v); }
+    syncView(v, u);
+    const at = holder.children[i];          // 顺序对齐：新插的项目落在该在的位置
+    if (at !== v.block) holder.insertBefore(v.block, at || null);
+    i++;
   }
-  if (!list.length) {
+  for (const [k, v] of [...views]) if (!seen.has(k)) { v.block.remove(); views.delete(k); }
+  if (!list.length && !emptyNode) {
     // 新机器上打开面板是一片空白，看着像坏了：说清去哪儿加项目
-    const d = document.createElement('div');
-    d.className = 'empty';
-    d.textContent = '扫描目录里还没有项目：往 panel.toml 的 dirs 指的目录里放（或 git clone）一个子目录，刷新就有';
-    frag.appendChild(d);
+    emptyNode = document.createElement('div');
+    emptyNode.className = 'empty';
+    emptyNode.textContent = '扫描目录里还没有项目：往 panel.toml 的 dirs 指的目录里放（或 git clone）一个子目录，刷新就有';
   }
-  $('projList').replaceChildren(frag);
-  if (keepScroll.size) {
-    for (const blk of $('projList').querySelectorAll('.proj-block')) {
-      const top = keepScroll.get(blk.dataset.key);
-      if (!top) continue;
-      const p = blk.querySelector('.bin-panel');
-      if (p) p.scrollTop = top;
-    }
-  }
-  panelAnim = false;   // 入场动画只播一次：下一次轮询重建就不该再跳
-  // 节点是新建的，浏览器不会把 :hover 补给它（要等鼠标真的动）。把高亮手动补回
-  if (hovRow) {
-    for (const tr of $('projList').querySelectorAll('tr')) {
-      if (tr.dataset.rowKey === hovRow) tr.classList.add('hov');
-    }
-  }
+  if (emptyNode) holder.appendChild(emptyNode);
+  panelAnim = false;
 }
 
-// 记鼠标压在列表的哪一行上。mouseover 会冒泡，换行、移到空隙都能收到；
-// 整块离开列表时 mouseleave 清掉，避免移走后还留着一行高亮。
-$('projList').addEventListener('mouseover', e => {
-  const tr = e.target.closest('tr');
-  hovRow = tr && tr.dataset.rowKey ? tr.dataset.rowKey : null;
-});
-$('projList').addEventListener('mouseleave', () => { hovRow = null; });
+/// 展开/收起：只改展开态再走一次 render（节点复用，不会闪）
+function toggleExpand(key) {
+  const opening = !expanded.has(key);
+  if (opening) panelAnim = true;   // 只在展开那一下播入场动画，收起不播
+  opening ? expanded.add(key) : expanded.delete(key);
+  if (lastList) render(lastList);
+}
 
-/// 项目一级的行：名称（带展开箭头）、汇总状态、资源、操作。
-/// 停止/重启/日志在下方独立的 bin 面板里，不在项目行放，避免「点到项目还是点到 bin」混淆；
-/// 但【拉取代码】和【控制台】是项目级的（一个 git 仓库、一个工作目录），每行都放。
-function projectRow(u) {
+/// 状态格：胶囊 + 圆点。返回引用，档位和文字每轮就地改
+function badgeCell(tr) {
+  const td = cell(tr, '');
+  const badge = document.createElement('span');
+  badge.className = 'badge off';
+  const dot = document.createElement('i');
+  dot.className = 'dot';
+  const text = document.createTextNode('');
+  badge.append(dot, text);
+  td.appendChild(badge);
+  return { td, badge, text };
+}
+
+/// 建一个项目的骨架 DOM，并把每轮要改的节点存进 view 备用
+function buildView(u) {
+  const v = { u, key: u.key, external: !!u.external, binRows: new Map(), btn: {} };
+  v.block = document.createElement('div');
+  v.block.className = 'proj-block';
+  v.block.dataset.key = u.key;
+
+  // 项目行：一张自身的表格，列宽被 table-layout:fixed 钉死，跟表头表格永不错位
+  const tbl = document.createElement('table');
+  tbl.className = 'stack-table';
+  const tb = document.createElement('tbody');
+  v.tr = document.createElement('tr');
+  tb.appendChild(v.tr);
+  tbl.appendChild(tb);
+  v.block.appendChild(tbl);
+
+  v.name = cell(v.tr, '');
+  v.name.className = 'name';
+  v.caret = document.createElement('span');
+  v.caret.className = 'caret';
+  v.caret.onclick = () => toggleExpand(u.key);
+  v.nameText = document.createTextNode('');
+  v.sub = document.createElement('small');
+  v.sub.className = 'subline';
+  v.name.append(v.caret, v.nameText, v.sub);
+
+  const b = badgeCell(v.tr);
+  v.badge = b.badge;
+  v.badgeText = b.text;
+  v.dur = cell(v.tr, '');
+  v.cpu = cell(v.tr, '');
+  v.mem = cell(v.tr, '');
+
+  v.ops = cell(v.tr, '');
+  v.ops.className = 'ops';
+  if (v.external) {
+    // 自写的 unit 没有 bin 面板，「项目就是这一个 unit」，启动/停止/重启/日志留在项目行
+    v.btn.start = btn(v.ops, '启动', false, () => doAction(v.u, 'start', '启动'), 'go');
+    v.btn.stop = btn(v.ops, '停止', false, () => doAction(v.u, 'stop', '停止'), 'stop');
+    v.btn.restart = btn(v.ops, '重启', false, () => doAction(v.u, 'restart', '重启'), 'restart');
+    v.btn.log = btn(v.ops, '日志', false, () => openLogs(v.u), 'chip');
+  } else {
+    // 普通项目：顶层只留「展开/收起」和「源码」，启动动作下移到 bin 面板各行
+    v.btn.expand = btn(v.ops, '展开', false, () => toggleExpand(u.key), 'chip');
+    v.btn.src = btn(v.ops, '源码', false, () => openSrc(v.u), 'chip');
+  }
+  // 项目级的两个快捷入口，两种项目都有。处理器一律读 v.u：节点要长期复用，
+  // 闭包不能锁死在第一次那个 u 上
+  opsGap(v.ops);
+  v.btn.pull = btn(v.ops, '拉取代码', false, () => rowPull(v.u, v.btn.pull), 'chip');
+  v.btn.term = btn(v.ops, '控制台', false, () => openTerm(v.u), 'chip');
+
+  if (!v.external) buildPanel(v);
+  return v;
+}
+
+/// 把一份新的项目数据就地刷进已存在的 view：只改文字和状态，不换节点。
+function syncView(v, u) {
+  v.u = u;
   const running = u.active === 'active';
   const outside = u.outside_pid != null;
   const alive = running || outside;
-  const tr = rowKey(document.createElement('tr'), u.key + '#p');
-
-  const name = cell(tr, '');
-  name.className = 'name';
   const expandable = !u.external && (u.instances || []).length > 0;
-  if (expandable) {
-    const caret = document.createElement('span');
-    caret.className = 'caret';
-    caret.textContent = expanded.has(u.key) ? '▾' : '▸';
-    caret.onclick = toggleExpand;
-    name.appendChild(caret);
-  }
-  name.appendChild(document.createTextNode(u.name));
-  const small = document.createElement('small');
-  small.classList.add('subline');
+  const open = expanded.has(u.key);
+
+  v.caret.hidden = !expandable;
+  v.caret.textContent = open ? '▾' : '▸';
+  v.nameText.nodeValue = u.name;
   if (outside) {
-    small.textContent = `面板外启动 · pid ${u.outside_pid} · 日志看不到`;
+    v.sub.textContent = `面板外启动 · pid ${u.outside_pid} · 日志看不到`;
   } else if (u.external) {
-    small.textContent = u.unit + '（你自己的 service）';
+    v.sub.textContent = u.unit + '（你自己的 service）';
   } else if ((u.running_bins || []).length || u.pid) {
     const parts = [];
     if (u.running_bins && u.running_bins.length) parts.push(`运行 ${u.running_bins.length} 个 bin`);
     if (u.pid) parts.push('pid ' + u.pid);
-    small.textContent = parts.join(' · ');
+    v.sub.textContent = parts.join(' · ');
   } else {
-    small.textContent = `${(u.bins || []).length} 个可运行程序`;
+    v.sub.textContent = `${(u.bins || []).length} 个可运行程序`;
   }
-  name.appendChild(small);
 
   let statusText;
   if (outside) statusText = '运行中（面板外）';
@@ -300,44 +311,28 @@ function projectRow(u) {
   else if (running) statusText = '运行中';
   else if (u.active === 'failed') statusText = '失败';
   else statusText = '已停止';
-  statusCell(tr, alive ? 'on' : u.active === 'failed' ? 'bad' : 'off', statusText);
+  v.badge.className = 'badge ' + (alive ? 'on' : u.active === 'failed' ? 'bad' : 'off');
+  v.badgeText.nodeValue = statusText;
 
-  cell(tr, fmtDur(u.uptime));
-  cell(tr, u.cpu == null ? '—' : u.cpu.toFixed(1) + '%');
-  cell(tr, fmtMemMB(u.memory));
+  v.dur.textContent = fmtDur(u.uptime);
+  v.cpu.textContent = u.cpu == null ? '—' : u.cpu.toFixed(1) + '%';
+  v.mem.textContent = fmtMemMB(u.memory);
 
-  const ops = cell(tr, '');
-  ops.className = 'ops';
-  if (u.external) {
-    // 自写的 unit 没有 bin 面板，对它来说「项目就是这一个 unit」，不存在选择歧义，
-    // 启动/停止/重启/日志直接留在项目行
-    btn(ops, '启动', false, () => doAction(u, 'start', '启动'), 'go');
-    btn(ops, '停止', false, () => doAction(u, 'stop', '停止'), 'stop');
-    btn(ops, '重启', false, () => doAction(u, 'restart', '重启'), 'restart');
-    btn(ops, '日志', false, () => openLogs(u), 'chip');
-  } else {
-    // 普通项目：项目顶层只留「展开/收起」和「源码」，启动动作下移到 bin 面板各行
-    if (expandable) btn(ops, expanded.has(u.key) ? '收起' : '展开', false, toggleExpand, 'chip');
-    btn(ops, '源码', false, () => openSrc(u), 'chip');
+  if (v.btn.expand) {
+    v.btn.expand.hidden = !expandable;
+    v.btn.expand.textContent = open ? '收起' : '展开';
   }
-  // 项目级的两个快捷入口，外部 unit 和普通项目都有
-  opsGap(ops);
-  const pull = btn(ops, '拉取代码', false, () => rowPull(u, pull), 'chip');
-  btn(ops, '控制台', false, () => openTerm(u), 'chip');
-  return tr;
-
-  // 展开/收起：切换 key 的展开态并整表重绘
-  function toggleExpand() {
-    const opening = !expanded.has(u.key);
-    if (opening) panelAnim = true;   // 只在展开那一下播入场动画，收起不播
-    opening ? expanded.add(u.key) : expanded.delete(u.key);
-    if (lastList) render(lastList);
-  }
+  if (!v.panel) return;
+  v.panel.hidden = !open;
+  v.panel.className = 'bin-panel' + (panelAnim && open ? ' in' : '');
+  syncBinRows(v, u);
 }
 
-/// bin 独立面板内容：一张自己的表，列 = bin/状态/时长/CPU/内存/操作。
-/// 每行一个 bin，带独立的停止/重启/日志，只作用于这一个 bin。
-function binPanel(u) {
+/// bin 面板：一张自己的表（列 = bin/状态/时长/CPU/内存/操作），行按 bin 名复用
+function buildPanel(v) {
+  v.panel = document.createElement('div');
+  v.panel.className = 'bin-panel';
+  v.panel.hidden = true;
   const tbl = document.createElement('table');
   const thead = document.createElement('thead');
   const htr = document.createElement('tr');
@@ -348,56 +343,73 @@ function binPanel(u) {
   }
   thead.appendChild(htr);
   tbl.appendChild(thead);
-
-  const tb = document.createElement('tbody');
-  const insts = u.instances || [];
-  if (insts.length === 0) {
-    const tr = document.createElement('tr');
-    const td = document.createElement('td');
-    td.colSpan = 6;
-    td.textContent = '这个项目没有可运行的 bin';
-    tr.appendChild(td);
-    tb.appendChild(tr);
-    tbl.appendChild(tb);
-    return tbl;
-  }
-  for (const inst of insts) tb.appendChild(binRow(u, inst));
-  tbl.appendChild(tb);
-  return tbl;
+  v.binBody = document.createElement('tbody');
+  v.binEmpty = document.createElement('tr');
+  const td = document.createElement('td');
+  td.colSpan = 6;
+  td.textContent = '这个项目没有可运行的 bin';
+  v.binEmpty.appendChild(td);
+  v.binBody.appendChild(v.binEmpty);
+  tbl.appendChild(v.binBody);
+  v.panel.appendChild(tbl);
+  v.block.appendChild(v.panel);
 }
 
-/// bin 行：显示该 bin 自己的状态/资源，操作只动这一个 bin
-function binRow(u, inst) {
-  const tr = rowKey(document.createElement('tr'), u.key + '#' + inst.bin);
-
-  const name = cell(tr, '');
+function buildBinRow(v, bin) {
+  const r = { bin, inst: { bin }, tr: document.createElement('tr') };
+  const name = cell(r.tr, '');
   name.className = 'name';
   const nm = document.createElement('span');
-  nm.textContent = inst.bin;
-  const small = document.createElement('small');
-  small.classList.add('subline');
-  small.textContent = (
-    inst.running ? (inst.pid ? `pid ${inst.pid}` : '运行中') :
-    inst.active === 'failed' ? '上次失败' : '未运行'
-  );
-  name.append(nm, small);
-
-  statusCell(tr, inst.running ? 'on' : inst.active === 'failed' ? 'bad' : 'off',
-    inst.running ? '运行中' : inst.active === 'failed' ? '失败' : '未运行');
-
-  cell(tr, fmtDur(inst.uptime));
-  cell(tr, inst.cpu == null ? '—' : inst.cpu.toFixed(1) + '%');
-  cell(tr, fmtMem(inst.memory));
-
-  const ops = cell(tr, '');
+  nm.textContent = bin;            // 行按 bin 名建，这一格不用每轮再刷
+  r.sub = document.createElement('small');
+  r.sub.className = 'subline';
+  name.append(nm, r.sub);
+  const b = badgeCell(r.tr);
+  r.badge = b.badge;
+  r.badgeText = b.text;
+  r.dur = cell(r.tr, '');
+  r.cpu = cell(r.tr, '');
+  r.mem = cell(r.tr, '');
+  const ops = cell(r.tr, '');
   ops.className = 'ops';
-  // 四个按钮永远都在，按运行态做可用性控制：
-  //   未运行：启动🉑、停止/重启灰；运行中：启动灰、停止/重启🉑；日志恒🉑
-  btn(ops, '启动', inst.running, () => openRun(u, inst.bin), 'go');
-  btn(ops, '停止', !inst.running, () => binAction(u, inst, 'stop'), 'stop');
-  btn(ops, '重启', !inst.running, () => binAction(u, inst, 'restart'), 'restart');
-  btn(ops, '日志', false, () => openLogs(u, inst.bin), 'chip');
-  return tr;
+  // 四个按钮永远都在，运行态只改 disabled：
+  //   未运行 → 启动可点、停止/重启灰；运行中 → 反之；日志恒可点
+  r.btn = {};
+  r.btn.start = btn(ops, '启动', false, () => openRun(v.u, bin), 'go');
+  r.btn.stop = btn(ops, '停止', false, () => binAction(v.u, r.inst, 'stop'), 'stop');
+  r.btn.restart = btn(ops, '重启', false, () => binAction(v.u, r.inst, 'restart'), 'restart');
+  r.btn.log = btn(ops, '日志', false, () => openLogs(v.u, bin), 'chip');
+  return r;
+}
+
+/// 一行一个 bin：同名的行复用，只刷文字和可用态；bin 增减才增删行
+function syncBinRows(v, u) {
+  const insts = u.instances || [];
+  v.binEmpty.hidden = insts.length > 0;
+  const seen = new Set();
+  let i = 0;
+  for (const inst of insts) {
+    seen.add(inst.bin);
+    let r = v.binRows.get(inst.bin);
+    if (!r) { r = buildBinRow(v, inst.bin); v.binRows.set(inst.bin, r); }
+    r.inst = inst;
+    r.sub.textContent = inst.running ? (inst.pid ? `pid ${inst.pid}` : '运行中')
+      : inst.active === 'failed' ? '上次失败' : '未运行';
+    r.badge.className = 'badge ' + (inst.running ? 'on' : inst.active === 'failed' ? 'bad' : 'off');
+    r.badgeText.nodeValue = inst.running ? '运行中' : inst.active === 'failed' ? '失败' : '未运行';
+    r.dur.textContent = fmtDur(inst.uptime);
+    r.cpu.textContent = inst.cpu == null ? '—' : inst.cpu.toFixed(1) + '%';
+    r.mem.textContent = fmtMem(inst.memory);
+    r.btn.start.disabled = inst.running;
+    r.btn.stop.disabled = !inst.running;
+    r.btn.restart.disabled = !inst.running;
+    const at = v.binBody.children[i];
+    if (at !== r.tr) v.binBody.insertBefore(r.tr, at || null);
+    i++;
+  }
+  for (const [b, r] of [...v.binRows]) {
+    if (!seen.has(b)) { r.tr.remove(); v.binRows.delete(b); }
+  }
 }
 
 /// 项目一级的通用操作（外部 unit 的启动/停止/重启），走自定义确认弹窗
