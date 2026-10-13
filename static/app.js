@@ -98,9 +98,11 @@ function tile(label, value, sub, p) {
   s.textContent = sub || '';
   d.append(b, v, s);
   if (p != null) {
+    // --m 设在卡上而不是仪表上：数值文字要跟仪表同色（自定义属性往下继承）
+    d.style.setProperty('--m', severity(p));
+    if (p >= 90) d.classList.add('hi');   // 顶到上限的卡整张描边转红
     const m = document.createElement('div');
     m.className = 'meter';
-    m.style.setProperty('--m', severity(p));
     const i = document.createElement('i');
     i.style.width = Math.min(100, Math.max(0, p)) + '%';
     m.appendChild(i);
@@ -137,6 +139,19 @@ function cell(tr, text) {
   const td = document.createElement('td');
   td.textContent = text;
   tr.appendChild(td);
+  return td;
+}
+
+/// 状态单元格：圆点 + 文案包成胶囊，state 取 on/bad/off。
+/// 点和字都取胶囊的 currentColor，三档色相一致，改一处 CSS 就全跟着变。
+function statusCell(tr, state, text) {
+  const td = cell(tr, '');
+  const b = document.createElement('span');
+  b.className = 'badge ' + state;
+  const d = document.createElement('i');
+  d.className = 'dot';
+  b.append(d, text);
+  td.appendChild(b);
   return td;
 }
 
@@ -224,10 +239,7 @@ function projectRow(u) {
   else if (running) statusText = '运行中';
   else if (u.active === 'failed') statusText = '失败';
   else statusText = '已停止';
-  const st = cell(tr, statusText);
-  const dot = document.createElement('span');
-  dot.className = 'dot ' + (alive ? 'on' : u.active === 'failed' ? 'bad' : 'off');
-  st.prepend(dot);
+  statusCell(tr, alive ? 'on' : u.active === 'failed' ? 'bad' : 'off', statusText);
 
   cell(tr, fmtDur(u.uptime));
   cell(tr, u.cpu == null ? '—' : u.cpu.toFixed(1) + '%');
@@ -306,10 +318,8 @@ function binRow(u, inst) {
   );
   name.append(nm, small);
 
-  const st = cell(tr, inst.running ? '运行中' : inst.active === 'failed' ? '失败' : '未运行');
-  const dot = document.createElement('span');
-  dot.className = 'dot ' + (inst.running ? 'on' : inst.active === 'failed' ? 'bad' : 'off');
-  st.prepend(dot);
+  statusCell(tr, inst.running ? 'on' : inst.active === 'failed' ? 'bad' : 'off',
+    inst.running ? '运行中' : inst.active === 'failed' ? '失败' : '未运行');
 
   cell(tr, fmtDur(inst.uptime));
   cell(tr, inst.cpu == null ? '—' : inst.cpu.toFixed(1) + '%');

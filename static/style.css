@@ -16,6 +16,10 @@
      xs 12 表头·副行·标签 | sm 13 按钮·输入·提示 | md 14 正文
      | lg 16 标题 | xl 20 tile 大数字。root 字号是浏览器默认 16px，rem 按它算。 */
   --fs-xs: .75rem; --fs-sm: .8125rem; --fs-md: .875rem; --fs-lg: 1rem; --fs-xl: 1.25rem;
+  /* 景深：深色下卡片全靠亮度差抬不出来，补一档近距投影 + 顶边 1px 高光，
+     让「卡片浮在背景上」这件事看得见。浅色下投影必须更淡，否则白底发脏。 */
+  --shadow: 0 1px 2px rgba(0, 0, 0, .45), 0 10px 26px -14px rgba(0, 0, 0, .7);
+  --edge: inset 0 1px 0 rgba(255, 255, 255, .05);
 }
 /* 浅色变量组，和下面媒体查询里的定义保持一致 */
 html.light {
@@ -23,14 +27,20 @@ html.light {
   --fg: #1b1f24; --muted: #6b7280;
   --on: #1a7f37; --off: #9aa0a6; --bad: #cf222e; --warn: #bf8700;
   --go: #1a7f37; --danger: #cf222e; --caution: #9a6700;
+  /* 浅色下投影必须更淡，否则白底发脏 */
+  --shadow: 0 1px 2px rgba(16, 24, 40, .06), 0 8px 20px -12px rgba(16, 24, 40, .18);
+  --edge: inset 0 1px 0 rgba(255, 255, 255, .9);
 }
-/* JS 永远会设 data-theme，这个媒体查询只兜 JS 被禁用/加载失败的情况。 */
+/* JS 永远会设 data-theme，这个媒体查询只兜 JS 被禁用/加载失败的情况。
+   这组值必须和上面 html.light 逐条一致，改那边记得改这里。 */
 @media (prefers-color-scheme: light) {
   html:not([data-theme]) {
     --bg: #f4f5f7; --card: #fff; --line: #e2e5ea;
     --fg: #1b1f24; --muted: #6b7280;
     --on: #1a7f37; --off: #9aa0a6; --bad: #cf222e; --warn: #bf8700;
     --go: #1a7f37; --danger: #cf222e; --caution: #9a6700;
+    --shadow: 0 1px 2px rgba(16, 24, 40, .06), 0 8px 20px -12px rgba(16, 24, 40, .18);
+    --edge: inset 0 1px 0 rgba(255, 255, 255, .9);
   }
 }
 * { box-sizing: border-box; }
@@ -56,6 +66,7 @@ h2 { font-size: var(--fs-md); margin: 0; }
 #loginForm {
   width: min(320px, 100%); padding: 1.5rem; background: var(--card);
   border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: var(--shadow), var(--edge);
 }
 #loginForm h1 { margin-bottom: 1rem; }
 input, button, select {
@@ -158,13 +169,19 @@ button.ghost:hover:not(:disabled) {
 .tile {
   padding: .6rem .7rem; background: var(--card);
   border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: var(--shadow), var(--edge);
+  transition: border-color .15s ease;
 }
 .tile b { display: block; font-weight: 400; font-size: var(--fs-xs); color: var(--muted); }
-/* 数值每 3 秒重绘一次，用等宽数字免得位数变化时左右抖动 */
+/* 数值跟着占比色走：以前只有脚边那条 6px 的线在表达状态，六张卡长得一模一样，
+   等于没信息设计。--m 由 JS 设在 .tile 上（没有仪表的卡不设，退回正文色）。
+   tabular-nums：数值每 3 秒重绘一次，等宽数字才不致位数一变就左右抖。 */
 .tile strong {
   display: block; margin: .15rem 0 .25rem; font-size: var(--fs-xl); font-weight: 600;
-  font-variant-numeric: tabular-nums;
+  font-variant-numeric: tabular-nums; color: var(--m, var(--fg));
 }
+/* 顶到上限（≥90%）的卡整张描边转红，不用看数字也知道哪张要出事 */
+.tile.hi { border-color: color-mix(in oklab, var(--bad) 55%, var(--line)); }
 .tile small { color: var(--muted); font-size: var(--fs-xs); }
 /* 轨道取填充色的浅一档（同色相），这样整条都在表达状态，而不是一半灰一半彩 */
 .meter {
@@ -172,7 +189,11 @@ button.ghost:hover:not(:disabled) {
   background: var(--line);
   background: color-mix(in oklab, var(--m) 22%, transparent);
 }
-.meter i { display: block; height: 100%; border-radius: 3px; background: var(--m); }
+.meter i {
+  display: block; height: 100%; border-radius: 3px; background: var(--m);
+  /* 起点淡终点实：填充方向一眼可读，比一根纯色条更有指向性 */
+  background: linear-gradient(90deg, color-mix(in oklab, var(--m) 55%, transparent), var(--m));
+}
 #app > header {
   display: flex; align-items: center; gap: .75rem; margin-bottom: .75rem;
 }
@@ -180,6 +201,7 @@ button.ghost:hover:not(:disabled) {
 table {
   width: 100%; border-collapse: collapse; background: var(--card);
   border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
+  box-shadow: var(--shadow), var(--edge);
 }
 th, td { padding: .6rem .7rem; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; vertical-align: middle; }
 th { font-size: var(--fs-xs); color: var(--muted); }
@@ -228,6 +250,8 @@ td.name .subline { display: block; color: var(--muted); font-size: var(--fs-xs);
   border: 1px solid var(--line); border-radius: 8px;
   background: color-mix(in oklab, var(--card) 92%, transparent);
   overflow: auto; max-height: 46vh;
+  /* 嵌套层不配和顶层卡片同样重的投影，否则两层被抹平；只留顶边高光 + 一档近距 */
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .28), var(--edge);
 }
 .bin-panel table { border: 0; border-radius: 0; }
 .bin-panel th { font-size: var(--fs-xs); }
@@ -241,6 +265,52 @@ td.name .subline { display: block; color: var(--muted); font-size: var(--fs-xs);
 }
 .dot.on { background: var(--on); }
 .dot.bad { background: var(--bad); }
+
+/* ---------- 质感层：层级、交互、状态强调 ---------- */
+/* 表头跟正文拉开层级：字距 + 略粗，不再像「小一号的正文」 */
+th { letter-spacing: .04em; font-weight: 600; }
+/* 表头表格顶上一条 accent→透明的色带，给整页一个视觉起点：
+   不然从状态卡到表格全是同一种灰边框，页面没有落光的地方 */
+main > table.stack-table { position: relative; }
+main > table.stack-table::after {
+  content: ''; position: absolute; left: 0; right: 0; top: 0; height: 2px;
+  background: linear-gradient(90deg, var(--accent), transparent 55%);
+  opacity: .5;
+}
+/* 数字列右对齐 + 等宽数字：左对齐的数字列右边缘是锯齿，
+   这是表格看起来「没设计过」的头号来源。3/4/5 = 运行时长/CPU/内存 */
+.stack-table :is(th, td):nth-child(n+3):nth-child(-n+5),
+.bin-panel :is(th, td):nth-child(n+3):nth-child(-n+5) { text-align: right; }
+td { font-variant-numeric: tabular-nums; }
+/* 行 hover：表格是页面主体，之前鼠标划上去一点反馈都没有 */
+.stack-table tbody tr, .bin-panel tbody tr { transition: background-color .12s ease; }
+.stack-table tbody tr:hover, .bin-panel tbody tr:hover {
+  background: color-mix(in oklab, var(--fg) 5%, var(--card));
+}
+/* 深色下光有 5% 底色不够明显，左缘再补一道 accent，明确「是这一行」 */
+.stack-table tbody tr:hover > td:first-child,
+.bin-panel tbody tr:hover > td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
+/* 状态胶囊：原来一个灰点 + 一行普通字，跟旁边的时长同权重，扫一眼看不出谁在跑。
+   沿用按钮那三档 color-mix 语义构造：点、字、底同一色相，只是底很淡 */
+.badge {
+  display: inline-flex; align-items: center; gap: .4rem;
+  padding: .12rem .5rem; border-radius: 99px;
+  font-size: var(--fs-sm); font-weight: 600; white-space: nowrap;
+}
+/* 放在 .dot.* 之后：同优先级下后者胜，胶囊里的点跟着字色走 */
+.badge .dot { margin-right: 0; background: currentColor; }
+.badge.on { color: var(--on); background: color-mix(in oklab, var(--on) 14%, transparent); }
+.badge.bad { color: var(--bad); background: color-mix(in oklab, var(--bad) 14%, transparent); }
+.badge.off { color: var(--muted); background: color-mix(in oklab, var(--muted) 13%, transparent); }
+/* 在跑的那个点轻微呼吸：静止的一片里有个动的，比颜色更快被认出来 */
+.badge.on .dot { animation: breathe 2.4s ease-in-out infinite; }
+@keyframes breathe { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+/* 键盘可达：之前 Tab 到哪个按钮完全看不出来 */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* 系统开了「减少动效」就把过渡和呼吸全关掉 */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
 
 #projList { margin-top: .4rem; }
 /* 运行弹窗：模态遮罩 + 居中卡片，遮罩不拦截点击（点击遮罩不关闭弹窗）。
