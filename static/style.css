@@ -221,8 +221,9 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
 .bin-panel table { border: 0; border-radius: 0; }
 .bin-panel th { font-size: .72rem; }
 .bin-panel td { padding: .4rem .7rem; }
+/* 按钮不另立更小的一档：面板里所有按钮同一规格，父行和 bin 行只差在行的疏密上。
+   原来这里压成 .25rem/.8rem，跟上方父行的按钮并排看就像缩了一号、点着也费劲。 */
 .bin-panel .ops { white-space: nowrap; }
-.bin-panel .ops button { padding: .25rem .6rem; font-size: .8rem; }
 .dot {
   display: inline-block; width: .6rem; height: .6rem; margin-right: .45rem;
   border-radius: 50%; background: var(--off);
