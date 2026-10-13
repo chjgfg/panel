@@ -6,4 +6,5 @@
 /panel_ssh_key
 panel.log
 .omc
-Cargo.lock
+# 面板自己写的启动参数缓存（跟 panel.toml 同目录，重启后靠它恢复）
+/panel_state.toml

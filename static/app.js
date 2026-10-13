@@ -484,7 +484,9 @@ function binAction(u, inst, act) {
 async function pullCode(key, show) {
   show('正在 git pull…', true);
   try {
-    await req(`api/units/${key}/pull`);
+    // 状态变更走 POST：GET 的话 SameSite=Lax 会带着 cookie 放行跨站的顶层导航，
+    // 聊天里一个链接点进来就能替你 git pull
+    await req(`api/units/${key}/pull`, { method: 'POST' });
     show('拉取成功', true);
     return true;
   } catch (e) {

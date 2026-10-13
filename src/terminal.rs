@@ -32,12 +32,32 @@ use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
-use crate::state::App;
+use crate::state::{App, MAX_TERMS};
 
 /// 前端能传的只有一个项目名：目录由服务器自己扫（resolve），不接受前端传路径
 #[derive(serde::Deserialize)]
 pub struct TermQuery {
     key: Option<String>,
+}
+
+/// 控制台只连这台机器本身。以前拿浏览器的 Host 头当 ssh 目标，等于任何持有有效
+/// 会话的人都能让服务器主动 `ssh root@攻击者主机`，把 panel_ssh_key 那把钥匙递出去。
+/// 「连本机」这个需求用 127.0.0.1 永远成立，功能不损失，攻击面消失。
+const SSH_LOCAL: &str = "127.0.0.1";
+
+/// 一路控制台的额度。bridge 里有多条提前 return 的错误分支，用 Drop 归还才不会漏。
+struct TermSlot(Arc<App>);
+
+impl TermSlot {
+    fn try_new(app: &Arc<App>) -> Option<Self> {
+        app.take_term().then(|| TermSlot(app.clone()))
+    }
+}
+
+impl Drop for TermSlot {
+    fn drop(&mut self) {
+        self.0.drop_term();
+    }
 }
 
 pub async fn terminal_ws(
@@ -74,12 +94,17 @@ pub async fn terminal_ws(
         },
     };
 
-    // ssh 的目标 = 浏览器访问面板用的主机名（Host 头去掉端口）。
-    // 用户就是冲着这个 IP 开的面板，ssh root@它 正好是需求要的「连本机」。
-    let target = ssh_target(host.as_deref());
+    // 每路控制台都是一个 PTY + 一个 ssh 子进程，开满就拒（额度在 slot 离开作用域时归还）
+    let Some(slot) = TermSlot::try_new(&app) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("控制台已经开了 {MAX_TERMS} 路，先关掉一个再试"),
+        )
+            .into_response();
+    };
     // 已配好私钥就把它的路径交给 ssh -i；没配就走默认认证（可能失败或走密码）。
     let keyfile = key_configured(&app.ssh_key_path).then(|| app.ssh_key_path.clone());
-    ws.on_upgrade(move |socket| bridge(socket, target, keyfile, remote_cmd))
+    ws.on_upgrade(move |socket| bridge(socket, SSH_LOCAL, keyfile, remote_cmd, slot))
 }
 
 // ---------- SSH 私钥的存/查/清（都落在服务器上，换浏览器不丢）----------
@@ -150,31 +175,6 @@ fn write_key_file(path: &Path, content: &str) -> std::io::Result<()> {
     }
     f.write_all(content.as_bytes())?;
     Ok(())
-}
-
-/// 从 Host 头解析出 ssh 目标：去掉端口，校验字符，取不到就回退 127.0.0.1。
-/// - `1.2.3.4:80`  -> `1.2.3.4`
-/// - `[::1]:80`    -> `::1`
-/// - `example.com` -> `example.com`
-fn ssh_target(host: Option<&str>) -> String {
-    let fallback = "127.0.0.1".to_string();
-    let Some(h) = host else { return fallback };
-    let h = h.trim();
-    // IPv6 字面量带方括号：[::1]:80 —— 取方括号里的部分
-    let bare = if let Some(rest) = h.strip_prefix('[') {
-        match rest.split_once(']') {
-            Some((addr, _)) => addr,
-            None => return fallback,
-        }
-    } else {
-        // 普通 host[:port]，从右边切掉端口
-        h.rsplit_once(':').map_or(h, |(a, _)| a)
-    };
-    let ok = !bare.is_empty()
-        && bare
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':'));
-    if ok { bare.to_string() } else { fallback }
 }
 
 /// 项目级控制台的远端命令：让 shell 一起来就在项目目录里。
@@ -462,9 +462,11 @@ impl InputGuard {
 
 async fn bridge(
     mut socket: WebSocket,
-    target: String,
+    target: &str,
     keyfile: Option<PathBuf>,
     remote_cmd: Option<String>,
+    // 一路控制台额度：函数返回（含各条提前 return 的错误分支）时自动归还
+    _slot: TermSlot,
 ) {
     // 造 PTY
     let pair = match native_pty_system().openpty(PtySize {
@@ -646,18 +648,6 @@ async fn bridge(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn ssh_target_from_host_header() {
-        assert_eq!(ssh_target(Some("1.2.3.4:80")), "1.2.3.4");
-        assert_eq!(ssh_target(Some("1.2.3.4")), "1.2.3.4");
-        assert_eq!(ssh_target(Some("panel.example.com:8080")), "panel.example.com");
-        assert_eq!(ssh_target(Some("[::1]:80")), "::1");
-        assert_eq!(ssh_target(None), "127.0.0.1");
-        // 非法字符（可能夹带注入意图）一律回退，绝不原样拼进命令行
-        assert_eq!(ssh_target(Some("a b c")), "127.0.0.1");
-        assert_eq!(ssh_target(Some("a;rm -rf/")), "127.0.0.1");
-    }
 
     #[test]
     fn cd_command_quotes_dir_and_login_shell() {

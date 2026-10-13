@@ -7,7 +7,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 
-use crate::state::{App, SESSION_SECS};
+use crate::state::{lock, App, SESSION_SECS};
 
 pub(crate) const COOKIE: &str = "panel_session";
 
@@ -28,13 +28,19 @@ pub struct LoginReq {
 }
 
 pub async fn login(State(app): State<Arc<App>>, Json(body): Json<LoginReq>) -> Response {
-    if let Some(wait) = app.lockout() {
-        let msg = format!("失败次数过多，请 {wait} 秒后再试");
-        return (StatusCode::TOO_MANY_REQUESTS, msg).into_response();
-    }
+    // 先验密码，再决定要不要摆脸色。反过来写（先查锁定）的话，任何拿到登录页的人
+    // 只要持续送错密码，就能把「拿着正确密码的你」也挡在门外 —— 每错一次锁定窗口
+    // 就续期，等于把限速做成了拒绝服务。限速只该拦猜不中的人。
     if body.password != app.cfg.password {
         app.on_fail();
-        return (StatusCode::UNAUTHORIZED, "密码错误").into_response();
+        return match app.lockout() {
+            Some(wait) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                format!("失败次数过多，请 {wait} 秒后再试"),
+            )
+                .into_response(),
+            None => (StatusCode::UNAUTHORIZED, "密码错误").into_response(),
+        };
     }
     app.reset_fails();
 
@@ -47,7 +53,7 @@ pub async fn login(State(app): State<Arc<App>>, Json(body): Json<LoginReq>) -> R
 
 pub async fn logout(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
     if let Some(t) = cookie_token(&headers) {
-        app.sessions.lock().unwrap().remove(t);
+        lock(&app.sessions).remove(t);
     }
     let c = format!("{COOKIE}=; Path=/; Max-Age=0");
     (StatusCode::NO_CONTENT, [(header::SET_COOKIE, c)]).into_response()

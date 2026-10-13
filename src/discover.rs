@@ -10,7 +10,7 @@ pub fn ok_name(n: &str) -> bool {
         && n.len() <= 100
         && !n.starts_with(['-', '.'])
         && n.chars()
-            .all(|c| c.is_ascii_alphanumeric() || "._@-".contains(c))
+            .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
 }
 
 /// 只支持 * 的通配匹配，够用又不用引依赖。没有 * 就是全等。
@@ -165,7 +165,7 @@ mod tests {
     fn dir_name_allows_only_safe_chars() {
         assert!(ok_name("blog"));
         assert!(ok_name("my-api_2.0"));
-        assert!(ok_name("tpl@inst"));
+        assert!(!ok_name("tpl@inst")); // @ 会被 systemd 当成模板单元的分隔符，unit 名里不能有
         assert!(!ok_name(""));
         assert!(!ok_name(".git")); // 隐藏目录
         assert!(!ok_name("-rf")); // 会被当成命令行选项

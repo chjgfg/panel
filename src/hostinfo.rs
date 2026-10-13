@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use crate::state::App;
+use crate::state::{lock, App};
 use crate::systemd::run;
 
 #[derive(Serialize, Clone)]
@@ -97,7 +97,7 @@ pub async fn host_stats(app: &App) -> Host {
         .as_deref()
         .and_then(parse_cpu_line)
         .and_then(|cur| {
-            let prev = app.host_cpu.lock().unwrap().replace(cur);
+            let prev = lock(&app.host_cpu).replace(cur);
             let (pb, pt) = prev?;
             let dt = cur.1.checked_sub(pt)?;
             let db = cur.0.checked_sub(pb)?;
@@ -124,7 +124,7 @@ pub async fn host_stats(app: &App) -> Host {
     // 只查关心的路径，省得把 tmpfs 和 snap 的 loop 设备全列出来。
     // 结果缓存 30 秒：磁盘占用变化很慢，不值得每次刷新都 fork 一个 df
     let cached = {
-        let c = app.disks.lock().unwrap();
+        let c = lock(&app.disks);
         c.as_ref()
             .filter(|(t, _)| t.elapsed() < Duration::from_secs(30))
             .map(|(_, d)| d.clone())
@@ -138,7 +138,7 @@ pub async fn host_stats(app: &App) -> Host {
                 Ok((_, out, _)) => parse_df(&out),
                 Err(_) => Vec::new(),
             };
-            *app.disks.lock().unwrap() = Some((Instant::now(), d.clone()));
+            *lock(&app.disks) = Some((Instant::now(), d.clone()));
             d
         }
     };

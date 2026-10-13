@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::{BoxErr, Config, config_path};
 use crate::discover::{bins, discover, find_cargo, ok_name};
 use crate::procs::{find_outside, proc_exes, stop_pids};
-use crate::state::App;
+use crate::state::{lock, App};
 use crate::srctree::{Node, file_path_ok, read_file, walk_tree};
 use crate::systemd::{
     Picked, boot_secs, pick_project, pick_project_checked, project_units, run, show_many, unit_of,
@@ -207,7 +207,7 @@ async fn units(State(app): State<Arc<App>>) -> Json<Vec<Status>> {
         let uptime = (p.raw.active == "active")
             .then(|| p.raw.active_since_us.map(|u| (boot - u as f64 / 1e6).max(0.0)))
             .flatten();
-        let cur = app.last.lock().unwrap().get(&name).cloned();
+        let cur = lock(&app.last).get(&name).cloned();
         let cur_bin = cur.as_ref().and_then(|g| g.first()).map(|(b, _)| b.clone());
         let cur_args = cur.as_ref().and_then(|g| g.first()).map(|(_, a)| a.clone());
         let bins = found_bins
@@ -342,6 +342,42 @@ fn systemd_run_argv(cargo: &str, unit: &str, dir: &str, bin: &str, args: &str) -
     v
 }
 
+/// 失败时把 journal 尾巴捞出来当错误信息（cargo 的编译错误就在里面）
+async fn journal_tail(unit: &str) -> String {
+    let n = "12";
+    let args = ["-u", unit, "-n", n, "--no-pager", "-o", "short-iso"];
+    match run("journalctl", &args).await {
+        Ok((_, out, err)) => drop_noise(&format!("{out}{err}")).trim().to_string(),
+        Err(e) => format!("读日志失败：{e}"),
+    }
+}
+
+/// systemd-run 返回 0 只代表「transient unit 建起来了」，不代表程序真在跑：
+/// 找不到 bin、起来就 panic、端口被占，都发生在它返回之后，只在 journal 里。
+/// 以前 spawn 就此报成功，界面显示绿色而实际什么都没跑。这里短促回读 unit 状态，
+/// 秒级失败当场把 journal 尾巴带回前端；慢失败（编译几十秒才报错）仍由每 3 秒
+/// 一次的刷新兜住 —— 不在请求里干等，单核机器上编译本来就慢。
+async fn settle(unit: &str) -> (bool, String) {
+    let want = [unit.to_string()];
+    for _ in 0..8 {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let shown = show_many(&want).await;
+        let Some(r) = shown.get(unit) else { continue };
+        match r.active.as_str() {
+            // cargo run 的父进程就是 unit 的主进程，编译期间它一直是 active，
+            // 所以这里抓得住的是「秒退」，不是「编译慢」
+            "active" | "activating" | "reloading" => return (true, String::new()),
+            "failed" => return (false, journal_tail(unit).await),
+            "inactive" | "deactivating" | "dead" => {
+                return (false, "起来就退了，没留住进程".to_string());
+            }
+            _ => {}
+        }
+    }
+    // 一直读不清状态就别再拖，交给界面的轮询
+    (true, String::new())
+}
+
 /// 用 systemd-run 起一个 transient unit，等于临时造了个 systemd 服务。
 /// 这样状态、运行时长、CPU、内存、日志全都沿用现成那套，
 /// 面板不用自己管子进程和日志收集。
@@ -361,15 +397,20 @@ async fn spawn(
 
     match run("systemd-run", &refs).await {
         Ok((true, ..)) => {
-            let mut last = app.last.lock().unwrap();
-            let group = last.entry(project.to_string()).or_default();
-            // 同一批里重复养同一个 bin 就覆盖掉，不重复记
-            if let Some(slot) = group.iter_mut().find(|(b, _)| b == bin) {
-                *slot = (bin.to_string(), args.to_string());
-            } else {
-                group.push((bin.to_string(), args.to_string()));
+            // 用一个块把锁先放掉再落盘：std 的 Mutex 不可重入，save_last 自己也要取锁
+            {
+                let mut last = lock(&app.last);
+                let group = last.entry(project.to_string()).or_default();
+                // 同一批里重复养同一个 bin 就覆盖掉，不重复记
+                if let Some(slot) = group.iter_mut().find(|(b, _)| b == bin) {
+                    *slot = (bin.to_string(), args.to_string());
+                } else {
+                    group.push((bin.to_string(), args.to_string()));
+                }
             }
-            (true, String::new())
+            // 落盘：面板或服务器重启后，「重启」还要能沿用这组 bin + 参数
+            app.save_last();
+            settle(&unit).await
         }
         Ok((false, out, err)) => {
             let msg = if err.trim().is_empty() { out } else { err };
@@ -411,7 +452,7 @@ async fn action(
             .map(|b| (b.bin, b.args))
             .collect()
     } else {
-        app.last.lock().unwrap().get(&project).cloned().unwrap_or_default()
+        lock(&app.last).get(&project).cloned().unwrap_or_default()
     };
 
     // quiet=true 时「unit 根本没在跑」不算错（systemctl stop 一个没 loaded 的会报 not loaded，
@@ -548,10 +589,7 @@ async fn bin_action(
         // 重启这一个 bin：停掉它的 unit 再按上次参数（或空参数）重新拉起
         "restart" => {
             let _ = sysctl().await;   // 已在跑的话先停，否则 systemd-run 同名会拒绝
-            let args = app
-                .last
-                .lock()
-                .unwrap()
+            let args = lock(&app.last)
                 .get(&project)
                 .cloned()
                 .and_then(|g| g.into_iter().find(|(b, _)| b == &bin))
@@ -770,15 +808,18 @@ async fn start() -> Result<(), BoxErr> {
     let exclude = cfg.exclude.clone();
     let dirs = cfg.dirs.clone();
     let prefix = cfg.prefix.trim().to_string();
-    // 控制台 SSH 私钥落盘路径：跟配置文件同目录的 panel_ssh_key（存服务器上，换浏览器也不丢）。
+    // 面板自己的两个落盘文件都放在配置文件同目录：
+    //   panel_ssh_key     —— 控制台用的 SSH 私钥（存服务器上，换浏览器也不丢）
+    //   panel_state.toml  —— 上次启动的 (bin, 参数)，重启后「一键恢复」靠它
     // path 是解析到的配置文件路径；取不到父目录（裸相对名）就退到当前目录。
-    let ssh_key_path = path
+    let cfg_dir = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
-        .map(|p| p.join("panel_ssh_key"))
-        .unwrap_or_else(|| PathBuf::from("panel_ssh_key"));
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let ssh_key_path = cfg_dir.join("panel_ssh_key");
+    let state_path = cfg_dir.join("panel_state.toml");
     // App 拿走 cfg 所有权，之后想再读配置就从 App 里读
-    let app = App::new(cfg, cargo.clone(), ssh_key_path);
+    let app = App::new(cfg, cargo.clone(), ssh_key_path, state_path);
 
     // 除了首页和登录接口，其它一律要带有效 cookie
     let protected = Router::new()
@@ -789,7 +830,7 @@ async fn start() -> Result<(), BoxErr> {
         .route("/api/units/{key}/logs", get(logs))
         .route("/api/units/{key}/tree", get(tree))
         .route("/api/units/{key}/file", get(file))
-        .route("/api/units/{key}/pull", get(pull))
+        .route("/api/units/{key}/pull", post(pull))
         .route("/api/units/{key}/bins/{bin}/{action}", post(bin_action))
         .route("/api/units/{key}/{action}", post(action))
         .route("/api/terminal", get(terminal::terminal_ws))
