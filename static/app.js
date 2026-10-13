@@ -545,6 +545,9 @@ const TS_RE = /^(\d{4}-\d\d-\d\dT[\d:.]+(?:[+-]\d{2}:?\d{2})?)\s*/;
 /// 否则长日志一半是红的就等于没有。status=[1-9] 是 systemd 的非零退出码。
 const ERR_RE = /(fail|error|fatal|panic|denied|refused|unauthorized|segmentation|core dumped|out of memory|\bOOM\b|SIGKILL|SIGSEGV|cannot|could not|status=[1-9])/i;
 
+/// 警告档：没到出错但值得看一眼的。排在错误后面判，一行只归一档
+const WARN_RE = /(warn|deprecat|timed out|timeout|retry|retrying|throttl|too many|not enabled)/i;
+
 /// 把拉到的各 bin 日志整到一块：全部模式按行首时间戳混合排序、每条标来源 bin；
 /// 单 bin 模式只看那一个。用 DOM 文本节点渲染，日志里再怪的字符也不怕被当成 HTML。
 function renderLogs(jump) {
@@ -578,7 +581,8 @@ function renderLogs(jump) {
     // 一行一个 div：整行才能做 hover 和「这行是错误」的底色，
     // 拼成一坨文本节点就只能靠字色，扫长日志很吃力
     const ln = document.createElement('div');
-    ln.className = 'ln' + (ERR_RE.test(r.text) ? ' err' : '');
+    // 一行只归一档：错误 > 警告 > 普通
+    ln.className = 'ln' + (ERR_RE.test(r.text) ? ' err' : WARN_RE.test(r.text) ? ' warn' : '');
     const tag = document.createElement('span');
     tag.className = 'src';
     tag.textContent = `[${r.src}] `;
@@ -601,18 +605,23 @@ function renderLogs(jump) {
 
 async function refresh() {
   if (document.hidden) return;   // 后台标签页不用白跑
+  // 单核机器上 /api/units 可能要一两秒，这期间界面毫无动静、看着像卡死，
+  // 给 tick 前的小点一个呼吸当进度指示（不挡操作，也不另开 loading 层）
+  document.body.classList.add('fetching');
   try {
     render(await (await req('api/units')).json());
     $('tick').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
     if ($('banner').textContent.startsWith('刷新失败')) banner('');
     await loadLogs(false);
+    // 整机资源单独一个 try：读不到（比如不是 Linux）也不该影响项目列表
+    try {
+      renderHost(await (await req('api/host')).json());
+    } catch { /* 401 已由 req() 处理 */ }
   } catch (e) {
     if (e.message !== '未登录') banner('刷新失败: ' + e.message);
+  } finally {
+    document.body.classList.remove('fetching');
   }
-  // 整机资源单独一个 try：读不到（比如不是 Linux）也不该影响项目列表
-  try {
-    renderHost(await (await req('api/host')).json());
-  } catch { /* 401 已由 req() 处理 */ }
 }
 
 $('loginForm').onsubmit = async e => {
@@ -658,7 +667,8 @@ function applyTheme() {
   const t = document.documentElement.dataset.theme || 'dark';
   const light = t === 'light';
   document.documentElement.classList.toggle('light', light);
-  $('themeBtn').textContent = light ? '主题·白天' : '主题·黑夜';
+  // 收成「图标 + 两字」：头部按钮本来就挤，「主题·白天」是这排最宽的一个
+  $('themeBtn').textContent = light ? '☀ 白天' : '☾ 黑夜';
 }
 $('themeBtn').onclick = () => {
   const next = (document.documentElement.dataset.theme || 'dark') === 'light' ? 'dark' : 'light';
@@ -940,6 +950,7 @@ function treeNodes(nodes, expanded) {
     row.className = 'node';
     row.textContent = n.name;
     if (n.dir) {
+      row.classList.add('dir');   // 目录名略粗：和文件只靠箭头区分不够，扫树时看不出层级骨架
       const tw = document.createElement('span');
       tw.className = 'tw';
       tw.textContent = expanded ? '▾' : '▸';

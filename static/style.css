@@ -61,6 +61,14 @@ h2 { font-size: var(--fs-md); margin: 0; }
 /* 成功态：同一个通道，绿字。跟 .src-msg.ok 一个路子，别为了好消息另开一个元素。 */
 .err.ok { color: var(--on); }
 #tick { color: var(--muted); font-size: var(--fs-sm); }
+/* 刷新中的小点：单核机器上拉一次列表要一两秒，没任何反馈看着像卡死。
+   点平时也占位（透明），免得一开始刷新文字就跳一格 */
+#tick::before {
+  content: ''; display: inline-block; vertical-align: middle;
+  width: 6px; height: 6px; margin-right: .45rem; border-radius: 50%;
+  background: transparent;
+}
+body.fetching #tick::before { background: var(--accent); animation: breathe 1s ease-in-out infinite; }
 
 #login { display: flex; min-height: 80vh; align-items: center; justify-content: center; }
 #loginForm {
@@ -355,6 +363,12 @@ td.name .caret:hover { color: var(--accent); }
   background: color-mix(in oklab, var(--bad) 8%, transparent);
 }
 #logBody .ln.err:hover { background: color-mix(in oklab, var(--bad) 15%, transparent); }
+/* 警告档：没到出错但值得看一眼（warn/timeout/retry…）。一行只归一档，错误优先 */
+#logBody .ln.warn {
+  color: var(--warn);
+  background: color-mix(in oklab, var(--warn) 8%, transparent);
+}
+#logBody .ln.warn:hover { background: color-mix(in oklab, var(--warn) 15%, transparent); }
 /* 空状态：一台新机器打开面板是一片空白，看着像坏了 */
 .empty {
   padding: 1.1rem; text-align: center; color: var(--muted);
@@ -519,6 +533,8 @@ td.name .caret:hover { color: var(--accent); }
 }
 #srcTree .node:hover { background: var(--line); }
 #srcTree .node.cur { background: color-mix(in oklab, var(--accent) 25%, transparent); }
+/* 目录名略粗：只靠左边那个小箭头区分，扫树时看不出层级骨架 */
+#srcTree .node.dir { font-weight: 600; }
 #srcTree .node .tw {
   display: inline-block; width: 1em; color: var(--muted);
   user-select: none;
@@ -581,6 +597,13 @@ html.light #srcBody {
   position: sticky; left: 0; background: var(--card);
 }
 #srcBody .cl code { font: inherit; color: var(--tk-fg); }
+/* 整行 hover：长文件里视线跟丢是常事。行号那格是 sticky 且自带 --card 底色，
+   会把行色盖掉，所以单独给它兑一份同色相的底，两列才连成一整条 */
+#srcBody .cl:hover { background: color-mix(in oklab, var(--tk-fg) 5%, transparent); }
+#srcBody .cl:hover::before {
+  color: var(--tk-fg);
+  background: color-mix(in oklab, var(--tk-fg) 5%, var(--card));
+}
 /* ---------- 语法高亮 ----------
    用 highlight.js(本地 vendor,编译时嵌进二进制,不走 CDN——面板可能没外网)。
    它输出的 HTML 已转义过,直接塞 innerHTML 安全。
