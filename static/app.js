@@ -181,10 +181,18 @@ let panelAnim = false;
 
 function render(list) {
   lastList = list;
+  // 整表重建会把 bin 面板的滚动位置清零（实测：设成 120，一次轮询后回到 0）。
+  // 先按项目 key 记下各面板的 scrollTop，重建后原样恢复
+  const keepScroll = new Map();
+  for (const blk of $('projList').querySelectorAll('.proj-block')) {
+    const p = blk.querySelector('.bin-panel');
+    if (p && p.scrollTop) keepScroll.set(blk.dataset.key, p.scrollTop);
+  }
   const frag = document.createDocumentFragment();
   for (const u of list) {
     const block = document.createElement('div');
     block.className = 'proj-block';
+    block.dataset.key = u.key;   // 认得回是哪个项目，滚动位置才存得回来
 
     // 项目行：一张自身的表格，行内容保留表格语义（名称/状态/时长/CPU/内存/操作）。
     // 样式类跟表头表格一致，列宽被 table-layout:fixed 钉死，多行永不错位
@@ -213,6 +221,14 @@ function render(list) {
     frag.appendChild(d);
   }
   $('projList').replaceChildren(frag);
+  if (keepScroll.size) {
+    for (const blk of $('projList').querySelectorAll('.proj-block')) {
+      const top = keepScroll.get(blk.dataset.key);
+      if (!top) continue;
+      const p = blk.querySelector('.bin-panel');
+      if (p) p.scrollTop = top;
+    }
+  }
   panelAnim = false;   // 入场动画只播一次：下一次轮询重建就不该再跳
 }
 
