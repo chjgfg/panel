@@ -194,6 +194,13 @@ function render(list) {
     }
     frag.appendChild(block);
   }
+  if (!list.length) {
+    // 新机器上打开面板是一片空白，看着像坏了：说清去哪儿加项目
+    const d = document.createElement('div');
+    d.className = 'empty';
+    d.textContent = '扫描目录里还没有项目：往 panel.toml 的 dirs 指的目录里放（或 git clone）一个子目录，刷新就有';
+    frag.appendChild(d);
+  }
   $('projList').replaceChildren(frag);
 }
 
@@ -521,6 +528,10 @@ async function loadLogs(jump) {
   } catch { /* 401 已由 req() 处理 */ }
 }
 
+/// journalctl -o short-iso 的行首时间戳：2026-08-29T09:34:09+08:00，
+/// 可能带小数秒、偏移量也可能写成 +0800，所以只锁死「日期T时间」那一段
+const TS_RE = /^(\d{4}-\d\d-\d\dT[\d:.]+(?:[+-]\d{2}:?\d{2})?)\s*/;
+
 /// 把拉到的各 bin 日志整到一块：全部模式按行首时间戳混合排序、每条标来源 bin；
 /// 单 bin 模式只看那一个。用 DOM 文本节点渲染，日志里再怪的字符也不怕被当成 HTML。
 function renderLogs(jump) {
@@ -535,21 +546,33 @@ function renderLogs(jump) {
   }
   // 拆成 (时间戳, 来源, 正文) 三元组
   const rows = [];
+  let last = '';
   for (const one of logCache) {
     for (const line of (one.log || '').split('\n')) {
       if (line.trim() === '') continue;
-      rows.push({ time: line.slice(0, 25), src: one.bin, text: line });
+      const m = TS_RE.exec(line);
+      if (m) last = m[1];
+      // 不以时间戳开头的行（panic 栈、多行输出）沿用上一条的时间：不然全部模式
+      // 按时间混排时，它们会被单独甩到最前面，和自己那条崩溃头分家
+      rows.push({ time: last, src: one.bin, text: line });
     }
   }
   const keep = filter ? rows.filter(r => r.src === filter) : rows;
   if (keep.length === 0) { p.append('(暂无日志)'); return; }
-  // 全部模式按 ISO 时间戳字符串排序（行首都带，字符串序即时间序）；单 bin 模式不用排
+  // 全部模式按 ISO 时间戳字符串排序（字符串序即时间序）；单 bin 模式保持原序不用排
   if (!filter) keep.sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
   for (const r of keep) {
     const tag = document.createElement('span');
     tag.className = 'src';
     tag.textContent = `[${r.src}] `;
-    p.append(tag, document.createTextNode(r.text + '\n'));
+    // 只有行首确实是 journalctl short-iso 时间戳才单拎出来上色；进程自己打的续行
+    // （panic 栈、多行输出）不以时间戳开头，整行照旧，不然会误染正文头一截
+    const m = TS_RE.exec(r.text);
+    if (!m) { p.append(tag, document.createTextNode(r.text + '\n')); continue; }
+    const ts = document.createElement('span');
+    ts.className = 'ts';
+    ts.textContent = m[1] + ' ';
+    p.append(tag, ts, document.createTextNode(r.text.slice(m[0].length) + '\n'));
   }
   if (jump || atBottom) p.scrollTop = p.scrollHeight;   // 首开/切筛选直接到底；轮询也跟随
 }
@@ -629,6 +652,7 @@ applyTheme();
 // termKey = 这条终端绑定的项目；null = 导航栏那个通用控制台（不 cd，落在 /root）。
 let term = null, fitAddon = null, termWs = null, termResizeHandler = null, termAuthFail = false;
 let termKey = null;
+const termEnc = new TextEncoder();   // 击键和粘贴都走它，两处共用一个编码器
 
 // 查服务器上配没配私钥，刷新底部提示（出于安全，后端不回显私钥内容）
 async function updateKeyHint() {
@@ -677,9 +701,8 @@ function ensureTerm() {
   fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);
   term.open($('termBody'));
-  const enc = new TextEncoder();
   // 击键走二进制帧；缩放走 "R cols rows" 文本帧（后端按帧类型区分）
-  term.onData(d => { if (termWs && termWs.readyState === 1) termWs.send(enc.encode(d)); });
+  term.onData(d => { if (termWs && termWs.readyState === 1) termWs.send(termEnc.encode(d)); });
   term.onResize(({ cols, rows }) => {
     if (termWs && termWs.readyState === 1) termWs.send('R ' + cols + ' ' + rows);
   });
@@ -751,6 +774,23 @@ $('console').onclick = () => openTerm();
 $('termClose').onclick = closeTerm;
 $('termCloseX').onclick = closeTerm;
 $('termReconnect').onclick = reconnectTerm;
+
+// ---------- 粘贴兜底 ----------
+// xterm 只认落进终端内部的 paste（它监听 helper textarea 和 .xterm 元素，一接手就
+// stopPropagation）。焦点不在终端上时——从别处复制完点了弹窗别的地方再 Ctrl+V、
+// 或者走右键菜单的「粘贴」——事件落在 body 上，xterm 看不见，粘贴就静默丢了。
+// 在 window 上兜一层：被 xterm 处理过的事件它自己已经 stopPropagation 拦掉，
+// 冒泡不到这一层，所以不会重复粘贴。
+window.addEventListener('paste', e => {
+  if (!term || $('termBox').hidden) return;
+  const text = e.clipboardData && e.clipboardData.getData('text/plain');
+  if (!text) return;
+  e.preventDefault();
+  term.paste(text);   // 走 xterm 的粘贴通道：认 bracketed paste，多行不会当场被执行
+});
+// Windows 习惯右键粘贴。右键不改焦点，菜单里的「粘贴」就会落到 body 上被丢掉；
+// 按下时先把焦点抓回终端，菜单粘贴才落得进终端（再走上面那条兜底）。
+$('termBody').addEventListener('contextmenu', () => { if (term) term.focus(); });
 
 // 私钥配置弹窗。私钥存服务器（不回显），所以打开时输入框留空，保存即覆盖。
 $('termKey').onclick = () => {

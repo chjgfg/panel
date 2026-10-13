@@ -170,7 +170,7 @@ button.ghost:hover:not(:disabled) {
   padding: .6rem .7rem; background: var(--card);
   border: 1px solid var(--line); border-radius: 10px;
   box-shadow: var(--shadow), var(--edge);
-  transition: border-color .15s ease;
+  transition: border-color .15s ease, transform .15s ease;
 }
 .tile b { display: block; font-weight: 400; font-size: var(--fs-xs); color: var(--muted); }
 /* 数值跟着占比色走：以前只有脚边那条 6px 的线在表达状态，六张卡长得一模一样，
@@ -310,6 +310,35 @@ td { font-variant-numeric: tabular-nums; }
 /* 系统开了「减少动效」就把过渡和呼吸全关掉 */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+
+/* ---------- 质感层第二轮：入场、按压、hover、日志层次 ---------- */
+/* 弹窗以前是硬切出现，整页东西「啪」地弹出来最像没做完；给遮罩和卡片各一段
+   极短入场（140/180ms），只淡入 + 一点点上浮，不做弹跳。
+   动画挂在元素上：遮罩靠 hidden 切 display，display 一变动画就重新跑一次。 */
+.overlay { animation: fade-in .14s ease; }
+.modal { animation: rise-in .18s ease; }
+@keyframes fade-in { from { opacity: 0; } }
+@keyframes rise-in { from { opacity: 0; transform: translateY(8px); } }
+/* bin 面板展开同样是硬切，补一段轻下滑入场（不animate高度：auto 高度测不出来） */
+.bin-panel { animation: panel-in .16s ease; }
+@keyframes panel-in { from { opacity: 0; transform: translateY(-4px); } }
+/* 按压反馈：按钮按下去要有「吃进去」的感觉，否则点起来像点在贴图上 */
+button:active:not(:disabled) { transform: translateY(1px); }
+/* 状态卡 hover：轻微抬起 + 描边偏 accent，暗示这格可以再看 */
+.tile:hover {
+  transform: translateY(-1px);
+  border-color: color-mix(in oklab, var(--accent) 32%, var(--line));
+}
+/* 展开箭头 hover 给个色，明示这是可点的 */
+td.name .caret:hover { color: var(--accent); }
+/* 日志行首时间戳单独上色：一屏等宽灰字里，「什么时候出的事」和「出了什么事」
+   本来是一回事，分开之后扫时间不用逐字读 */
+#logBody .ts { color: var(--muted); }
+/* 空状态：一台新机器打开面板是一片空白，看着像坏了 */
+.empty {
+  padding: 1.1rem; text-align: center; color: var(--muted);
+  border: 1px dashed var(--line); border-radius: 10px; background: var(--card);
 }
 
 #projList { margin-top: .4rem; }
