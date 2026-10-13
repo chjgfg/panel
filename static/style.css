@@ -197,6 +197,9 @@ button.ghost:hover:not(:disabled) {
 #app > header {
   display: flex; align-items: center; gap: .75rem; margin-bottom: .75rem;
 }
+/* 头部一条发丝竖线：左边是外链（Cloud、那本书），右边是面板自己的操作。
+   六个控件挤在一排又同权重时，看着像同一类东西 */
+.hsep { width: 1px; align-self: stretch; margin: .1rem 0; background: var(--line); }
 #oracleCloud { margin-left: auto; }
 table {
   width: 100%; border-collapse: collapse; background: var(--card);
@@ -216,6 +219,12 @@ td.name small { display: block; color: var(--muted); font-size: var(--fs-xs); }
 td.ops { white-space: nowrap; }
 td.ops button { margin-right: .4rem; vertical-align: middle; }
 td.ops button:last-child { margin-right: 0; }
+/* 操作组分隔：把「看」（展开/源码）和「动它」（拉取代码/控制台）分开。
+   给两组配不同颜色太吵，一条发丝线既分得开又保持同一档视觉重量 */
+td.ops .ops-gap {
+  display: inline-block; width: 1px; height: 1.1em; margin: 0 .45rem -.2rem;
+  vertical-align: middle; background: var(--line);
+}
 /* 项目行展开箭头 */
 td.name .caret { cursor: pointer; user-select: none; margin-right: .4rem; color: var(--muted); }
 td.name .subline { display: block; color: var(--muted); font-size: var(--fs-xs); }
@@ -248,6 +257,8 @@ td.name .subline { display: block; color: var(--muted); font-size: var(--fs-xs);
 .bin-panel {
   margin: .35rem 1.6rem 0 1.6rem;
   border: 1px solid var(--line); border-radius: 8px;
+  /* 左缘一道 accent：bin 面板和上方父行只靠 1.6rem 缩进表达从属，太弱 */
+  border-left: 2px solid color-mix(in oklab, var(--accent) 45%, var(--line));
   background: color-mix(in oklab, var(--card) 92%, transparent);
   overflow: auto; max-height: 46vh;
   /* 嵌套层不配和顶层卡片同样重的投影，否则两层被抹平；只留顶边高光 + 一档近距 */
@@ -335,6 +346,15 @@ td.name .caret:hover { color: var(--accent); }
 /* 日志行首时间戳单独上色：一屏等宽灰字里，「什么时候出的事」和「出了什么事」
    本来是一回事，分开之后扫时间不用逐字读 */
 #logBody .ts { color: var(--muted); }
+/* 每行一个块：能整行 hover、能给错误行铺底，长日志里找问题不用逐字读。
+   错误行只把正文染红，行首的 [bin] 和时间戳保持自己的颜色，归属信息不丢 */
+#logBody .ln { padding: .05rem .35rem; border-radius: 4px; }
+#logBody .ln:hover { background: color-mix(in oklab, var(--fg) 7%, transparent); }
+#logBody .ln.err {
+  color: var(--bad);
+  background: color-mix(in oklab, var(--bad) 8%, transparent);
+}
+#logBody .ln.err:hover { background: color-mix(in oklab, var(--bad) 15%, transparent); }
 /* 空状态：一台新机器打开面板是一片空白，看着像坏了 */
 .empty {
   padding: 1.1rem; text-align: center; color: var(--muted);

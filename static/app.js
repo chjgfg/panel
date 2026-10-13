@@ -165,6 +165,14 @@ function btn(ops, label, disabled, onclick, cls) {
   return b;   // 回传：点下去要临时禁用自己的按钮（如拉取代码）用得上
 }
 
+/// 操作组之间的发丝分隔：把「看」和「动它」两组按钮分开，
+/// 比给两组按钮配不同颜色克制，又不会六个按钮糊成一排。
+function opsGap(ops) {
+  const s = document.createElement('span');
+  s.className = 'ops-gap';
+  ops.appendChild(s);
+}
+
 let lastList = null;              // 最近一次拿到的项目列表，展开/折叠重绘用
 const expanded = new Set();       // 已展开（显示 bin 子行）的项目 key
 
@@ -267,6 +275,7 @@ function projectRow(u) {
     btn(ops, '源码', false, () => openSrc(u), 'chip');
   }
   // 项目级的两个快捷入口，外部 unit 和普通项目都有
+  opsGap(ops);
   const pull = btn(ops, '拉取代码', false, () => rowPull(u, pull), 'chip');
   btn(ops, '控制台', false, () => openTerm(u), 'chip');
   return tr;
@@ -532,6 +541,10 @@ async function loadLogs(jump) {
 /// 可能带小数秒、偏移量也可能写成 +0800，所以只锁死「日期T时间」那一段
 const TS_RE = /^(\d{4}-\d\d-\d\dT[\d:.]+(?:[+-]\d{2}:?\d{2})?)\s*/;
 
+/// 错误特征词：整行标红用。只挑「确实出事了」的词，不挑 warn/note 之类，
+/// 否则长日志一半是红的就等于没有。status=[1-9] 是 systemd 的非零退出码。
+const ERR_RE = /(fail|error|fatal|panic|denied|refused|unauthorized|segmentation|core dumped|out of memory|\bOOM\b|SIGKILL|SIGSEGV|cannot|could not|status=[1-9])/i;
+
 /// 把拉到的各 bin 日志整到一块：全部模式按行首时间戳混合排序、每条标来源 bin；
 /// 单 bin 模式只看那一个。用 DOM 文本节点渲染，日志里再怪的字符也不怕被当成 HTML。
 function renderLogs(jump) {
@@ -562,17 +575,26 @@ function renderLogs(jump) {
   // 全部模式按 ISO 时间戳字符串排序（字符串序即时间序）；单 bin 模式保持原序不用排
   if (!filter) keep.sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
   for (const r of keep) {
+    // 一行一个 div：整行才能做 hover 和「这行是错误」的底色，
+    // 拼成一坨文本节点就只能靠字色，扫长日志很吃力
+    const ln = document.createElement('div');
+    ln.className = 'ln' + (ERR_RE.test(r.text) ? ' err' : '');
     const tag = document.createElement('span');
     tag.className = 'src';
     tag.textContent = `[${r.src}] `;
+    ln.appendChild(tag);
     // 只有行首确实是 journalctl short-iso 时间戳才单拎出来上色；进程自己打的续行
     // （panic 栈、多行输出）不以时间戳开头，整行照旧，不然会误染正文头一截
     const m = TS_RE.exec(r.text);
-    if (!m) { p.append(tag, document.createTextNode(r.text + '\n')); continue; }
-    const ts = document.createElement('span');
-    ts.className = 'ts';
-    ts.textContent = m[1] + ' ';
-    p.append(tag, ts, document.createTextNode(r.text.slice(m[0].length) + '\n'));
+    if (m) {
+      const ts = document.createElement('span');
+      ts.className = 'ts';
+      ts.textContent = m[1] + ' ';
+      ln.append(ts, document.createTextNode(r.text.slice(m[0].length)));
+    } else {
+      ln.appendChild(document.createTextNode(r.text));
+    }
+    p.appendChild(ln);
   }
   if (jump || atBottom) p.scrollTop = p.scrollHeight;   // 首开/切筛选直接到底；轮询也跟随
 }
