@@ -321,8 +321,10 @@ td { font-variant-numeric: tabular-nums; }
 .badge.on { color: var(--on); background: color-mix(in oklab, var(--on) 14%, transparent); }
 .badge.bad { color: var(--bad); background: color-mix(in oklab, var(--bad) 14%, transparent); }
 .badge.off { color: var(--muted); background: color-mix(in oklab, var(--muted) 13%, transparent); }
-/* 在跑的那个点轻微呼吸：静止的一片里有个动的，比颜色更快被认出来 */
-.badge.on .dot { animation: breathe 2.4s ease-in-out infinite; }
+/* 状态点不做呼吸：列表每 3 秒整体 replaceChildren 重建一次 DOM，节点一换新，
+   infinite 动画就从 0% 重播 —— 几个「运行中」的点每 3 秒齐刷刷跳回满亮度，
+   比不闪还碍眼。胶囊本身有色有底，够显眼了。keyframes 留给刷新点（那个元素
+   不被重建，只有文本变，所以动画能连续跑）。 */
 @keyframes breathe { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
 /* 键盘可达：之前 Tab 到哪个按钮完全看不出来 */
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -339,8 +341,10 @@ td { font-variant-numeric: tabular-nums; }
 .modal { animation: rise-in .18s ease; }
 @keyframes fade-in { from { opacity: 0; } }
 @keyframes rise-in { from { opacity: 0; transform: translateY(8px); } }
-/* bin 面板展开同样是硬切，补一段轻下滑入场（不animate高度：auto 高度测不出来） */
-.bin-panel { animation: panel-in .16s ease; }
+/* bin 面板展开给一段轻下滑入场。动画必须挂在 .in 上、只在用户真点展开时加：
+   列表每 3 秒重建一次 DOM，写死在 .bin-panel 上的话每次轮询都重播一遍，
+   看着就是面板自己在那儿跳（不 animate 高度：auto 高度测不出来） */
+.bin-panel.in { animation: panel-in .16s ease; }
 @keyframes panel-in { from { opacity: 0; transform: translateY(-4px); } }
 /* 按压反馈：按钮按下去要有「吃进去」的感觉，否则点起来像点在贴图上 */
 button:active:not(:disabled) { transform: translateY(1px); }

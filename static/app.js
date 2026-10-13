@@ -175,6 +175,9 @@ function opsGap(ops) {
 
 let lastList = null;              // 最近一次拿到的项目列表，展开/折叠重绘用
 const expanded = new Set();       // 已展开（显示 bin 子行）的项目 key
+// 面板入场动画只在「用户自己点展开」那一次放。列表每 3 秒重建一次 DOM，
+// 动画若常驻在 .bin-panel 上，每次轮询都会重播，看着就是面板自己在跳。
+let panelAnim = false;
 
 function render(list) {
   lastList = list;
@@ -195,7 +198,7 @@ function render(list) {
     // bin 独立面板：在表格之外、项目行下方；只有展开时显示
     if (!u.external) {
       const panel = document.createElement('div');
-      panel.className = 'bin-panel';
+      panel.className = 'bin-panel' + (panelAnim ? ' in' : '');
       panel.hidden = !expanded.has(u.key);
       panel.appendChild(binPanel(u));
       block.appendChild(panel);
@@ -210,6 +213,7 @@ function render(list) {
     frag.appendChild(d);
   }
   $('projList').replaceChildren(frag);
+  panelAnim = false;   // 入场动画只播一次：下一次轮询重建就不该再跳
 }
 
 /// 项目一级的行：名称（带展开箭头）、汇总状态、资源、操作。
@@ -282,7 +286,9 @@ function projectRow(u) {
 
   // 展开/收起：切换 key 的展开态并整表重绘
   function toggleExpand() {
-    expanded.has(u.key) ? expanded.delete(u.key) : expanded.add(u.key);
+    const opening = !expanded.has(u.key);
+    if (opening) panelAnim = true;   // 只在展开那一下播入场动画，收起不播
+    opening ? expanded.add(u.key) : expanded.delete(u.key);
     if (lastList) render(lastList);
   }
 }
