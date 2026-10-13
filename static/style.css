@@ -205,9 +205,9 @@ button.ghost:hover:not(:disabled) {
 #app > header {
   display: flex; align-items: center; gap: .75rem; margin-bottom: .75rem;
 }
-/* 头部一条发丝竖线：左边是外链（Cloud、那本书），右边是面板自己的操作。
-   六个控件挤在一排又同权重时，看着像同一类东西 */
-.hsep { width: 1px; align-self: stretch; margin: .1rem 0; background: var(--line); }
+/* 发丝竖线：头部用它分开「外链」和「面板操作」，源码工具栏用它分开「浏览」和
+   「动它」。同类控件挤在一排又同权重时，看着像同一类东西 */
+.hsep, .tsep { width: 1px; flex: none; align-self: stretch; margin: .1rem 0; background: var(--line); }
 #oracleCloud { margin-left: auto; }
 table {
   width: 100%; border-collapse: collapse; background: var(--card);
@@ -271,6 +271,7 @@ td.name .subline { display: block; color: var(--muted); font-size: var(--fs-xs);
   overflow: auto; max-height: 46vh;
   /* 嵌套层不配和顶层卡片同样重的投影，否则两层被抹平；只留顶边高光 + 一档近距 */
   box-shadow: 0 1px 2px rgba(0, 0, 0, .28), var(--edge);
+  animation: panel-in .16s ease;
 }
 .bin-panel table { border: 0; border-radius: 0; }
 .bin-panel th { font-size: var(--fs-xs); }
@@ -316,6 +317,9 @@ td { font-variant-numeric: tabular-nums; }
   display: inline-flex; align-items: center; gap: .4rem;
   padding: .12rem .5rem; border-radius: 99px;
   font-size: var(--fs-sm); font-weight: 600; white-space: nowrap;
+  /* 档位是 JS 就地改 class 的（运行中↔失败↔未运行），给颜色一点过渡，
+     免得状态一变就是硬切 */
+  transition: color .25s ease, background-color .25s ease;
 }
 /* 放在 .dot.* 之后：同优先级下后者胜，胶囊里的点跟着字色走 */
 .badge .dot { margin-right: 0; background: currentColor; }
@@ -342,10 +346,10 @@ td { font-variant-numeric: tabular-nums; }
 .modal { animation: rise-in .18s ease; }
 @keyframes fade-in { from { opacity: 0; } }
 @keyframes rise-in { from { opacity: 0; transform: translateY(8px); } }
-/* bin 面板展开给一段轻下滑入场。动画必须挂在 .in 上、只在用户真点展开时加：
-   列表每 3 秒重建一次 DOM，写死在 .bin-panel 上的话每次轮询都重播一遍，
-   看着就是面板自己在那儿跳（不 animate 高度：auto 高度测不出来） */
-.bin-panel.in { animation: panel-in .16s ease; }
+/* bin 面板展开的滑出：靠 hidden 从 display:none 变可见来触发，每次「点开」播一次。
+   节点复用之后这样才安全——轮询不会重设 display，动画不会被反复重播。
+   （试过 grid 0fr→1fr 做真高度过渡：面板自己是 overflow:auto 的滚动容器，
+   它的 min-content 高度是 0，轨道撑不起来，展开后实测只剩 1.6px，故放弃。） */
 @keyframes panel-in { from { opacity: 0; transform: translateY(-4px); } }
 /* 按压反馈：按钮按下去要有「吃进去」的感觉，否则点起来像点在贴图上 */
 button:active:not(:disabled) { transform: translateY(1px); }

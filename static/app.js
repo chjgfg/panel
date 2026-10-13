@@ -162,8 +162,6 @@ function opsGap(ops) {
 
 let lastList = null;              // 最近一次拿到的项目列表，展开/折叠重绘用
 const expanded = new Set();       // 已展开（显示 bin 子行）的项目 key
-// 面板入场动画只在「用户自己点展开」那一次放
-let panelAnim = false;
 
 // 每个项目一块常驻 DOM，轮询只改文字、不换节点。
 // 以前每 3 秒 replaceChildren 整表重建，代价有三个，全都表现为「一跳一跳」：
@@ -200,13 +198,11 @@ function render(list) {
     emptyNode.textContent = '扫描目录里还没有项目：往 panel.toml 的 dirs 指的目录里放（或 git clone）一个子目录，刷新就有';
   }
   if (emptyNode) holder.appendChild(emptyNode);
-  panelAnim = false;
 }
 
-/// 展开/收起：只改展开态再走一次 render（节点复用，不会闪）
+/// 展开/收起：只改展开态再走一次 render（节点复用，高度过渡由 CSS 接手）
 function toggleExpand(key) {
   const opening = !expanded.has(key);
-  if (opening) panelAnim = true;   // 只在展开那一下播入场动画，收起不播
   opening ? expanded.add(key) : expanded.delete(key);
   if (lastList) render(lastList);
 }
@@ -323,12 +319,15 @@ function syncView(v, u) {
     v.btn.expand.textContent = open ? '收起' : '展开';
   }
   if (!v.panel) return;
-  v.panel.hidden = !open;
-  v.panel.className = 'bin-panel' + (panelAnim && open ? ' in' : '');
+  // 只在展开态真的变了时才动 hidden：重设同一个值虽不改样式，但这里谨慎为上——
+  // display 一变 CSS 动画就重播，轮询不该碰到它
+  const wantHidden = !open;
+  if (v.panel.hidden !== wantHidden) v.panel.hidden = wantHidden;
   syncBinRows(v, u);
 }
 
-/// bin 面板：一张自己的表（列 = bin/状态/时长/CPU/内存/操作），行按 bin 名复用
+/// bin 面板：一张自己的表（列 = bin/状态/时长/CPU/内存/操作），行按 bin 名复用。
+/// 折叠就是 hidden=true；节点复用之后，轮询不会反复翻这个标志，动画也不会重播
 function buildPanel(v) {
   v.panel = document.createElement('div');
   v.panel.className = 'bin-panel';
