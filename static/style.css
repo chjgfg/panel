@@ -48,6 +48,8 @@ body {
 h1 { font-size: var(--fs-lg); margin: 0; }
 h2 { font-size: var(--fs-md); margin: 0; }
 .err { color: var(--bad); margin: .5rem 0; font-size: var(--fs-sm); min-height: 1.2em; }
+/* 成功态：同一个通道，绿字。跟 .src-msg.ok 一个路子，别为了好消息另开一个元素。 */
+.err.ok { color: var(--on); }
 #tick { color: var(--muted); font-size: var(--fs-sm); }
 
 #login { display: flex; min-height: 80vh; align-items: center; justify-content: center; }

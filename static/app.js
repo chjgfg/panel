@@ -9,9 +9,11 @@ async function req(path, opts) {
   return r;
 }
 
-function banner(msg) {
+// 顶部横幅：默认报错（红），ok=true 报成功（绿）。
+function banner(msg, ok) {
   $('banner').textContent = msg || '';
   $('banner').hidden = !msg;
+  $('banner').classList.toggle('ok', !!ok);
 }
 
 // 弹窗滚动锁：模态弹窗打开时锁掉 body 滚动，否则滚轮在弹窗里滚到头之后
@@ -410,8 +412,15 @@ async function pullCode(key, show) {
 /// （拉下来的新代码可能增删了 src/bin/ 下的程序，bin 列表得跟着变）。
 function rowPull(u, b) {
   b.disabled = true;
-  pullCode(u.key, t => banner(`${u.name}: ${t}`))
-    .then(ok => { if (ok) refresh(); })
+  pullCode(u.key, (t, ok) => banner(`${u.name}: ${t}`, ok))
+    .then(ok => {
+      if (!ok) return;
+      refresh();
+      // 成功提示不像错误那样该赖着不走：几秒后自己收掉。先记下当前文案，
+      // 免得这期间冒出来的新提示（比如刷新失败）被我们误清。
+      const msg = $('banner').textContent;
+      setTimeout(() => { if ($('banner').textContent === msg) banner(''); }, 5000);
+    })
     .finally(() => { b.disabled = false; });
 }
 
