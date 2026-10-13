@@ -179,6 +179,18 @@ const expanded = new Set();       // 已展开（显示 bin 子行）的项目 k
 // 动画若常驻在 .bin-panel 上，每次轮询都会重播，看着就是面板自己在跳。
 let panelAnim = false;
 
+// 鼠标正压着哪一行（按 rowKey 记，不记节点：节点每 3 秒就被换掉）。
+// 浏览器在节点被替换后不会把 :hover 补给新节点，要等鼠标真的动一下才恢复，
+// 于是手停在那行上时，每 3 秒就失去一次 hover 高亮——看着就是「一跳一跳」。
+// 这里自己记账，重建完把 .hov 补回给同一行，样式跟 :hover 那条完全一致。
+let hovRow = null;
+
+/// 每行一个稳定标识：项目行用 key，bin 行用 key + bin 名
+function rowKey(tr, key) {
+  tr.dataset.rowKey = key;
+  return tr;
+}
+
 function render(list) {
   lastList = list;
   // 整表重建会把 bin 面板的滚动位置清零（实测：设成 120，一次轮询后回到 0）。
@@ -230,7 +242,21 @@ function render(list) {
     }
   }
   panelAnim = false;   // 入场动画只播一次：下一次轮询重建就不该再跳
+  // 节点是新建的，浏览器不会把 :hover 补给它（要等鼠标真的动）。把高亮手动补回
+  if (hovRow) {
+    for (const tr of $('projList').querySelectorAll('tr')) {
+      if (tr.dataset.rowKey === hovRow) tr.classList.add('hov');
+    }
+  }
 }
+
+// 记鼠标压在列表的哪一行上。mouseover 会冒泡，换行、移到空隙都能收到；
+// 整块离开列表时 mouseleave 清掉，避免移走后还留着一行高亮。
+$('projList').addEventListener('mouseover', e => {
+  const tr = e.target.closest('tr');
+  hovRow = tr && tr.dataset.rowKey ? tr.dataset.rowKey : null;
+});
+$('projList').addEventListener('mouseleave', () => { hovRow = null; });
 
 /// 项目一级的行：名称（带展开箭头）、汇总状态、资源、操作。
 /// 停止/重启/日志在下方独立的 bin 面板里，不在项目行放，避免「点到项目还是点到 bin」混淆；
@@ -239,7 +265,7 @@ function projectRow(u) {
   const running = u.active === 'active';
   const outside = u.outside_pid != null;
   const alive = running || outside;
-  const tr = document.createElement('tr');
+  const tr = rowKey(document.createElement('tr'), u.key + '#p');
 
   const name = cell(tr, '');
   name.className = 'name';
@@ -342,7 +368,7 @@ function binPanel(u) {
 
 /// bin 行：显示该 bin 自己的状态/资源，操作只动这一个 bin
 function binRow(u, inst) {
-  const tr = document.createElement('tr');
+  const tr = rowKey(document.createElement('tr'), u.key + '#' + inst.bin);
 
   const name = cell(tr, '');
   name.className = 'name';
