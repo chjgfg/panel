@@ -11,6 +11,11 @@
   /* 按钮语义色：绿=启动/运行，红=停止/危险，黄=重启/谨慎。亮度和 accent
      同档，深色下不用提亮也能和背景拉开对比。 */
   --go: #3fb950; --danger: #f85149; --caution: #e3b341;
+  /* 字号只有这五档，别处不许再冒出新数字。原来散着 .68/.72/.75/.78/.8/.82/.85/
+     .9/.92/.95/1/1.15/1.25/1.4 十四档，同屏并排看就是一会儿小一会儿大。
+     xs 12 表头·副行·标签 | sm 13 按钮·输入·提示 | md 14 正文
+     | lg 16 标题 | xl 20 tile 大数字。root 字号是浏览器默认 16px，rem 按它算。 */
+  --fs-xs: .75rem; --fs-sm: .8125rem; --fs-md: .875rem; --fs-lg: 1rem; --fs-xl: 1.25rem;
 }
 /* 浅色变量组，和下面媒体查询里的定义保持一致 */
 html.light {
@@ -36,12 +41,14 @@ html.light {
 [hidden] { display: none !important; }
 body {
   margin: 0; padding: 1rem; background: var(--bg); color: var(--fg);
-  font: 15px/1.5 system-ui, "Microsoft YaHei", sans-serif;
+  /* 不用 font 简写：简写里塞 var() 要靠替换后才解析，拆成三条长写更稳 */
+  font-family: system-ui, "Microsoft YaHei", sans-serif;
+  font-size: var(--fs-md); line-height: 1.5;
 }
-h1 { font-size: 1.15rem; margin: 0; }
-h2 { font-size: .95rem; margin: 0; }
-.err { color: var(--bad); margin: .5rem 0; font-size: .85rem; min-height: 1.2em; }
-#tick { color: var(--muted); font-size: .8rem; }
+h1 { font-size: var(--fs-lg); margin: 0; }
+h2 { font-size: var(--fs-md); margin: 0; }
+.err { color: var(--bad); margin: .5rem 0; font-size: var(--fs-sm); min-height: 1.2em; }
+#tick { color: var(--muted); font-size: var(--fs-sm); }
 
 #login { display: flex; min-height: 80vh; align-items: center; justify-content: center; }
 #loginForm {
@@ -64,14 +71,16 @@ input, select {
      透明色叠在不同背景上会发灰发闷，实底在任何位置观感都一致
    - .go / .stop / .restart：同 chip 的实底构造但兑语义色——绿启动、红停止、黄重启
    - .ghost：无边框的安静文字钮，hover 才给一层浅底，外链和退出用 */
+/* 按钮字比正文小一档、内边距跟着收：它是操作件不是内容，原来吃 body 的 15px
+   还配 .8rem 横向 padding，跟旁边 12px 的表头一比就显粗大。 */
 button {
-  padding: .38rem .8rem; background: var(--accent); color: #fff;
+  padding: .3rem .68rem; background: var(--accent); color: #fff;
   border-color: transparent; cursor: pointer;
-  font-weight: 500;
+  font-size: var(--fs-sm); font-weight: 500;
   transition: background-color .15s, border-color .15s, color .15s, opacity .15s;
 }
 button:hover:not(:disabled) { filter: brightness(1.1); }
-#loginForm button { width: 100%; margin-top: .75rem; padding: .55rem; }
+#loginForm button { width: 100%; margin-top: .75rem; padding: .55rem; font-size: var(--fs-md); }
 button:disabled { opacity: .35; cursor: not-allowed; }
 
 /* 中性软按钮：实底比 card 亮一档，正文色文字。常规动作的默认档 */
@@ -148,13 +157,13 @@ button.ghost:hover:not(:disabled) {
   padding: .6rem .7rem; background: var(--card);
   border: 1px solid var(--line); border-radius: 10px;
 }
-.tile b { display: block; font-weight: 400; font-size: .78rem; color: var(--muted); }
+.tile b { display: block; font-weight: 400; font-size: var(--fs-xs); color: var(--muted); }
 /* 数值每 3 秒重绘一次，用等宽数字免得位数变化时左右抖动 */
 .tile strong {
-  display: block; margin: .15rem 0 .25rem; font-size: 1.25rem; font-weight: 600;
+  display: block; margin: .15rem 0 .25rem; font-size: var(--fs-xl); font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
-.tile small { color: var(--muted); font-size: .75rem; }
+.tile small { color: var(--muted); font-size: var(--fs-xs); }
 /* 轨道取填充色的浅一档（同色相），这样整条都在表达状态，而不是一半灰一半彩 */
 .meter {
   height: 6px; margin-top: .45rem; border-radius: 3px; overflow: hidden;
@@ -171,12 +180,12 @@ table {
   border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
 }
 th, td { padding: .6rem .7rem; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; vertical-align: middle; }
-th { font-size: .78rem; color: var(--muted); }
+th { font-size: var(--fs-xs); color: var(--muted); }
 tbody tr:last-child td { border-bottom: 0; }
 tr.busy { opacity: .5; }
 tbody tr { vertical-align: middle; }
 td.name { white-space: normal; }
-td.name small { display: block; color: var(--muted); font-size: .75rem; }
+td.name small { display: block; color: var(--muted); font-size: var(--fs-xs); }
 /* 操作按钮组不用 flex：flex 容器会让这个单元格走自己的垂直对齐通道，
    和同行的普通文字单元格中线对不齐，按钮就上下飘。
    改回行内元素 + vertical-align:middle，按钮和本行文字统一按中线对齐。 */
@@ -185,7 +194,7 @@ td.ops button { margin-right: .4rem; vertical-align: middle; }
 td.ops button:last-child { margin-right: 0; }
 /* 项目行展开箭头 */
 td.name .caret { cursor: pointer; user-select: none; margin-right: .4rem; color: var(--muted); }
-td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
+td.name .subline { display: block; color: var(--muted); font-size: var(--fs-xs); }
 /* 项目块：每个项目 = 一张项目行表（放表格里）+ 下方表格外的 bin 独立面板 */
 #projList { display: flex; flex-direction: column; gap: .4rem; margin-top: .4rem; }
 .proj-block > table { margin: 0; }
@@ -219,7 +228,7 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
   overflow: auto; max-height: 46vh;
 }
 .bin-panel table { border: 0; border-radius: 0; }
-.bin-panel th { font-size: .72rem; }
+.bin-panel th { font-size: var(--fs-xs); }
 .bin-panel td { padding: .4rem .7rem; }
 /* 按钮不另立更小的一档：面板里所有按钮同一规格，父行和 bin 行只差在行的疏密上。
    原来这里压成 .25rem/.8rem，跟上方父行的按钮并排看就像缩了一号、点着也费劲。 */
@@ -251,10 +260,10 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
   display: flex; align-items: center; gap: .75rem;
   padding: .9rem 1rem; border-bottom: 1px solid var(--line);
 }
-.modal-head h2 { margin: 0; font-size: 1rem; }
+.modal-head h2 { margin: 0; font-size: var(--fs-lg); }
 .modal-head .close-x {
   margin-left: auto; background: transparent; color: var(--muted);
-  border: 0; font-size: 1.4rem; line-height: 1; padding: .2rem .5rem;
+  border: 0; font-size: var(--fs-xl); line-height: 1; padding: .2rem .5rem;
   cursor: pointer;
 }
 .modal-head .close-x:hover { color: var(--fg); }
@@ -265,7 +274,7 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
 }
 /* 确认弹窗：比运行弹窗窄一点，提示文案略大 */
 .modal-sm { width: min(420px, 94vw); }
-.confirm-msg { margin: 0; font-size: .92rem; line-height: 1.6; color: var(--fg); }
+.confirm-msg { margin: 0; font-size: var(--fs-md); line-height: 1.6; color: var(--fg); }
 /* 确定按钮用主色调（默认 button 已是 accent 蓝，这里显式声明语义一致）。
    停止/重启的确认按钮换对应语义色实心，让「我在确认什么」在按钮上就有预告 */
 .modal-foot button.primary { background: var(--accent); color: #fff; border-color: transparent; }
@@ -275,8 +284,8 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
 .modal-foot button.go-solid { background: var(--go); color: #fff; border-color: transparent; }
 /* 运行弹窗内容（单 bin）：bin 名 + 参数文本域，原样透传 */
 .run-single { display: flex; flex-direction: column; gap: .5rem; }
-.run-bin-name { font-size: .95rem; color: var(--fg); font-weight: 600; }
-.run-single textarea.arg { width: 100%; resize: vertical; padding: .5rem .6rem; font-size: .85rem; font-family: inherit; line-height: 1.4; min-height: 6rem; }
+.run-bin-name { font-size: var(--fs-md); color: var(--fg); font-weight: 600; }
+.run-single textarea.arg { width: 100%; resize: vertical; padding: .5rem .6rem; font-size: var(--fs-sm); font-family: inherit; line-height: 1.4; min-height: 6rem; }
 #runErr { margin: .5rem 0 0; }
 /* 日志弹窗：几乎占满可视区，长尾日志无需频繁横滚也能尽量整行显示；
    高度覆盖 .modal 的 84vh 上限并自行定高，靠 flex 把高度让给日志区 */
@@ -285,8 +294,8 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
   height: 90vh;
   max-height: none;
 }
-.modal-head .log-src { display: inline-flex; align-items: center; gap: .4rem; color: var(--muted); font-size: .85rem; }
-.modal-head .log-src select { padding: .3rem .5rem; font-size: .85rem; }
+.modal-head .log-src { display: inline-flex; align-items: center; gap: .4rem; color: var(--muted); font-size: var(--fs-sm); }
+.modal-head .log-src select { padding: .3rem .5rem; font-size: var(--fs-sm); }
 /* 网页控制台弹窗：比日志窄一些、居中，终端区自己占满剩余高度 */
 .modal-term {
   width: min(1040px, 94vw);
@@ -297,7 +306,7 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
 .modal-term .modal-head h2 { display: flex; align-items: center; gap: .5rem; }
 .term-target {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: .9rem; font-weight: 600; color: var(--accent);
+  font-size: var(--fs-md); font-weight: 600; color: var(--accent);
 }
 /* 连接状态小圆点：灰=未连/断开，绿=已连上 */
 .term-dot {
@@ -326,7 +335,7 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
 }
 #termBody .xterm-viewport { scrollbar-width: thin; scrollbar-color: #2b313c #0b0e14; }
 /* 私钥提示（在控制台弹窗底部靠左），已配/未配一目了然 */
-.term-key-hint { margin-right: auto; font-size: .82rem; color: var(--muted); }
+.term-key-hint { margin-right: auto; font-size: var(--fs-sm); color: var(--muted); }
 .term-key-hint::before {
   content: ''; display: inline-block; vertical-align: middle;
   width: 7px; height: 7px; margin-right: .4rem; border-radius: 50%;
@@ -339,7 +348,7 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
   width: 100%; box-sizing: border-box; resize: vertical;
   min-height: 12rem; padding: .5rem .6rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: .8rem; line-height: 1.4;
+  font-size: var(--fs-sm); line-height: 1.4;
 }
 /* 每条日志标来源 bin，用不同于正文的 muted 色，一眼分清归属 */
 #logBody .src { color: var(--accent); font-weight: 600; }
@@ -362,7 +371,7 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
   width: 260px; flex-shrink: 0; overflow: auto;
   padding: .6rem .3rem;
   border-right: 1px solid var(--line);
-  font-size: .85rem;
+  font-size: var(--fs-sm);
   /* 树要自己滚，不能跟着右边代码一起滚 */
 }
 /* 拖拽调宽条：夹在树和代码之间的一条窄竖条，hover 高亮提示可拖 */
@@ -399,14 +408,14 @@ td.name .subline { display: block; color: var(--muted); font-size: .75rem; }
 }
 .src-toolbar .src-path {
   flex: 1; min-width: 0;
-  font-family: ui-monospace, Consolas, monospace; font-size: .8rem;
+  font-family: ui-monospace, Consolas, monospace; font-size: var(--fs-sm);
   color: var(--muted);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .src-toolbar button { flex-shrink: 0; }
 /* pull/复制 的结果提示条，成功绿色失败红色，几秒后自动淡出 */
 .src-msg {
-  padding: .35rem .8rem; font-size: .8rem;
+  padding: .35rem .8rem; font-size: var(--fs-sm);
   border-bottom: 1px solid var(--line);
 }
 .src-msg.ok { color: var(--on); }
@@ -469,7 +478,7 @@ html.light #srcBody {
 #srcBody .hljs-strong { font-weight: 700; }
 /* 语言徽标:用各语言的社区品牌色,文件还没读就知道是个什么文件 */
 .lang-tag {
-  flex-shrink: 0; font-size: .68rem; font-weight: 700; letter-spacing: .03em;
+  flex-shrink: 0; font-size: var(--fs-xs); font-weight: 700; letter-spacing: .03em;
   padding: .1rem .55rem; border-radius: 99px; text-transform: uppercase;
 }
 /* 手机上树放不下 260px,收窄一点 */
@@ -478,7 +487,7 @@ html.light #srcBody {
 }
 @media (max-width: 640px) {
   body { padding: .6rem; }
-  th, td { padding: .5rem .45rem; font-size: .85rem; }
+  th, td { padding: .5rem .45rem; font-size: var(--fs-sm); }
   th:nth-child(4), td:nth-child(4) { display: none; }
   td.ops button { white-space: normal; }   /* 手机上让按钮可换行，避免顶出横向滚动条 */
 }
