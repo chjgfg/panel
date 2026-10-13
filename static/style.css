@@ -422,13 +422,17 @@ td.name .caret:hover { color: var(--accent); }
 /* xterm 终端容器：深色但不纯黑，和面板协调；内边距 + 圆角让它像个卡片 */
 #termBody {
   flex: 1; min-height: 0;
-  margin: .75rem; padding: .55rem .7rem;
+  margin: .75rem; padding: 0;
   background: #0b0e14;
   border: 1px solid var(--line);
   border-radius: 10px;
   overflow: hidden;
 }
-#termBody .xterm { height: 100%; }
+/* padding 必须挂在 .xterm 上而不是 #termBody 上：FitAddon 算行数是拿
+   「#termBody 的 border-box 高」减「.xterm 自己的 padding」，容器上的 padding 它
+   根本不扣。挂在 #termBody 上就会多算约一行，最后一行被上面的 overflow:hidden
+   切掉一半（实测 18 行 ×16.78 = 302px > 可用 297.5px）。挪到 .xterm 上它才减得掉。 */
+#termBody .xterm { height: 100%; padding: .55rem .7rem; }
 /* xterm 自带滚动条细一点，别抢眼 */
 #termBody .xterm-viewport::-webkit-scrollbar { width: 10px; }
 #termBody .xterm-viewport::-webkit-scrollbar-thumb {

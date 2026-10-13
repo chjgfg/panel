@@ -706,6 +706,17 @@ function ensureTerm() {
   term.onResize(({ cols, rows }) => {
     if (termWs && termWs.readyState === 1) termWs.send('R ' + cols + ' ' + rows);
   });
+  // Ctrl+V 在 xterm 里会被当成控制字符直接送给 shell（屏幕上就是一串 ^V），粘贴反而
+  // 丢了；有选区时 Ctrl/Cmd+C 也该走浏览器复制，而不是发 SIGINT。
+  // 自定义键处理器返回 false = 让 xterm 完全不碰这个键，交给浏览器原生 paste/copy，
+  // 之后由 xterm 自己的 paste/copy 监听（或下面 window 上的兜底）把内容送进终端。
+  term.attachCustomKeyEventHandler(e => {
+    if (e.type !== 'keydown' || e.altKey) return true;
+    const mod = e.ctrlKey || e.metaKey;
+    if (mod && e.code === 'KeyV') return false;
+    if (mod && e.code === 'KeyC' && term.hasSelection()) return false;
+    return true;
+  });
 }
 
 function fitTerm() {
@@ -714,6 +725,9 @@ function fitTerm() {
 
 function connectTerm() {
   termAuthFail = false;
+  // 每条新连接都是一个全新的远端 shell，屏幕上留着的旧会话内容已经是历史了。
+  // 不清的话新提示符直接接在旧提示符后面，切几个项目就攒出一长串路径
+  if (term) term.reset();
   const ws = new WebSocket(termUrl());
   ws.binaryType = 'arraybuffer';
   termWs = ws;
@@ -765,8 +779,7 @@ function closeTerm() {
 
 function reconnectTerm() {
   if (termWs) { try { termWs.close(); } catch {} termWs = null; }
-  if (term) term.reset();
-  requestAnimationFrame(() => { fitTerm(); connectTerm(); });
+  requestAnimationFrame(() => { fitTerm(); connectTerm(); });   // 清屏统一在 connectTerm 里做
 }
 
 // 导航栏那个是通用控制台：不绑项目。必须包一层，别把点击事件当成项目传进去
