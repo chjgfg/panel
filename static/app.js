@@ -86,7 +86,8 @@ function showLogin(why) {
 function showApp() {
   $('login').hidden = true;
   $('app').hidden = false;
-  showSkeleton();
+  // 骨架不立刻摆：先给真数据 250ms 的机会，快的时候不该让人看见灰条
+  armSkeleton();
   refresh();
   loadVersion();
   timer ||= setInterval(refresh, POLL);
@@ -134,6 +135,7 @@ const tileViews = new Map();
 // 而这张卡恰恰是最该看趋势的。@ 前缀是防重名：目录名完全可以就叫 cpu
 const hostHist = new Map();
 let lastHostSample = 0;
+let hostBooted = false;   // 整机数据到手过没有（首屏占位卡该让位时用一次）
 
 function hostSample(id, v) {
   let a = hostHist.get(id);
@@ -164,6 +166,8 @@ function tileView(id) {
 }
 
 function renderHost(h) {
+  // 首屏那几张占位卡在这里让位给真卡（为什么不在 render() 里一起清，见 dropStatSkeleton）
+  if (!hostBooted) { hostBooted = true; dropStatSkeleton(); }
   const want = [];
   const put = (id, label, value, sub, p) => want.push({ id, label, value, sub, p });
   put('cpu', 'CPU', h.cpu == null ? '—' : h.cpu.toFixed(1) + '%', `${h.cores} 核`, h.cpu);
@@ -427,23 +431,95 @@ $('fltState').onchange = onFilterChange;
 $('sortBy').onchange = onFilterChange;
 
 let booted = false;   // 第一批数据到手没有（首屏骨架行用）
+let skTimer = 0;
 
-/// 第一次拉列表在单核机器上要一两秒，这期间页面只有右上角一个小点在呼吸，
-/// 看着像没加载出来。先垫三行灰条占住位置，数据一到整片换掉。
+/// 首屏占位。三处讲究，都是上一版被「加载的一瞬间不好看」打回来的账：
+/// ① 延迟 250ms 才出现 —— 局域网里常常一百毫秒就回来了，那种情况下闪一下灰条
+///    比什么都不闪更难看，所以「快」的时候根本不该让它露面；
+/// ② 灰条长在真的那张表里（.proj-block > table.stack-table），六列宽由
+///    table-layout:fixed 那套说了算，数据到手换成真行时不会横向跳；
+/// ③ 行数照上次看到的真行数（listCount 存 localStorage），不会从三行突然变七行。
+function armSkeleton() {
+  clearTimeout(skTimer);
+  skTimer = setTimeout(showSkeleton, 250);
+}
+
+function clearSkeleton() {
+  clearTimeout(skTimer);
+  $('projList').replaceChildren();
+}
+
+/// 占位卡单独一路清：列表先到、整机数据后到（中间还夹一次日志请求），
+/// 跟着真行一起清会让那一块空一下，反而更明显
+function dropStatSkeleton() {
+  document.querySelectorAll('#stats .sk-tile').forEach(e => e.remove());
+}
+
 function showSkeleton() {
   if (booted) return;
   const holder = $('projList');
   holder.replaceChildren();
-  for (let i = 0; i < 3; i++) {
-    const row = document.createElement('div');
-    row.className = 'sk';
-    // 六根灰条按真列宽（24/15/13/7/10/31）摆，数据一到换成真行时位置不跳
-    for (const w of ['24%', '15%', '13%', '7%', '10%', '31%']) {
+  const n = Math.max(3, Math.min(8, +(localStorage.getItem('listRows') || 0) || 5));
+  const block = document.createElement('div');
+  block.className = 'proj-block';
+  block.setAttribute('aria-hidden', 'true');
+  const tbl = document.createElement('table');
+  tbl.className = 'stack-table sk';
+  const tb = document.createElement('tbody');
+  tbl.appendChild(tb);
+  block.appendChild(tbl);
+  for (let r = 0; r < n; r++) {
+    const tr = document.createElement('tr');
+    // 第一格两行，照真行的「项目名 + 副行」；其余五格一行
+    const name = document.createElement('td');
+    name.className = 'name';
+    const l1 = document.createElement('span');
+    const l2 = document.createElement('span');
+    l1.className = 'l1';
+    l2.className = 'l2';
+    const b1 = document.createElement('i');
+    const b2 = document.createElement('i');
+    b1.style.width = '58%';
+    b2.style.width = '34%';
+    l1.appendChild(b1);
+    l2.appendChild(b2);
+    name.append(l1, l2);
+    tr.appendChild(name);
+    for (const w of ['62%', '44%', '30%', '38%', '72%']) {
+      const td = document.createElement('td');
       const bar = document.createElement('i');
       bar.style.width = w;
-      row.appendChild(bar);
+      td.appendChild(bar);
+      tr.appendChild(td);
     }
-    holder.appendChild(row);
+    tb.appendChild(tr);
+  }
+  holder.appendChild(block);
+  statsSkeleton();
+}
+
+/// 上面那排状态卡也还是空的 —— 整块空洞比灰条扎眼，先垫同规格的占位卡。
+/// 结构照真卡（b / strong / small / meter），高度自然对得上，不用写死数字。
+function statsSkeleton() {
+  const stats = $('stats');
+  if (stats.childElementCount) return;
+  for (let i = 0; i < 6; i++) {
+    const t = document.createElement('div');
+    t.className = 'tile sk-tile';
+    t.setAttribute('aria-hidden', 'true');
+    const lab = document.createElement('b');
+    const val = document.createElement('strong');
+    const sub = document.createElement('small');
+    const meter = document.createElement('div');
+    meter.className = 'meter';
+    const lb = document.createElement('i');
+    const vb = document.createElement('i');
+    const sb = document.createElement('i');
+    lab.appendChild(lb);
+    val.appendChild(vb);
+    sub.appendChild(sb);
+    t.append(lab, val, sub, meter);
+    stats.appendChild(t);
   }
 }
 
@@ -453,7 +529,9 @@ function render(list) {
   const shown = visible(list);
   const holder = $('projList');
   // 首屏：把骨架行清掉再放真行。此刻 views 还是空的，清空不会误删真节点
-  if (!booted) { booted = true; holder.replaceChildren(); }
+  if (!booted) { booted = true; clearSkeleton(); }
+  // 记下项目总数，下次首屏的骨架行就垫这么多行（筛选后剩几个不算）
+  localStorage.setItem('listRows', list.length);
   $('listCount').textContent = shown.length === list.length
     ? `${list.length} 个项目`
     : `显示 ${shown.length} / 共 ${list.length}`;
@@ -1076,7 +1154,8 @@ async function refresh() {
   } catch (e) {
     if (e.message !== '未登录') banner('刷新失败: ' + e.message);
     // 第一次就没拉回来：别让骨架行一直闪，闪着的灰条比空白更像卡住了
-    if (!booted) $('projList').replaceChildren();
+    // 第一次就没拉回来：骨架行和占位卡都收掉，留着不动比空白更像卡死了
+    if (!booted) { clearSkeleton(); dropStatSkeleton(); }
   } finally {
     document.body.classList.remove('fetching');
   }

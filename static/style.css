@@ -550,20 +550,32 @@ td.name .caret:hover { color: var(--accent); }
   padding: 1.1rem; text-align: center; color: var(--muted);
   border: 1px dashed var(--line); border-radius: 10px; background: var(--card);
 }
-/* 首屏骨架：第一次 /api/units 在单核机器上要一两秒，这期间整页是空的，
-   只有右上角一个小点在呼吸 —— 给三行灰条占住位置，「在加载」这件事一眼看得见。
-   外观照抄项目行那张表（同边框同圆角同内边距），数据回来换成真行时不跳版 */
-.sk {
-  display: flex; align-items: center; gap: .75rem;
-  padding: .6rem .7rem; background: var(--card);
-  border: 1px solid var(--line); border-radius: 10px;
-}
+/* 首屏骨架。外观照抄真表：灰条长在 .proj-block > table.stack-table 里，六列宽
+   由 table-layout:fixed 那套说了算，数据到手换成真行时横不跳；第一格做两行，
+   照真行的「项目名 + 副行」（两行的行高框 22.4/18 也照抄，真行实测 57.2 高）。
+   静止、不闪 —— 加载指示已经有右上角那个呼吸点，灰条自己再眨一次就成了满屏乱跳。
+   出现时机在 JS 里延迟 250ms：快的时候压根不该让人看见它 */
 .sk i {
-  display: block; height: .75rem; border-radius: 4px;
-  background: color-mix(in oklab, var(--muted) 22%, transparent);
-  animation: sk-shimmer 1.1s ease-in-out infinite;
+  display: block; height: .8rem; border-radius: 4px;
+  background: color-mix(in oklab, var(--muted) 20%, transparent);
 }
-@keyframes sk-shimmer { 0%, 100% { opacity: .45; } 50% { opacity: 1; } }
+.sk .l1 { display: flex; align-items: center; height: 1.4rem; }
+.sk .l2 { display: flex; align-items: center; height: 1.125rem; }
+.sk .l2 i { height: .65rem; }
+.sk td { cursor: default; }
+/* 占位卡：结构和真卡一样（b/strong/small/meter），但空元素的行高盒是 0 ——
+   实测不钉高度的话占位卡只有 42 高、真卡 93.2，数据一到整排往下顶。
+   18/24/18 是拿真卡逐格量出来的（b 18、strong 24 + 上下 margin、small 18） */
+.sk-tile b, .sk-tile strong, .sk-tile small {
+  display: flex; align-items: center;
+}
+.sk-tile b { min-height: 1.125rem; }
+.sk-tile b i { height: .6rem; width: 38%; }
+.sk-tile strong { min-height: 1.5rem; }
+.sk-tile strong i { height: 1.1rem; width: 46%; }
+.sk-tile small { min-height: 1.125rem; }
+.sk-tile small i { height: .65rem; width: 62%; }
+.sk-tile { cursor: default; }
 
 #projList { margin-top: .4rem; }
 /* 运行弹窗：模态遮罩 + 居中卡片，遮罩不拦截点击（点击遮罩不关闭弹窗）。
