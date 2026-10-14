@@ -696,6 +696,8 @@ td.name .caret:hover { color: var(--accent); }
   white-space: pre;
 }
 /* 源码弹窗：左右分栏。左边目录树窄一些（大项目树会很深），右边占大头看代码 */
+/* 标题里的徽标和文字按中线排（h2 默认基线对齐，inline-flex 的徽标会往下坠） */
+#srcBox .modal-head h2 { display: flex; align-items: center; gap: .45rem; }
 .src-layout {
   flex: 1; min-height: 0;
   display: flex;
@@ -726,22 +728,32 @@ td.name .caret:hover { color: var(--accent); }
   border: 0; padding: .15rem .4rem; border-radius: 4px;
   cursor: pointer; font: inherit;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  transition: background-color .12s ease, color .12s ease;
 }
-#srcTree .node:hover { background: var(--line); }
-#srcTree .node.cur { background: color-mix(in oklab, var(--accent) 25%, transparent); }
+/* hover 用正文色兑出来，不用 --line 那种实色块：整页的 hover 都是同一套语言 */
+#srcTree .node:hover { background: color-mix(in oklab, var(--fg) 6%, transparent); }
+/* 选中项：淡底 + 字转 accent + 左缘一道 accent 条。原来只有一块 25% 的蓝底，
+   白天看像被划了道荧光笔，字却还是黑的，「哪一个是当前文件」反而要再看一眼 */
+#srcTree .node.cur {
+  color: var(--accent); font-weight: 600;
+  background: color-mix(in oklab, var(--accent) 13%, var(--code-bg, var(--card)));
+  box-shadow: inset 2px 0 0 var(--accent);
+}
 /* 目录名略粗：只靠左边那个小箭头区分，扫树时看不出层级骨架 */
 #srcTree .node.dir { font-weight: 600; }
 #srcTree .node .tw {
   display: inline-block; width: 1em; color: var(--muted);
   user-select: none;
 }
-#srcTree .kids { margin-left: 1.5rem; border-left: 1px solid var(--line); padding-left: .25rem; }
+#srcTree .kids { margin-left: 1.5rem; border-left: 1px solid var(--hairline); padding-left: .25rem; }
 /* 顶层容器就是整棵树的根,不吃缩进 */
 #srcTree > .kids { margin-left: 0; border-left: 0; padding-left: 0; }
 .src-right { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .src-toolbar {
   display: flex; align-items: center; gap: .6rem;
-  padding: .5rem .8rem; border-bottom: 1px solid var(--line);
+  padding: .5rem .8rem; border-bottom: 1px solid var(--hairline);
+  /* 工具栏压一档底色：它和代码区原来都是弹窗那张白，两行挤在一起分不清谁是谁 */
+  background: color-mix(in oklab, var(--fg) 3%, var(--card));
 }
 .src-toolbar .src-path {
   flex: 1; min-width: 0;
@@ -749,6 +761,9 @@ td.name .caret:hover { color: var(--accent); }
   color: var(--muted);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+/* 路径当面包屑读：目录那一长串保持灰，文件名提正文色加粗 —— 最该看清的
+   那个词原来反而最淡 */
+.src-toolbar .src-path .file { color: var(--fg); font-weight: 600; }
 .src-toolbar button { flex-shrink: 0; }
 /* pull/复制 的结果提示条，成功绿色失败红色，几秒后自动淡出 */
 .src-msg {
@@ -759,20 +774,27 @@ td.name .caret:hover { color: var(--accent); }
 .src-msg.bad { color: var(--bad); }
 #srcBody {
   flex: 1; min-height: 0; overflow: auto; margin: 0; padding: .65rem 0;
-  font: 12.5px/1.6 ui-monospace, Consolas, monospace;
+  /* 不用 font 简写：简写里塞 var() 要靠替换后才解析，拆成长写更稳（同 body 那条） */
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: var(--fs-sm); line-height: 1.65;
   tab-size: 4;
   /* 源码可以折行吗?不折,一行 import 就能看出层次。太长横向滚动看 */
   white-space: pre;
   counter-reset: ln;
+  /* 代码区自己一档底色：往页面底色沉一点（实测和弹窗面差 1.06~1.07 亮度比，
+     再小就看不出来、再大就成两块补丁），行号槽在这之上再沉一档 */
+  --code-bg: color-mix(in oklab, var(--bg) 72%, var(--card));
+  --gutter-bg: color-mix(in oklab, var(--bg) 55%, var(--code-bg));
+  background: var(--code-bg);
   /* 行号与 token 调色板。深浅两套在 html.light 里整体换,语义到颜色的映射不变:
      行号=灰,关键字=紫,函数=蓝,字符串=绿,数字=橙,类型=青,属性=琥珀,语言内建变量=红 */
-  --ln: #3d4466;
+  --ln: #616c9e;
   --tk-fg: #a9b1d6; --tk-kw: #bb9af7; --tk-fn: #7aa2f7; --tk-str: #9ece6a;
   --tk-num: #ff9e64; --tk-com: #565f89; --tk-type: #2ac3de; --tk-attr: #e0af68;
   --tk-var: #f7768e;
 }
 html.light #srcBody {
-  --ln: #a0a8b8;
+  --ln: #7c869b;
   --tk-fg: #2a2f3a; --tk-kw: #8250df; --tk-fn: #0550ae; --tk-str: #0a7d3f;
   --tk-num: #b3541e; --tk-com: #6e7781; --tk-type: #0f7ea8; --tk-attr: #954f0e;
   --tk-var: #cf222e;
@@ -789,16 +811,17 @@ html.light #srcBody {
   flex: none; width: var(--ln-w, 3ch);
   padding-right: .75rem; margin-right: 1.1rem;
   text-align: right; color: var(--ln); user-select: none;
-  border-right: 1px solid var(--line);
-  position: sticky; left: 0; background: var(--card);
+  border-right: 1px solid var(--hairline);
+  position: sticky; left: 0; background: var(--gutter-bg);
 }
 #srcBody .cl code { font: inherit; color: var(--tk-fg); }
-/* 整行 hover：长文件里视线跟丢是常事。行号那格是 sticky 且自带 --card 底色，
+/* 整行 hover：长文件里视线跟丢是常事。行号那格是 sticky 且自带底色，
    会把行色盖掉，所以单独给它兑一份同色相的底，两列才连成一整条 */
 #srcBody .cl:hover { background: color-mix(in oklab, var(--tk-fg) 5%, transparent); }
 #srcBody .cl:hover::before {
-  color: var(--tk-fg);
-  background: color-mix(in oklab, var(--tk-fg) 5%, var(--card));
+  /* 悬停时行号转 accent：整行亮起来之后，「这是第几行」才是你要找的那个信息 */
+  color: var(--accent);
+  background: color-mix(in oklab, var(--tk-fg) 7%, var(--gutter-bg));
 }
 /* ---------- 语法高亮 ----------
    用 highlight.js(本地 vendor,编译时嵌进二进制,不走 CDN——面板可能没外网)。

@@ -1224,6 +1224,11 @@ function openSrc(u) {
   srcCache = null;
   srcCur = null;
   $('srcName').textContent = u.name;
+  // 标题里也挂那枚首字母徽标：从列表点进来看的是同一个项目，认知的锚点不该断
+  const av = $('srcAv');
+  av.textContent = initials(u.name);
+  av.style.setProperty('--av', hueFor(u.name));
+  av.hidden = false;
   $('srcPath').textContent = '';
   $('srcBody').textContent = '';
   srcMsg('');
@@ -1412,11 +1417,29 @@ function setLangTag(lang) {
   tag.hidden = false;
 }
 
+/// 路径写成面包屑：目录那串保持灰，文件名单独提出来。
+/// 全程 textContent + 建节点，路径里真出现怪字符也不会被当成标记语言
+function showPath(p) {
+  const el = $('srcPath');
+  el.replaceChildren();
+  const i = p.lastIndexOf('/');
+  if (i >= 0) {
+    const dir = document.createElement('span');
+    dir.className = 'dir';
+    dir.textContent = p.slice(0, i + 1);
+    el.appendChild(dir);
+  }
+  const f = document.createElement('span');
+  f.className = 'file';
+  f.textContent = p.slice(i + 1);
+  el.appendChild(f);
+}
+
 async function showFile(n, row) {
   srcCur = n;
   $('srcTree').querySelectorAll('.node.cur').forEach(el => el.classList.remove('cur'));
   if (row) row.classList.add('cur');
-  $('srcPath').textContent = n.path;
+  showPath(n.path);
   const lang = langOf(n.path);
   setLangTag(lang);
   if (n.big) {
