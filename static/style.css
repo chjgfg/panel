@@ -113,6 +113,19 @@ body.fetching #tick::before { background: var(--accent); animation: breathe 1s e
   box-shadow: var(--shadow), var(--edge);
 }
 #loginForm h1 { margin-bottom: 1rem; }
+/* 登录页是全站最素的一块，也是别人打开面板看到的第一眼：
+   标题行留出主题开关（没登进去的人不该被按着看深色） */
+.login-top { display: flex; align-items: center; gap: .6rem; margin-bottom: 1rem; }
+.login-top h1 { margin: 0 auto 0 0; }
+#loginTheme { flex: none; }
+/* 「为什么又要登录」单独一档：它是说明，不是错误，别和密码错误那行红字混在一起。
+   左缘一道 accent 条，和整页的左缘语言一致 */
+.login-why {
+  margin: 0 0 .9rem; padding: .45rem .6rem; border-radius: 6px;
+  background: color-mix(in oklab, var(--fg) 5%, var(--card));
+  box-shadow: inset 2px 0 0 var(--accent);
+  color: var(--muted); font-size: var(--fs-sm); line-height: 1.45;
+}
 input, button, select {
   font: inherit; border-radius: 6px; border: 1px solid var(--line);
 }
@@ -227,6 +240,13 @@ button.ghost:hover:not(:disabled) {
 /* 顶到上限（≥90%）的卡整张描边转红，不用看数字也知道哪张要出事 */
 .tile.hi { border-color: color-mix(in oklab, var(--bad) 55%, var(--line)); }
 .tile small { color: var(--muted); font-size: var(--fs-xs); }
+/* 小字行改成一行两栏：左边说明文字，右边那根趋势线推到最右。
+   六张卡以前只有瞬时数字，看不出「内存在涨」—— 而这张卡恰恰最该看趋势 */
+.tile small {
+  display: flex; align-items: center; justify-content: space-between; gap: .4rem;
+}
+/* 线的颜色由 JS 设成和数值同一档严重度色：卡上「红」这件事只该有一种颜色 */
+.tile .spark { margin-left: auto; opacity: .9; }
 /* 轨道取填充色的浅一档（同色相），这样整条都在表达状态，而不是一半灰一半彩 */
 .meter {
   height: 6px; margin-top: .45rem; border-radius: 3px; overflow: hidden;
@@ -367,12 +387,13 @@ main > table.stack-table thead { box-shadow: 0 2px 6px -4px var(--drop); }
   animation: panel-in .16s ease;
 }
 .bin-panel table { border: 0; border-radius: 0; }
-/* 子表头收成一条标签带：它复述的就是父表头那六个词，权重必须低一档，
-   否则一屏两条一样的表头，看着像两张不相干的表 */
+/* 子表头收成一行轻字小标：它复述的就是父表头那六个词，权重必须低一档。
+   原来压了一条 4% 的底色带 —— 单个项目展开还行，多个项目同时展开时这条带
+   会重复出现好几遍，糊成一条条灰杠；去掉底色、字重再压半档就够了 */
 .bin-panel th {
   font-size: var(--fs-xs); color: var(--muted); letter-spacing: .07em;
-  padding: .3rem .7rem; border-bottom-color: var(--hairline);
-  background: color-mix(in oklab, var(--fg) 4%, transparent);
+  font-weight: 500; padding: .3rem .7rem;
+  border-bottom-color: var(--hairline); background: transparent;
 }
 .bin-panel td { padding: .5rem .7rem; }
 /* bin 名是程序名不是项目名，等宽更认得出来 */
@@ -744,6 +765,9 @@ td.name .caret:hover { color: var(--accent); }
      太长的横向滚动看。 */
   white-space: pre;
 }
+/* 折行档：长行不再只能横向拖着看。默认仍是不换行（时间戳对齐更好扫），
+   开关是个人偏好，记在本地 */
+#logBody.wrap { white-space: pre-wrap; word-break: break-word; }
 /* 跨天的日志按日期插一条分组头，并且吸顶：滚到哪一段都知道现在看的是哪天。
    底色跟正文同档，否则行从底下透上来糊成一片 */
 #logBody .day {
@@ -994,6 +1018,15 @@ html.light #srcBody {
      CPU 列那么窄也塞不下 30px 的折线。列本身照旧留着，靠下面的横滚看到 */
   #ver { display: none; }
   .spark { display: none; }
+  /* 书签的长标题窄屏收掉，整排按钮少占一行（实测能省约 100px 宽） */
+  #app > header { gap: .5rem; }
+  .wide { display: none; }
+  /* 状态卡：两列排八张要四行，滚到项目列表之前先刷一屏卡。收到三列 +
+     大数字降一档，整块省掉约三分之一的高度（数据一张都不藏） */
+  .stats { grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: .45rem; }
+  .tile { padding: .5rem .6rem; }
+  .tile strong { font-size: var(--fs-lg); margin: .1rem 0 .2rem; }
+  .tile .meter { margin-top: .3rem; }
   /* 整表横向滚动，而不是把六列硬塞进 375px：fixed 布局下列宽小于内容宽时，
      nowrap 的内容不换行、直接压到隔壁列上，看着就是串列。列宽百分比不动，
      只给一个最小宽度，让表格按 640px 起排、外面这条横向轨道负责滚。 */

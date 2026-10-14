@@ -4,7 +4,12 @@ let timer = null, logKey = null, runKey = null;
 
 async function req(path, opts) {
   const r = await fetch(path, { credentials: 'same-origin', ...opts });
-  if (r.status === 401) { showLogin(); throw new Error('未登录'); }
+  if (r.status === 401) {
+    // 说清为什么又要登录：面板一重启内存里的会话就全清了，旧 cookie 全部 401。
+    // 不给这句话，人只会以为是自己密码错了、或者面板坏了
+    showLogin('会话已过期（面板重启也会清掉登录态），重新输入密码即可');
+    throw new Error('未登录');
+  }
   if (!r.ok) throw new Error((await r.text()).trim() || 'HTTP ' + r.status);
   return r;
 }
@@ -56,7 +61,7 @@ for (const id of ['runbox', 'confirmBox', 'logBox', 'srcBox', 'auditBox', 'termB
   }).observe(box, { attributes: true, attributeFilter: ['hidden'] });
 }
 
-function showLogin() {
+function showLogin(why) {
   clearInterval(timer);
   timer = null;
   logKey = null;
@@ -72,6 +77,9 @@ function showLogin() {
   // syncScrollLock();
   $('app').hidden = true;
   $('login').hidden = false;
+  // 为什么又把我踢回登录页 —— 只有被 401 打断时才说，第一次访问不该吓人
+  $('loginWhy').textContent = why || '';
+  $('loginWhy').hidden = !why;
   $('pw').focus();
 }
 
@@ -122,6 +130,18 @@ function severity(p) {
 /// 鼠标停在卡上时 hover 的抬升每轮丢一次 —— 和项目列表「一跳一跳」同一个
 /// 毛病（见 views 那段），同一个治法：节点复用。
 const tileViews = new Map();
+// 整机各卡的采样。项目行有趋势线而六张卡只有瞬时数字，看不出「内存在涨」——
+// 而这张卡恰恰是最该看趋势的。@ 前缀是防重名：目录名完全可以就叫 cpu
+const hostHist = new Map();
+let lastHostSample = 0;
+
+function hostSample(id, v) {
+  let a = hostHist.get(id);
+  if (!a) { a = []; hostHist.set(id, a); }
+  a.push(v);
+  if (a.length > HIST) a.shift();
+  return a;
+}
 
 function tileView(id) {
   let v = tileViews.get(id);
@@ -131,12 +151,14 @@ function tileView(id) {
   const label = document.createElement('b');
   const val = document.createElement('strong');
   const sub = document.createElement('small');
+  const subText = document.createElement('span');
+  sub.appendChild(subText);
   const meter = document.createElement('div');
   meter.className = 'meter';
   const fill = document.createElement('i');
   meter.appendChild(fill);
   el.append(label, val, sub, meter);
-  v = { el, label, val, sub, meter, fill };
+  v = { el, label, val, sub, subText, meter, fill, spark: null };
   tileViews.set(id, v);
   return v;
 }
@@ -164,14 +186,18 @@ function renderHost(h) {
 
   const holder = $('stats');
   const seen = new Set();
+  // 一次轮询只采一个点（和项目行那条同一套规矩）：手动刷新点五次不该攒出五个假采样
+  const now = Date.now();
+  const sample = now - lastHostSample >= POLL - 300;
+  if (sample) lastHostSample = now;
   let i = 0;
   for (const t of want) {
     seen.add(t.id);
     const v = tileView(t.id);
     v.label.textContent = t.label;
     v.val.textContent = t.value;
-    v.sub.textContent = t.sub || '';
-    v.sub.hidden = !t.sub;
+    v.subText.textContent = t.sub || '';
+    if (v.spark) { v.spark.remove(); v.spark = null; }
     if (t.p == null) {
       v.meter.hidden = true;
       v.el.style.removeProperty('--m');
@@ -181,7 +207,13 @@ function renderHost(h) {
       v.el.style.setProperty('--m', severity(t.p));
       v.el.classList.toggle('hi', t.p >= 90);   // 顶到上限的卡整张描边转红
       v.fill.style.width = Math.min(100, Math.max(0, t.p)) + '%';
+      if (sample) hostSample(t.id, t.p);
+      // 趋势线跟着数值的严重度变色：卡上「红」这件事只该有一种颜色
+      const s = spark(hostHist.get(t.id), 'tile',
+        { label: t.label, fmt: x => x.toFixed(0) + '%', color: severity(t.p) });
+      if (s) { s.classList.add('tile-spark'); v.sub.appendChild(s); v.spark = s; }
     }
+    v.sub.hidden = !t.sub && !v.spark;
     const at = holder.children[i];
     if (at !== v.el) holder.insertBefore(v.el, at || null);
     i++;
@@ -295,7 +327,7 @@ function hueFor(name) {
 /// 不给注入留口子（这里虽然只有数字，但坏了惯例更糟）
 let sparkSeq = 0;   // 每张图的渐变 id（同页多张，不能重名）
 
-function spark(vals, cls) {
+function spark(vals, cls, opt) {
   // 全 0 不画：没跑着的项目攒一整条底线，看着像「趋势平稳」，其实是根本没数据
   if (!vals || vals.length < 2 || vals.every(v => !v)) return null;
   const w = 30, h = 11, ns = 'http://www.w3.org/2000/svg';
@@ -306,8 +338,10 @@ function spark(vals, cls) {
   svg.setAttribute('width', w);
   svg.setAttribute('height', h);
   svg.setAttribute('class', 'spark ' + cls);
-  // 一根线两种颜色靠一个变量带走：折线、渐变两端都读它，不用为 cpu/内存各写一套规则
-  svg.style.setProperty('--spk', cls === 'cpu' ? 'var(--warn)' : 'var(--accent)');
+  // 一根线两种颜色靠一个变量带走：折线、渐变两端都读它，不用为每档各写一套规则。
+  // 状态卡那条要跟着数值的严重度变色，所以允许调用方覆盖
+  svg.style.setProperty('--spk', (opt && opt.color)
+    || (cls === 'cpu' ? 'var(--warn)' : 'var(--accent)'));
   const pts = vals.map((v, i) =>
     `${(i * w / (vals.length - 1)).toFixed(1)},${(h - 0.5 - v / max * (h - 1)).toFixed(1)}`);
   // 面积层用自上而下的渐隐，而不是平涂一块：只有两三个点时折线几乎是平的，
@@ -333,9 +367,10 @@ function spark(vals, cls) {
   const pl = mk('polyline');
   pl.setAttribute('points', pts.join(' '));
   // 悬停读数：30px 的线只能看出个方向，「峰值多少、现在多少」得靠这行字
-  const fmt = cls === 'cpu' ? x => x.toFixed(1) + '%' : x => fmtMemMB(x);
+  const label = (opt && opt.label) || (cls === 'cpu' ? 'CPU' : '内存');
+  const fmt = (opt && opt.fmt) || (cls === 'cpu' ? x => x.toFixed(1) + '%' : x => fmtMemMB(x));
   const ti = mk('title');
-  ti.textContent = `${cls === 'cpu' ? 'CPU' : '内存'} 最近 ${vals.length} 次采样：`
+  ti.textContent = `${label} 最近 ${vals.length} 次采样：`
     + `现值 ${fmt(vals[vals.length - 1])}，峰值 ${fmt(Math.max(...vals))}，`
     + `谷值 ${fmt(Math.min(...vals))}`;
   svg.append(defs, area, pl, ti);
@@ -1007,6 +1042,7 @@ function renderLogs(jump) {
     : `共 ${keep.length} 行`;
   // 关闭「跟随底部」后，轮询不再把你顶回底部；主动打开/切筛选（jump）仍然直达最新
   if (jump || (follow && atBottom)) p.scrollTop = p.scrollHeight;
+  syncLatest();
 }
 
 /// 分组头写「今天/昨天」，更早的写日期：凌晨看日志「今天」比日期好认，
@@ -1043,6 +1079,31 @@ async function refresh() {
   }
 }
 
+/// 撞库锁定的倒计时：服务器回的是「请 N 秒后再试」一句死文字，
+/// 光看着不知道还要等多久、也不知道它到底还在不在锁，只会反复点。
+/// 这里按它给的秒数本地倒数，到点自己放开按钮。
+let lockUntil = 0, lockTimer = null;
+
+function showLoginErr(msg) {
+  clearInterval(lockTimer);
+  const m = /(\d+)\s*秒/.exec(msg);
+  lockUntil = m ? Date.now() + Number(m[1]) * 1000 : 0;
+  const render = () => {
+    const left = Math.ceil((lockUntil - Date.now()) / 1000);
+    if (left <= 0) {
+      clearInterval(lockTimer);
+      lockUntil = 0;
+      $('loginErr').textContent = '锁定期已过，可以再试一次';
+      $('loginBtn').disabled = false;
+      return;
+    }
+    $('loginErr').textContent = msg.replace(/\d+/, left);
+    $('loginBtn').disabled = true;
+  };
+  render();
+  if (lockUntil) lockTimer = setInterval(render, 1000);
+}
+
 $('loginForm').onsubmit = async e => {
   e.preventDefault();
   $('loginBtn').disabled = true;
@@ -1053,13 +1114,17 @@ $('loginForm').onsubmit = async e => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ password: $('pw').value })
     });
-    if (!r.ok) { $('loginErr').textContent = (await r.text()).trim() || '登录失败'; return; }
+    if (!r.ok) {
+      showLoginErr((await r.text()).trim() || '登录失败');
+      return;
+    }
     $('pw').value = '';
     showApp();
   } catch {
     $('loginErr').textContent = '连不上服务器';
   } finally {
-    $('loginBtn').disabled = false;
+    // 锁定期没结束就保持禁用，别让 finally 把倒计时刚按下的禁用又抬起来
+    if (!lockUntil) $('loginBtn').disabled = false;
   }
 };
 
@@ -1080,21 +1145,52 @@ $('ddia').onclick = () => window.open(
 );
 $('refresh').onclick = () => refresh();
 
-// ---------- 主题切换（黑夜 ↔ 白天）----------
-// html.light 这个 class 是唯一真源：CSS 变量全看它。data-theme 只是记录你选了哪档。
-function applyTheme() {
-  const t = document.documentElement.dataset.theme || 'dark';
-  const light = t === 'light';
-  document.documentElement.classList.toggle('light', light);
-  // 收成「图标 + 两字」：头部按钮本来就挤，「主题·白天」是这排最宽的一个
-  $('themeBtn').textContent = light ? '☀ 白天' : '☾ 黑夜';
+// ---------- 主题切换（跟随系统 ↔ 黑夜 ↔ 白天）----------
+// 三档而不是两档：以前启动脚本永远把 data-theme 写死，样式表里那套
+// @media (prefers-color-scheme: light) 的兜底一次都没生效过，新设备第一次
+// 打开被强行按成深色。存 'auto'（或从没选过）时干脆不写 data-theme，兜底才轮到它。
+const THEMES = ['auto', 'dark', 'light'];
+
+function themeWant() {
+  const w = localStorage.getItem('theme');
+  return THEMES.includes(w) ? w : 'auto';
 }
-$('themeBtn').onclick = () => {
-  const next = (document.documentElement.dataset.theme || 'dark') === 'light' ? 'dark' : 'light';
-  document.documentElement.dataset.theme = next;
-  localStorage.setItem('theme', next);
+
+function applyTheme() {
+  const want = themeWant();
+  const light = want === 'light'
+    || (want === 'auto' && matchMedia('(prefers-color-scheme: light)').matches);
+  document.documentElement.classList.toggle('light', light);
+  if (want === 'auto') delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = want;
+  const label = want === 'auto' ? '◐ 跟随' : light ? '☀ 白天' : '☾ 黑夜';
+  const now = light ? '白天' : '黑夜';
+  const next = want === 'auto' ? '黑夜' : want === 'dark' ? '白天' : '跟随系统';
+  const title = want === 'auto' ? `跟随系统（现在是${now}）· 点这里切到${next}`
+    : `当前${now} · 点这里切到${next}`;
+  // 登录页那个按钮和头部那个是同一个开关，两处文案必须一起动
+  for (const id of ['themeBtn', 'loginTheme']) {
+    const b = $(id);
+    if (!b) continue;
+    b.textContent = label;
+    b.title = title;
+  }
+}
+
+function cycleTheme() {
+  const next = THEMES[(THEMES.indexOf(themeWant()) + 1) % THEMES.length];
+  if (next === 'auto') localStorage.removeItem('theme');
+  else localStorage.setItem('theme', next);
   applyTheme();
-};
+}
+
+$('themeBtn').onclick = cycleTheme;
+$('loginTheme').onclick = cycleTheme;
+// 停在「跟随系统」时，操作系统换档页面也该跟着换，不用重开
+if (matchMedia('(prefers-color-scheme: light)').addEventListener) {
+  matchMedia('(prefers-color-scheme: light)')
+    .addEventListener('change', () => { if (themeWant() === 'auto') applyTheme(); });
+}
 applyTheme();
 
 // ---------- 网页控制台（xterm 终端 + WebSocket，后端在 PTY 里跑 ssh root@本机）----------
@@ -1342,6 +1438,32 @@ $('logSearch').oninput = () => { if (logCache) renderLogs(false); };
 // 级别档切换算一次「换视图」，和切来源一样直达最新一行
 $('logErrOnly').onchange = () => { if (logCache) renderLogs(true); };
 
+// 折行 / 跟随这两个开关是偏好，面板天天开，不该每次进来重新点一遍
+function applyLogWrap() { $('logBody').classList.toggle('wrap', $('logWrap').checked); }
+$('logWrap').checked = !!localStorage.getItem('logWrap');
+$('logFollow').checked = localStorage.getItem('logFollow') !== '0';
+applyLogWrap();
+$('logWrap').onchange = () => {
+  applyLogWrap();
+  localStorage.setItem('logWrap', $('logWrap').checked ? '1' : '');
+};
+$('logFollow').onchange = () =>
+  localStorage.setItem('logFollow', $('logFollow').checked ? '1' : '0');
+
+/// 「跳到最新」只在没贴底时露出来：贴着底的时候它是句废话，白占一个按钮位
+function syncLatest() {
+  const p = $('logBody');
+  $('logLatest').hidden = p.scrollHeight - p.scrollTop - p.clientHeight < 40;
+}
+$('logBody').addEventListener('scroll', syncLatest, { passive: true });
+$('logLatest').onclick = () => {
+  const p = $('logBody');
+  p.scrollTop = p.scrollHeight;
+  $('logFollow').checked = true;
+  localStorage.setItem('logFollow', '1');
+  syncLatest();
+};
+
 // 关闭日志弹窗：清空日志内容，下次再点日志按钮重新拉取
 function closeLogBox() {
   logKey = null;
@@ -1350,6 +1472,7 @@ function closeLogBox() {
   $('logSearch').value = '';
   $('logErrOnly').checked = false;
   $('logCount').textContent = '';
+  $('logLatest').hidden = true;
   $('logBox').hidden = true;
   // syncScrollLock();
 }
@@ -1959,36 +2082,75 @@ function fullTime(secs) {
 }
 
 // ---------- 操作记录 ----------
-// 后端是内存环形（200 条，重启即丢），所以每次打开都重新拉，不做缓存
-async function loadAudit() {
+// 后端是内存环形（200 条，重启即丢），所以每次打开都重新拉，不做长期缓存
+let auditCache = [];
+
+/// 相对时间：这张表回答的是「刚才谁点了什么」，「3 分钟前」比一串绝对秒数有用。
+/// 绝对时间收进悬停，真要核对时刻再去看
+function relTime(secs) {
+  const diff = (Date.now() - secs * 1000) / 1000;
+  if (diff < 60) return '刚刚';
+  if (diff < 3600) return Math.floor(diff / 60) + ' 分钟前';
+  if (diff < 86400) return Math.floor(diff / 3600) + ' 小时前';
+  if (diff < 172800) return '昨天 ' + fullTime(secs).slice(-8);
+  return shortTime(secs);
+}
+
+/// 归类判据就是后端 note 时用的那几个动词，不写正则表
+function auditKind(what) {
+  if (/启动|停止|重启/.test(what)) return 'run';
+  if (what.includes('拉取')) return 'pull';
+  if (/登录|登出/.test(what)) return 'auth';
+  if (what.includes('搜索')) return 'search';
+  if (/控制台|密钥|私钥/.test(what)) return 'term';
+  return 'other';
+}
+
+function renderAudit() {
+  const kind = $('auditKind').value;
+  const list = kind ? auditCache.filter(it => auditKind(it.what) === kind) : auditCache;
+  $('auditNote').textContent = kind ? `${list.length} / ${auditCache.length} 条` : `${auditCache.length} 条`;
   const body = $('auditBody');
+  body.replaceChildren();
+  if (!list.length) {
+    body.appendChild(document.createTextNode(auditCache.length
+      ? '这个类型下还没有记录。' : '还没有记录。（面板重启就清空，不当长期留痕用）'));
+    return;
+  }
+  // 最新一条放最上面：想知道「刚才谁点了什么」不该翻到底再倒着读
+  for (const it of [...list].reverse()) {
+    const row = document.createElement('div');
+    row.className = 'audit-row';
+    // 行内只留 IP —— token 前缀是给人核对「这几条是不是同一个人」用的，
+    // 每行挂一串十六进制太吵，收进悬停
+    const who = it.who.split(' · ');
+    for (const [cls, text, tip] of [
+      ['ts', relTime(it.at), fullTime(it.at)],
+      ['who', who[0], it.who],
+      ['what', it.what, ''],
+    ]) {
+      const s = document.createElement('span');
+      s.className = cls;
+      s.textContent = text;
+      if (tip) s.title = tip;
+      row.appendChild(s);
+    }
+    body.appendChild(row);
+  }
+}
+
+async function loadAudit() {
   try {
-    const list = await (await req('api/audit')).json();
-    $('auditNote').textContent = `${list.length} 条`;
-    body.replaceChildren();
-    if (!list.length) {
-      body.appendChild(document.createTextNode('还没有记录。（面板重启就清空，不当长期留痕用）'));
-      return;
-    }
-    // 最新一条放最上面：想知道「刚才谁点了什么」不该翻到底再倒着读
-    for (const it of [...list].reverse()) {
-      const row = document.createElement('div');
-      row.className = 'audit-row';
-      for (const [cls, text] of [['ts', fullTime(it.at)], ['who', it.who], ['what', it.what]]) {
-        const s = document.createElement('span');
-        s.className = cls;
-        s.textContent = text;
-        row.appendChild(s);
-      }
-      body.appendChild(row);
-    }
+    auditCache = await (await req('api/audit')).json();
+    renderAudit();
   } catch (e) {
-    if (e.message !== '未登录') body.textContent = '读取失败：' + e.message;
+    if (e.message !== '未登录') $('auditBody').textContent = '读取失败：' + e.message;
   }
 }
 
 $('auditBtn').onclick = () => { $('auditBox').hidden = false; loadAudit(); };
 $('auditRefresh').onclick = loadAudit;
+$('auditKind').onchange = renderAudit;
 $('auditClose').onclick = $('auditCloseX').onclick = () => { $('auditBox').hidden = true; };
 
 // ---------- 快捷键 ----------
@@ -2042,4 +2204,6 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) refr
 
 fetch('api/me', { credentials: 'same-origin' })
   .then(r => r.ok ? showApp() : showLogin())
-  .catch(showLogin);
+  // 不直接把 showLogin 当 catch 回调：那样 Error 对象会被当成「为什么要登录」
+  // 的说明文字显示出来
+  .catch(() => showLogin());

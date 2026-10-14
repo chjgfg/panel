@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex">
 <title>项目面板</title>
+<!-- 站点图标：内联 SVG 走 data-URI，不新增文件、不占路由（面板只发一个二进制）。
+    不画的话标签页就是个通用地球，开一排标签认不出哪个是面板 -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%23141821'/%3E%3Cpath d='M6 8l4 4-4 4' stroke='%235b9dff' stroke-width='2.2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M12.5 16h5.5' stroke='%233fb950' stroke-width='2.2' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
 <!-- CSS/JS 由后端路由提供，内容同样是编译时 include_str! 嵌进二进制的，
      部署仍然只拷一个可执行文件。带版本号是为了升级后浏览器缓存能失效
      （no_cache 中间件已对页面本身禁缓存，这里是双保险）。 -->
@@ -14,12 +17,18 @@
 <!-- 网页控制台的终端样式，vendored、相对路径自动带前缀 -->
 <link rel="stylesheet" href="vendor/xterm.5.5.0.min.css">
 <script>
-// 防闪烁：必须在首次渲染前同步执行。
-// data-theme: "dark" / "light"。html.light 由主脚本维护。
-document.documentElement.dataset.theme = localStorage.getItem('theme') || 'dark';
-if (document.documentElement.dataset.theme === 'light') {
-  document.documentElement.classList.add('light');
-}
+// 防闪烁：必须在首次渲染前同步执行。三档：
+//   'light' / 'dark' = 用户点名要的，写进 data-theme；
+//   'auto'（或从没选过）= 干脆不写 data-theme —— 样式表里那套
+//     @media (prefers-color-scheme: light) html:not([data-theme]) 的兜底才会生效。
+//   以前这里永远写死一个值，兜底一次都没用上，新设备第一次打开被强行按成深色。
+(() => {
+  const want = localStorage.getItem('theme');
+  if (want === 'light' || want === 'dark') document.documentElement.dataset.theme = want;
+  const light = want === 'light'
+    || (want !== 'dark' && matchMedia('(prefers-color-scheme: light)').matches);
+  document.documentElement.classList.toggle('light', light);
+})();
 </script>
 </head>
 <body>
@@ -71,7 +80,13 @@ if (document.documentElement.dataset.theme === 'light') {
 
 <div id="login" hidden>
   <form id="loginForm">
-    <h1>项目面板</h1>
+    <div class="login-top">
+      <h1>项目面板</h1>
+      <!-- 登录页也能切主题：以前主题按钮在 #app 里，没登进去只能被按着看深色 -->
+      <button id="loginTheme" type="button" class="chip" title="切换 跟随系统 / 黑夜 / 白天">主题</button>
+    </div>
+    <!-- 被 401 踢回来时得说清为什么又要登录：不然看着像密码错了、像面板坏了 -->
+    <p id="loginWhy" class="login-why" hidden></p>
     <input type="password" id="pw" placeholder="密码" autocomplete="current-password" required>
     <button id="loginBtn">登录</button>
     <p id="loginErr" class="err"></p>
@@ -85,7 +100,8 @@ if (document.documentElement.dataset.theme === 'light') {
     <!-- 版本 / 构建 / 启动时刻：确认服务器上跑的到底是哪一版，不用靠猜 -->
     <span id="ver" title="构建与启动时刻"></span>
     <button id="oracleCloud" type="button" class="ghost">Cloud</button>
-    <button id="ddia" type="button" class="ghost">设计数据密集型应用</button>
+    <!-- 书签不是操作：窄屏下只留缩写，整排按钮能少占一行（140px 的长标签是这排最宽的一个） -->
+    <button id="ddia" type="button" class="ghost">DDIA<span class="wide"> · 设计数据密集型应用</span></button>
     <!-- 一条发丝分隔线：左边是外链，右边是面板自己的操作，混在一排时六个
          控件看着像同一类东西 -->
     <span class="hsep" aria-hidden="true"></span>
@@ -171,11 +187,14 @@ if (document.documentElement.dataset.theme === 'light') {
         <input id="logSearch" type="search" placeholder="筛关键字，如 panic / Failed" autocomplete="off" aria-label="按关键字筛日志">
         <label class="log-follow"><input id="logFollow" type="checkbox" checked> 跟随底部</label>
         <label class="log-follow" title="用和整行标红同一套判据筛，不是再写一遍关键词"><input id="logErrOnly" type="checkbox"> 只看错误</label>
+        <label class="log-follow" title="长行折起来看，不用横向拖"><input id="logWrap" type="checkbox"> 折行</label>
         <button id="logCloseX" class="close-x" aria-label="关闭" title="关闭">×</button>
       </div>
       <pre id="logBody"></pre>
       <div class="modal-foot">
         <span id="logCount" class="log-count"></span>
+        <!-- 关掉跟随后总得有个入口回到底部，不然只能手动拖 -->
+        <button id="logLatest" class="chip" hidden>跳到最新</button>
         <button id="logClose" class="chip">关闭</button>
       </div>
     </div>
@@ -213,6 +232,14 @@ if (document.documentElement.dataset.theme === 'light') {
     <div class="modal modal-audit">
       <div class="modal-head">
         <h2>操作记录 <span id="auditNote" class="audit-note"></span></h2>
+        <select id="auditKind" aria-label="按类型过滤">
+          <option value="">全部类型</option>
+          <option value="run">启动/停止/重启</option>
+          <option value="pull">拉取代码</option>
+          <option value="auth">登录/登出</option>
+          <option value="search">搜索</option>
+          <option value="term">控制台/密钥</option>
+        </select>
         <button id="auditCloseX" class="close-x" aria-label="关闭" title="关闭">×</button>
       </div>
       <div class="audit-body" id="auditBody"></div>
