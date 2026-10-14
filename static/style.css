@@ -759,6 +759,44 @@ td.name .caret:hover { color: var(--accent); }
 /* 白天档把品牌色整体压暗一点：那套色是为深色背景调的（青 #2ac3de、黄绿 #9ece6a），
    1.7px 的细描边放在白底上只有 2.2 左右对比，看着像没画完。整体压一档比逐个改色表稳 */
 html.light #srcTree .fico { filter: brightness(.78) saturate(1.1); }
+
+/* ---------- 跨文件搜索 ---------- */
+/* 搜索框在弹窗表头里吃掉剩余宽度（和日志弹窗那个关键字框同一套做法） */
+.modal-head #srcQuery {
+  flex: 1 1 8rem; min-width: 6rem; padding: .3rem .5rem; font-size: var(--fs-sm);
+}
+/* 结果顶上的读数条 */
+#srcTree .find-head {
+  padding: .2rem .4rem .45rem; color: var(--muted);
+  font-size: var(--fs-xs); line-height: 1.5;
+}
+/* 一行结果两小节：路径:行号 / 那一行原文。
+   不用 .node 那套单行省略号结构 —— 这里要两行，硬塞会让正文被路径挤掉 */
+#srcTree .hit-row {
+  display: block; width: 100%; text-align: left; cursor: pointer;
+  background: transparent; border: 0; border-radius: 4px;
+  padding: .25rem .4rem; font: inherit; color: var(--fg);
+}
+#srcTree .hit-row:hover { background: color-mix(in oklab, var(--fg) 6%, transparent); }
+#srcTree .hit-path {
+  display: flex; align-items: center; gap: .35rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--fs-xs); color: var(--muted);
+  white-space: nowrap; overflow: hidden;
+}
+#srcTree .hit-path .hit-file { overflow: hidden; text-overflow: ellipsis; }
+#srcTree .hit-path .ln { color: var(--accent); font-weight: 700; flex: none; }
+#srcTree .hit-text {
+  /* 缩进到和路径文字齐平（图标 13px + 间距 .35rem） */
+  margin: .1rem 0 0 1.05rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--fs-xs); color: var(--fg);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#srcTree .hit-text mark {
+  background: color-mix(in oklab, var(--accent) 30%, transparent);
+  color: inherit; border-radius: 2px;
+}
 #srcTree .kids { margin-left: 1.5rem; border-left: 1px solid var(--hairline); padding-left: .25rem; }
 /* 顶层容器就是整棵树的根,不吃缩进 */
 #srcTree > .kids { margin-left: 0; border-left: 0; padding-left: 0; }
@@ -788,6 +826,9 @@ html.light #srcTree .fico { filter: brightness(.78) saturate(1.1); }
 .src-msg.bad { color: var(--bad); }
 #srcBody {
   flex: 1; min-height: 0; overflow: auto; margin: 0; padding: .65rem 0;
+  /* 定位锚点：搜索跳转用 offsetTop 自己算滚动（scrollIntoView 会连祖先一起滚，
+     弹窗后面的列表会跟着跳位），offsetTop 需要一个有定位的父元素才准 */
+  position: relative;
   /* 不用 font 简写：简写里塞 var() 要靠替换后才解析，拆成长写更稳（同 body 那条） */
   font-family: ui-monospace, Consolas, monospace;
   font-size: var(--fs-sm); line-height: 1.65;
@@ -836,6 +877,13 @@ html.light #srcBody {
   /* 悬停时行号转 accent：整行亮起来之后，「这是第几行」才是你要找的那个信息 */
   color: var(--accent);
   background: color-mix(in oklab, var(--tk-fg) 7%, var(--gutter-bg));
+}
+/* 搜索结果跳过来的那一行：accent 档底色闪一下再退掉。比 hover 那档重，
+   不然点完结果视线没落点，不知道跳到哪行了 */
+#srcBody .cl.hit { background: color-mix(in oklab, var(--accent) 16%, transparent); }
+#srcBody .cl.hit::before {
+  color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 16%, var(--gutter-bg));
 }
 /* ---------- 语法高亮 ----------
    用 highlight.js(本地 vendor,编译时嵌进二进制,不走 CDN——面板可能没外网)。

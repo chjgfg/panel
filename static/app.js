@@ -1229,6 +1229,8 @@ function openSrc(u) {
   av.textContent = initials(u.name);
   av.style.setProperty('--av', hueFor(u.name));
   av.hidden = false;
+  $('srcQuery').value = '';
+  endFind();
   $('srcPath').textContent = '';
   $('srcBody').textContent = '';
   srcMsg('');
@@ -1255,9 +1257,142 @@ async function loadTree() {
   }
 }
 
+// ---------- 跨文件搜索 ----------
+// 左栏那棵树和搜索结果共用一块地方：输入即搜（防抖 300ms），清空即回树。
+// findSeq 用来丢迟到响应的 —— 连打两个字会发两次请求，先发的可能后到，
+// 不认序号的话旧结果会把新结果盖掉。
+let findTimer = null, findSeq = 0, findActive = false, jumpTimer = null;
+
+/// 退出搜索态：清空输入或关掉弹窗时叫，之后树才允许重新往左栏画
+function endFind() {
+  findActive = false;
+  findSeq++;
+  clearTimeout(findTimer);
+}
+
+function findHead(text) {
+  const d = document.createElement('div');
+  d.className = 'find-head';
+  d.textContent = text;
+  return d;
+}
+
+async function runFind() {
+  const q = $('srcQuery').value.trim();
+  if (!srcKey) return;
+  if (q.length < 2) { endFind(); renderTree(); return; }
+  const seq = ++findSeq;
+  findActive = true;
+  const tree = $('srcTree');
+  tree.replaceChildren(findHead(`在 ${srcName()} 里搜「${q}」…`));
+  let r;
+  try {
+    r = await (await req(`api/units/${srcKey}/search?q=${encodeURIComponent(q)}`)).json();
+  } catch (e) {
+    if (seq !== findSeq) return;
+    endFind();
+    renderTree();
+    if (e.message !== '未登录') srcMsg('搜索失败: ' + e.message, false);
+    return;
+  }
+  if (seq !== findSeq) return;   // 已经有更新的一次在路上，这份丢掉
+  renderFind(r, q);
+}
+
+function srcName() {
+  return $('srcName').textContent;
+}
+
+function renderFind(r, q) {
+  const tree = $('srcTree');
+  tree.replaceChildren();
+  const bits = [`${r.hits.length} 处命中`, `${r.files} 个文件`, `扫过 ${r.scanned} 个`];
+  if (r.truncated) bits.push('已到上限，后面没扫完');
+  tree.appendChild(findHead(bits.join(' · ')));
+  if (!r.hits.length) {
+    tree.appendChild(findHead('没有匹配。搜的是正文里的字和文件路径；target、node_modules 这些不搜。'));
+    return;
+  }
+  for (const h of r.hits) tree.appendChild(hitRow(h, q));
+}
+
+/// 一行结果：图标 + 路径:行号 + 那一行原文（命中的那段包一层高亮）。
+/// 全程建节点 + textContent，路径和代码里出现怪字符也不会被当成标记语言
+function hitRow(h, q) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'hit-row';
+  const line = document.createElement('span');
+  line.className = 'hit-path';
+  line.appendChild(iconEl(iconOf(h.path.slice(h.path.lastIndexOf('/') + 1)), h.path));
+  const p = document.createElement('span');
+  p.className = 'hit-file';
+  p.textContent = h.path;
+  line.appendChild(p);
+  if (h.line) {
+    const n = document.createElement('span');
+    n.className = 'ln';
+    n.textContent = ':' + h.line;
+    line.appendChild(n);
+  } else {
+    // 行号 0 = 只有文件名对上了，正文里没有；不标出来会让人以为搜到了正文
+    const n = document.createElement('span');
+    n.className = 'ln';
+    n.textContent = ' 文件名';
+    line.appendChild(n);
+  }
+  b.appendChild(line);
+  if (h.text) b.appendChild(hitText(h.text, q));
+  b.onclick = () => openHit(h);
+  return b;
+}
+
+function hitText(text, q) {
+  const d = document.createElement('div');
+  d.className = 'hit-text';
+  const at = text.toLowerCase().indexOf(q.toLowerCase());
+  if (at < 0) {
+    d.textContent = text;
+    return d;
+  }
+  const mk = s => { const m = document.createElement('mark'); m.textContent = s; return m; };
+  d.append(
+    document.createTextNode(text.slice(0, at)),
+    mk(text.slice(at, at + q.length)),
+    document.createTextNode(text.slice(at + q.length)));
+  return d;
+}
+
+/// 点一条结果：把那个文件读进右栏，再跳到那一行。
+/// 传 null 当 row —— 树里没有这一行（可能它在没展开的目录里），不硬找
+async function openHit(h) {
+  const name = h.path.slice(h.path.lastIndexOf('/') + 1);
+  await showFile({ name, path: h.path, big: false }, null);
+  if (h.line) jumpTo(h.line);
+}
+
+/// 跳到某一行并闪一下。用 offsetTop 自己算滚动，不用 scrollIntoView ——
+/// 后者会连祖先一起滚，弹窗后面的列表会跟着跳位（#srcBody 已设 position:relative）
+function jumpTo(line) {
+  const p = $('srcBody');
+  const el = p.children[line - 1];
+  if (!el) return;
+  p.scrollTop = Math.max(0, el.offsetTop - p.clientHeight / 2 + el.offsetHeight / 2);
+  p.querySelectorAll('.cl.hit').forEach(e => e.classList.remove('hit'));
+  el.classList.add('hit');
+  clearTimeout(jumpTimer);
+  jumpTimer = setTimeout(() => el.classList.remove('hit'), 1800);
+}
+
+$('srcQuery').oninput = () => {
+  clearTimeout(findTimer);
+  findTimer = setTimeout(runFind, 300);
+};
+
 /// 目录树渲染。目录点名字展开/收起（纯前端折叠，不发请求），
 /// 文件点名字右侧显示内容。全程 textContent/DOM 建，不怕文件名里有怪字符。
 function renderTree() {
+  if (findActive) return;   // 搜索结果正占着左栏，迟到的目录树别把它盖回去
   const tree = $('srcTree');
   tree.replaceChildren();
   if (!srcCache) return;
@@ -1598,6 +1733,8 @@ function closeSrcBox() {
   srcCache = null;
   srcCur = null;
   fileCache.clear();
+  endFind();
+  $('srcQuery').value = '';
   $('srcTree').replaceChildren();
   $('srcBody').textContent = '';
   $('srcPath').textContent = '';
@@ -1720,6 +1857,16 @@ const isTyping = () => ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeE
 document.addEventListener('keydown', e => {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (e.key === 'Escape') {
+    // 搜索框里 Esc 先清查询、留在弹窗内（一下把整个弹窗关掉太狠了，
+    // 人只是想撤掉这次搜索）
+    const sq = $('srcQuery');
+    if (!$('srcBox').hidden && document.activeElement === sq && sq.value) {
+      sq.value = '';
+      endFind();
+      renderTree();
+      e.preventDefault();
+      return;
+    }
     // 从最上层往下找，一次只关一层（配私钥弹窗开在控制台上头，得先关它）
     for (const box of ['keyBox', 'termBox', 'auditBox', 'confirmBox', 'runbox', 'logBox', 'srcBox']) {
       const el = $(box);
@@ -1734,6 +1881,14 @@ document.addEventListener('keydown', e => {
     return;
   }
   if ($('app').hidden || isTyping() || !$('termBox').hidden) return;
+  if (e.key === '/' && !$('srcBox').hidden) {
+    // / = 跳到搜索框（和多数代码浏览器的习惯一致）。放在 isTyping 之后，
+    // 搜索框已经聚焦时斜杠照常输进去，不会被抢走
+    e.preventDefault();
+    $('srcQuery').focus();
+    $('srcQuery').select();
+    return;
+  }
   if (e.key === 'r' || e.key === 'R') {
     e.preventDefault();
     refresh();

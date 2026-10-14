@@ -183,6 +183,8 @@ if (document.documentElement.dataset.theme === 'light') {
     <div class="modal modal-log">
       <div class="modal-head">
         <h2>源码 · <span class="avatar" id="srcAv" hidden></span><span id="srcName"></span></h2>
+        <!-- 跨文件搜索：结果占住左边那棵树的位子（同一块地方两种视图，不另开一层弹窗） -->
+        <input id="srcQuery" type="search" placeholder="搜项目里的字，如 Keycode" autocomplete="off" aria-label="在项目内搜索" title="快捷键 / 聚焦到这里；Esc 清空搜索">
         <button id="srcCloseX" class="close-x" aria-label="关闭" title="关闭">×</button>
       </div>
       <div class="src-layout">

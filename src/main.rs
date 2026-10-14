@@ -9,7 +9,7 @@
 //   discover 项目发现（扫目录、黑名单、bin 探测）
 //   systemd  systemctl/journalctl 交互
 //   procs    面板外进程的探测与停止
-//   srctree  源码目录树与文件读取
+//   srctree  源码目录树、文件读取、跨文件搜索
 // 这里只剩 web 层：路由、handler 组装。
 mod auth;
 mod config;
@@ -39,7 +39,7 @@ use crate::config::{BoxErr, Config, config_path};
 use crate::discover::{bins, discover, find_cargo, ok_name};
 use crate::procs::{find_outside, proc_exes, stop_pids};
 use crate::state::{lock, App};
-use crate::srctree::{Node, file_path_ok, read_file, walk_tree};
+use crate::srctree::{Node, file_path_ok, read_file, search_dir, walk_tree};
 use crate::systemd::{
     Picked, boot_secs, fail_reason, pick_project, pick_project_checked, project_units, run,
     show_many, unit_of,
@@ -766,6 +766,35 @@ async fn file(
     Json(read_file(&dir.join(path)).await).into_response()
 }
 
+/// 跨文件搜索。只回「哪个文件第几行 + 那行长什么样」，前端点了再走 /file 拉全文 ——
+/// 搜索结果因此很小，也不会为了显示上下文把半个项目读进浏览器。
+/// 真正的活在 spawn_blocking 里跑：单核机器上同步读几百个文件会把 async 运行时占死，
+/// 那边 3 秒一次的轮询会跟着一起卡。
+async fn search(
+    State(app): State<Arc<App>>,
+    Path(key): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let Some((_, dir)) = resolve(&app, &key).await else {
+        return (StatusCode::NOT_FOUND, "未知项目").into_response();
+    };
+    let Some(needle) = q.get("q").map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
+        return (StatusCode::BAD_REQUEST, "缺 q 参数").into_response();
+    };
+    // 两个字符起步：单字母几乎必然扫遍全项目又撞上限，纯属白跑一趟
+    if needle.chars().count() < 2 {
+        return (StatusCode::BAD_REQUEST, "至少两个字符").into_response();
+    }
+    let needle: String = needle.chars().take(64).collect();
+    let resp = match tokio::task::spawn_blocking(move || search_dir(&dir, &needle)).await {
+        Ok(r) => r,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("搜索失败：{e}")).into_response();
+        }
+    };
+    Json(resp).into_response()
+}
+
 /// 审计只留第一行：git pull 能刷几十行，全塞进环形缓冲会把别的记录挤掉
 fn first_line(s: &str) -> String {
     s.lines()
@@ -911,6 +940,7 @@ async fn start() -> Result<(), BoxErr> {
         .route("/api/units/{key}/logs", get(logs))
         .route("/api/units/{key}/tree", get(tree))
         .route("/api/units/{key}/file", get(file))
+        .route("/api/units/{key}/search", get(search))
         .route("/api/units/{key}/pull", post(pull))
         .route("/api/units/{key}/bins/{bin}/{action}", post(bin_action))
         .route("/api/units/{key}/{action}", post(action))
