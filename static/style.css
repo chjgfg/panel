@@ -20,27 +20,46 @@
      让「卡片浮在背景上」这件事看得见。浅色下投影必须更淡，否则白底发脏。 */
   --shadow: 0 1px 2px rgba(0, 0, 0, .45), 0 10px 26px -14px rgba(0, 0, 0, .7);
   --edge: inset 0 1px 0 rgba(255, 255, 255, .05);
+  /* 这三档是「同一件事在深浅两副底色上要分开写」：遮罩浓度、嵌套层的近距投影、
+     粘边投影。深色下全靠亮度差，浅色下同一组数值会把白底压脏，所以各给一份。 */
+  --scrim: rgba(0, 0, 0, .55);
+  --inner-shadow: 0 1px 2px rgba(0, 0, 0, .28);
+  --drop: rgba(0, 0, 0, .5);
+  /* 发丝线：把 line 往 card 里兑一档，用来画「只想分开、不想框住」的线。
+     深色下 55% 就够（卡片亮度本身已经在分），浅色档那边单独提到 100% ——
+     白底上兑过淡的线等于没画 */
+  --hairline: color-mix(in oklab, var(--line) 55%, var(--card));
 }
 /* 浅色变量组，和下面媒体查询里的定义保持一致 */
 html.light {
-  --bg: #f4f5f7; --card: #fff; --line: #e2e5ea;
-  --fg: #1b1f24; --muted: #6b7280;
+  --bg: #f4f5f7; --card: #fff; --line: #dfe3e9;
+  --fg: #1b1f24; --muted: #5f6773; --accent: #0550ae;
   --on: #1a7f37; --off: #9aa0a6; --bad: #cf222e; --warn: #bf8700;
   --go: #1a7f37; --danger: #cf222e; --caution: #9a6700;
   /* 浅色下投影必须更淡，否则白底发脏 */
   --shadow: 0 1px 2px rgba(16, 24, 40, .06), 0 8px 20px -12px rgba(16, 24, 40, .18);
   --edge: inset 0 1px 0 rgba(255, 255, 255, .9);
+  --scrim: rgba(16, 24, 40, .30);
+  --inner-shadow: 0 1px 2px rgba(16, 24, 40, .07);
+  --drop: rgba(16, 24, 40, .20);
+  /* 白底上浮白的东西只靠「白 vs 浅灰」的亮度差分不开，线必须画足；
+     muted 也从 #6b7280 压深到 #5f6773：版本行那种 12px 小字原来只有 4.43 对比 */
+  --hairline: var(--line);
 }
 /* JS 永远会设 data-theme，这个媒体查询只兜 JS 被禁用/加载失败的情况。
    这组值必须和上面 html.light 逐条一致，改那边记得改这里。 */
 @media (prefers-color-scheme: light) {
   html:not([data-theme]) {
-    --bg: #f4f5f7; --card: #fff; --line: #e2e5ea;
-    --fg: #1b1f24; --muted: #6b7280;
+    --bg: #f4f5f7; --card: #fff; --line: #dfe3e9;
+    --fg: #1b1f24; --muted: #5f6773; --accent: #0550ae;
     --on: #1a7f37; --off: #9aa0a6; --bad: #cf222e; --warn: #bf8700;
     --go: #1a7f37; --danger: #cf222e; --caution: #9a6700;
     --shadow: 0 1px 2px rgba(16, 24, 40, .06), 0 8px 20px -12px rgba(16, 24, 40, .18);
     --edge: inset 0 1px 0 rgba(255, 255, 255, .9);
+    --scrim: rgba(16, 24, 40, .30);
+    --inner-shadow: 0 1px 2px rgba(16, 24, 40, .07);
+    --drop: rgba(16, 24, 40, .20);
+    --hairline: var(--line);
   }
 }
 * { box-sizing: border-box; }
@@ -261,9 +280,30 @@ td.ops .ops-gap {
 /* 项目行展开箭头 */
 td.name .caret { cursor: pointer; user-select: none; margin-right: .4rem; color: var(--muted); }
 td.name .subline { display: block; color: var(--muted); font-size: var(--fs-xs); }
+/* 首字母徽标：项目名是一串小写长词，光读字定位很慢；给每个项目一枚按名字哈希
+   定色的小圆片，眼睛先认色块再认字。色相只从固定的几档里取（不是 360 度随便来），
+   再整体压低饱和度和明度对比 —— 一屏五颜六色就成了玩具。
+   --av 是 JS 设进来的裸色相数字，深浅两档各配自己的饱和/明度，白天不至于糊成一片 */
+.avatar {
+  --av-c: hsl(var(--av) 46% 66%);
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 1.4rem; height: 1.4rem; margin-right: .45rem; vertical-align: middle;
+  border-radius: 6px; font-size: var(--fs-xs); font-weight: 700; letter-spacing: .01em;
+  color: var(--av-c);
+  background: color-mix(in oklab, var(--av-c) 15%, var(--card));
+  border: 1px solid color-mix(in oklab, var(--av-c) 26%, var(--line));
+}
+html.light .avatar { --av-c: hsl(var(--av) 52% 38%); }
 /* 项目块：每个项目 = 一张项目行表（放表格里）+ 下方表格外的 bin 独立面板 */
 #projList { display: flex; flex-direction: column; gap: .4rem; margin-top: .4rem; }
-.proj-block > table { margin: 0; }
+/* 项目行就是「表里的一行」，不该长得像一张卡：每个项目各自成表，如果连边框和
+   投影都照抄顶层卡片，一屏就是七八张叠起来的卡，中间还夹着双线（表头下沿 +
+   行上沿）。这里把描边降到发丝一档、投影降到嵌套层那一档，行与行靠间距分开 */
+.proj-block > table {
+  margin: 0;
+  border-color: var(--hairline);
+  box-shadow: var(--inner-shadow), var(--edge);
+}
 /* 主表格（表头 + 每个项目行）列宽统一钉死：table-layout:fixed 让每一列都按下面的
    百分比走，表头和各项目行表格列宽完全一致，绝不因内容长度漂移错位。
    六列必须全给死宽度、且加起来正好 100%：只要有一列留 auto，fixed 布局就把
@@ -284,6 +324,20 @@ td.name .subline { display: block; color: var(--muted); font-size: var(--fs-xs);
 /* 窄屏（列被百分比压到比内容还窄）时这两列允许换行：
    普通单元格是 white-space:nowrap，列一窄文字不换行而是压到隔壁列上去。 */
 .stack-table td.ops, .stack-table td:nth-child(2) { white-space: normal; }
+/* 表头吸顶：项目十几个，滚到下面就没列名了，读数得靠猜是哪一列。
+   sticky 写在下面 accent 色带那条规则上（同优先级、后面的胜）。这里只处理
+   两件事：放开 table 自带的 overflow:hidden（它是给圆角裁内容用的，一存在
+   就把 sticky 关在自己的盒子里、等于不粘），以及给格子铺不透明底色 ——
+   不然项目行会从吸住的表头底下透过去。圆角改由首末两格自己削。
+   只管桌面：≤640px 那一档整表要横向滚动，滚动容器变成 main，而 main 自己
+   纵向不滚（高度就等于内容），sticky 的参照系就轮不到视口了 —— 实测手机
+   上滚 600px 表头跟着走 600px。手机上表头本来就在首屏里，接受不吸。 */
+main > table.stack-table { overflow: visible; }
+main > table.stack-table th { background: var(--card); }
+main > table.stack-table th:first-child { border-top-left-radius: 10px; }
+main > table.stack-table th:last-child { border-top-right-radius: 10px; }
+/* 吸顶后表头和内容只隔一条 1px 线，滚动时容易糊在一起：补一档向下的近距 */
+main > table.stack-table thead { box-shadow: 0 2px 6px -4px var(--drop); }
 /* bin 独立面板：缩进一点，跟上方项目行区分开；内部列表，行数多时自己滚，不碰外层表格。
    左右两侧 margin 取同一个值，左右留白对称：左侧跟上方父项目容器保持一致的缩进，
    右侧留出一模一样的同等留白，展开/收起时面板始终水平居中，不会左右偏移晃动。 */
@@ -294,13 +348,15 @@ td.name .subline { display: block; color: var(--muted); font-size: var(--fs-xs);
   border-left: 2px solid color-mix(in oklab, var(--accent) 45%, var(--line));
   background: color-mix(in oklab, var(--card) 92%, transparent);
   overflow: auto; max-height: 46vh;
-  /* 嵌套层不配和顶层卡片同样重的投影，否则两层被抹平；只留顶边高光 + 一档近距 */
-  box-shadow: 0 1px 2px rgba(0, 0, 0, .28), var(--edge);
+  box-shadow: var(--inner-shadow), var(--edge);
   animation: panel-in .16s ease;
 }
 .bin-panel table { border: 0; border-radius: 0; }
 .bin-panel th { font-size: var(--fs-xs); }
 .bin-panel td { padding: .4rem .7rem; }
+/* 面板里的行线只要「分得开」，不需要「框得住」：一层已经靠缩进和左边线
+   表达从属了，行线再实就等于又框了一遍 */
+.bin-panel tbody td { border-bottom-color: var(--hairline); }
 /* 按钮不另立更小的一档：面板里所有按钮同一规格，父行和 bin 行只差在行的疏密上。
    原来这里压成 .25rem/.8rem，跟上方父行的按钮并排看就像缩了一号、点着也费劲。 */
 .bin-panel .ops { white-space: nowrap; }
@@ -315,8 +371,12 @@ td.name .subline { display: block; color: var(--muted); font-size: var(--fs-xs);
 /* 表头跟正文拉开层级：字距 + 略粗，不再像「小一号的正文」 */
 th { letter-spacing: .04em; font-weight: 600; }
 /* 表头表格顶上一条 accent→透明的色带，给整页一个视觉起点：
-   不然从状态卡到表格全是同一种灰边框，页面没有落光的地方 */
-main > table.stack-table { position: relative; }
+   不然从状态卡到表格全是同一种灰边框，页面没有落光的地方。
+   position 也在这一条上给：sticky 和 relative 同优先级、后面的胜，吸顶
+   （见上面 .stack-table 那段）必须写在这里才不会被 relative 顶掉。
+   sticky 的粘附范围是父盒子 main —— 表头那张表的高度只够一行，粘在 th 上
+   等于没粘，要粘在整张表上才能一路粘到列表末尾 */
+main > table.stack-table { position: sticky; top: 0; z-index: 3; }
 main > table.stack-table::after {
   content: ''; position: absolute; left: 0; right: 0; top: 0; height: 2px;
   background: linear-gradient(90deg, var(--accent), transparent 55%);
@@ -338,15 +398,34 @@ td { font-variant-numeric: tabular-nums; }
 .spark polyline { fill: none; stroke: var(--accent); stroke-width: 1.2; stroke-linecap: round; }
 .spark.cpu polyline { stroke: var(--warn); }
 .spark.mem polyline { stroke: var(--accent); }
+/* 折线下面垫一层同色面积：30px 宽里一根 1.2px 的线看不出「在涨」，
+   有了底面积才有体积感。悬停读数走 SVG 自带的 <title>，不另做 tooltip */
+.spark polygon { stroke: none; fill: var(--accent); opacity: .22; }
+.spark.cpu polygon { fill: var(--warn); }
 /* 行 hover：表格是页面主体，之前鼠标划上去一点反馈都没有。
    节点复用（见 app.js 的 views）之后，:hover 能一直跟着鼠标，不再需要 JS 补类 */
 .stack-table tbody tr, .bin-panel tbody tr { transition: background-color .12s ease; }
 .stack-table tbody tr:hover, .bin-panel tbody tr:hover {
-  background: color-mix(in oklab, var(--fg) 5%, var(--card));
+  background: color-mix(in oklab, var(--fg) 7%, var(--card));
 }
-/* 深色下光有 5% 底色不够明显，左缘再补一道 accent，明确「是这一行」 */
-.stack-table tbody tr:hover > td:first-child,
-.bin-panel tbody tr:hover > td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
+/* 行左缘的状态色带：整行原本只有右边那颗胶囊在说状态，一屏十几个项目时
+   扫行扫不出「哪条在跑」。3px 用 inset 挂在首格上，不占列宽、不改行高，
+   档位类由 JS 设在 tr 上（st-on / st-bad / st-off）。
+   以前 hover 是在同一个位置刷一道 accent 条 —— 现在那条边归状态了，
+   hover 只改底色，两个信号不再抢地方 */
+.stack-table tbody tr > td:first-child, .bin-panel tbody tr > td:first-child {
+  box-shadow: inset 3px 0 0 transparent;
+  transition: box-shadow .25s ease;
+}
+.stack-table tr.st-on > td:first-child, .bin-panel tr.st-on > td:first-child {
+  box-shadow: inset 3px 0 0 color-mix(in oklab, var(--on) 70%, transparent);
+}
+.stack-table tr.st-bad > td:first-child, .bin-panel tr.st-bad > td:first-child {
+  box-shadow: inset 3px 0 0 color-mix(in oklab, var(--bad) 70%, transparent);
+}
+.stack-table tr.st-off > td:first-child, .bin-panel tr.st-off > td:first-child {
+  box-shadow: inset 3px 0 0 color-mix(in oklab, var(--off) 42%, transparent);
+}
 /* 状态胶囊：原来一个灰点 + 一行普通字，跟旁边的时长同权重，扫一眼看不出谁在跑。
    沿用按钮那三档 color-mix 语义构造：点、字、底同一色相，只是底很淡 */
 .badge {
@@ -419,6 +498,20 @@ td.name .caret:hover { color: var(--accent); }
   padding: 1.1rem; text-align: center; color: var(--muted);
   border: 1px dashed var(--line); border-radius: 10px; background: var(--card);
 }
+/* 首屏骨架：第一次 /api/units 在单核机器上要一两秒，这期间整页是空的，
+   只有右上角一个小点在呼吸 —— 给三行灰条占住位置，「在加载」这件事一眼看得见。
+   外观照抄项目行那张表（同边框同圆角同内边距），数据回来换成真行时不跳版 */
+.sk {
+  display: flex; align-items: center; gap: .75rem;
+  padding: .6rem .7rem; background: var(--card);
+  border: 1px solid var(--line); border-radius: 10px;
+}
+.sk i {
+  display: block; height: .75rem; border-radius: 4px;
+  background: color-mix(in oklab, var(--muted) 22%, transparent);
+  animation: sk-shimmer 1.1s ease-in-out infinite;
+}
+@keyframes sk-shimmer { 0%, 100% { opacity: .45; } 50% { opacity: 1; } }
 
 #projList { margin-top: .4rem; }
 /* 运行弹窗：模态遮罩 + 居中卡片，遮罩不拦截点击（点击遮罩不关闭弹窗）。
@@ -426,14 +519,21 @@ td.name .caret:hover { color: var(--accent); }
 .overlay {
   position: fixed; inset: 0; z-index: 50;
   display: flex; align-items: center; justify-content: center;
-  background: rgba(0, 0, 0, .55);
+  /* 遮罩浓度跟着主题走：白底上压 55% 纯黑，弹窗外面那一圈会发闷 */
+  background: var(--scrim);
+  /* 毛玻璃把后面的内容糊成一团而不是「一条一条字」，弹窗于是真的浮在前面；
+     只 2px，再大在白天就看不出下面是什么了 */
+  backdrop-filter: blur(2px);
 }
 .modal {
   width: min(520px, 94vw); max-height: 84vh;
   display: flex; flex-direction: column;
-  background: var(--card); border: 1px solid var(--line);
+  background: var(--card);
+  border: 1px solid color-mix(in oklab, var(--accent) 26%, var(--line));
   border-radius: 12px;
-  box-shadow: 0 16px 48px rgba(0, 0, 0, .5), 0 0 0 1px rgba(255, 255, 255, .02);
+  /* 描边转 accent 后，那圈 1px 白环就多余了：换成极淡的同色光圈，
+     深浅两档都是一个口径 —— 「这是浮起来的那一层」 */
+  box-shadow: 0 16px 48px var(--drop), 0 0 0 4px color-mix(in oklab, var(--accent) 10%, transparent);
   overflow: hidden;
 }
 .modal-head {
@@ -731,7 +831,14 @@ html.light #srcBody {
      等于没粘），所以上面把 overflow 放开 —— 代价是圆角不再裁掉行底色，可接受。 */
   .stack-table :is(th, td):nth-child(6) {
     position: sticky; right: 0; z-index: 1;
-    background: var(--card); box-shadow: -1px 0 0 var(--line);
+    background: var(--card);
+    box-shadow: -12px 0 14px -10px var(--drop), -1px 0 0 var(--line);
+  }
+  /* 横滚这件事本身也得看得出来：粘边左边再压一窄条渐隐，右边的内容滑到它
+     下面时被"吃掉"而不是硬切一刀 —— 光有投影只说明"这儿有根线" */
+  .stack-table :is(th, td):nth-child(6)::before {
+    content: ''; position: absolute; top: 0; bottom: 0; right: 100%; width: 14px;
+    pointer-events: none; background: linear-gradient(90deg, transparent, var(--card));
   }
   .stack-table tbody tr:hover :is(th, td):nth-child(6) {
     background: color-mix(in oklab, var(--fg) 5%, var(--card));

@@ -50,6 +50,7 @@ function showLogin() {
 function showApp() {
   $('login').hidden = true;
   $('app').hidden = false;
+  showSkeleton();
   refresh();
   loadVersion();
   timer ||= setInterval(refresh, POLL);
@@ -214,6 +215,23 @@ function pushHist(list) {
   }
 }
 
+/// 首字母徽标的字：目录名只能含 ASCII 字母数字和 ._ -（后端 ok_name 卡过），
+/// 所以按分隔符切词取头两个首字母，单词就取头两个字母
+function initials(name) {
+  const segs = name.split(/[-_.\s]+/).filter(Boolean);
+  const s = segs.length >= 2 ? segs[0][0] + segs[1][0] : name.slice(0, 2);
+  return s.toUpperCase();
+}
+
+/// 名字哈希 → 固定色相。只从六个档里取，不是 0~360 随便来：
+/// 色相散开时一屏看着像调色盘，收在六档才像同一套系统里的项目
+const AV_HUES = [212, 158, 42, 344, 268, 24];
+function hueFor(name) {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+  return AV_HUES[h % AV_HUES.length];
+}
+
 /// 迷你折线。用 SVG 不用 canvas：不必管设备像素比，也不会因重绘闪一下。
 /// 走 createElementNS 而不是拼 innerHTML —— 这页其它地方全程 textContent，
 /// 不给注入留口子（这里虽然只有数字，但坏了惯例更糟）
@@ -227,11 +245,22 @@ function spark(vals, cls) {
   svg.setAttribute('width', w);
   svg.setAttribute('height', h);
   svg.setAttribute('class', 'spark ' + cls);
+  const pts = vals.map((v, i) =>
+    `${(i * w / (vals.length - 1)).toFixed(1)},${(h - 0.5 - v / max * (h - 1)).toFixed(1)}`);
+  // 面积层先入栈，折线压在它上面（首尾两点本来就在 x=0 和 x=w，补两个底角即闭合）
+  const area = document.createElementNS(ns, 'polygon');
+  area.setAttribute('points', `0,${h} ${pts.join(' ')} ${w},${h}`);
+  svg.appendChild(area);
   const pl = document.createElementNS(ns, 'polyline');
-  pl.setAttribute('points', vals.map((v, i) =>
-    `${(i * w / (vals.length - 1)).toFixed(1)},${(h - 0.5 - v / max * (h - 1)).toFixed(1)}`
-  ).join(' '));
+  pl.setAttribute('points', pts.join(' '));
   svg.appendChild(pl);
+  // 悬停读数：30px 的线只能看出个方向，「峰值多少、现在多少」得靠这行字
+  const fmt = cls === 'cpu' ? x => x.toFixed(1) + '%' : x => fmtMemMB(x);
+  const ti = document.createElementNS(ns, 'title');
+  ti.textContent = `${cls === 'cpu' ? 'CPU' : '内存'} 最近 ${vals.length} 次采样：`
+    + `现值 ${fmt(vals[vals.length - 1])}，峰值 ${fmt(Math.max(...vals))}，`
+    + `谷值 ${fmt(Math.min(...vals))}`;
+  svg.appendChild(ti);
   return svg;
 }
 
@@ -271,11 +300,34 @@ $('fltName').oninput = onFilterChange;
 $('fltState').onchange = onFilterChange;
 $('sortBy').onchange = onFilterChange;
 
+let booted = false;   // 第一批数据到手没有（首屏骨架行用）
+
+/// 第一次拉列表在单核机器上要一两秒，这期间页面只有右上角一个小点在呼吸，
+/// 看着像没加载出来。先垫三行灰条占住位置，数据一到整片换掉。
+function showSkeleton() {
+  if (booted) return;
+  const holder = $('projList');
+  holder.replaceChildren();
+  for (let i = 0; i < 3; i++) {
+    const row = document.createElement('div');
+    row.className = 'sk';
+    // 六根灰条按真列宽（24/15/13/7/10/31）摆，数据一到换成真行时位置不跳
+    for (const w of ['24%', '15%', '13%', '7%', '10%', '31%']) {
+      const bar = document.createElement('i');
+      bar.style.width = w;
+      row.appendChild(bar);
+    }
+    holder.appendChild(row);
+  }
+}
+
 function render(list) {
   lastList = list;
   pushHist(list);
   const shown = visible(list);
   const holder = $('projList');
+  // 首屏：把骨架行清掉再放真行。此刻 views 还是空的，清空不会误删真节点
+  if (!booted) { booted = true; holder.replaceChildren(); }
   $('listCount').textContent = shown.length === list.length
     ? `${list.length} 个项目`
     : `显示 ${shown.length} / 共 ${list.length}`;
@@ -347,10 +399,15 @@ function buildView(u) {
   v.caret = document.createElement('span');
   v.caret.className = 'caret';
   v.caret.onclick = () => toggleExpand(u.key);
+  // 徽标的字和色都由项目名决定，而 key 就是目录名 —— 一辈子不变，建一次就够
+  v.av = document.createElement('span');
+  v.av.className = 'avatar';
+  v.av.textContent = initials(u.name);
+  v.av.style.setProperty('--av', hueFor(u.name));
   v.nameText = document.createTextNode('');
   v.sub = document.createElement('small');
   v.sub.className = 'subline';
-  v.name.append(v.caret, v.nameText, v.sub);
+  v.name.append(v.caret, v.av, v.nameText, v.sub);
 
   const b = badgeCell(v.tr);
   v.badge = b.badge;
@@ -424,6 +481,10 @@ function syncView(v, u) {
   else statusText = '已停止';
   v.badge.className = 'badge ' + (alive ? 'on' : u.active === 'failed' ? 'bad' : 'off');
   v.badgeText.nodeValue = statusText;
+  // 行左缘那条状态色带的档位（CSS 里的 .st-*）。同值不重设：class 一变，
+  // box-shadow 过渡就重播，每 3 秒轮询会让它一直闪
+  const st = alive ? 'st-on' : u.active === 'failed' ? 'st-bad' : 'st-off';
+  if (v.tr.className !== st) v.tr.className = st;
 
   v.dur.textContent = fmtDur(u.uptime);
   v.cpuText.nodeValue = u.cpu == null ? '—' : u.cpu.toFixed(1) + '%';
@@ -519,6 +580,9 @@ function syncBinRows(v, u) {
       : (inst.fail || (inst.active === 'failed' ? '上次失败' : '未运行'));
     r.badge.className = 'badge ' + (inst.running ? 'on' : inst.active === 'failed' ? 'bad' : 'off');
     r.badgeText.nodeValue = inst.running ? '运行中' : inst.active === 'failed' ? '失败' : '未运行';
+    // 项目行和 bin 行共用同一套左缘档位，两个层级的状态口径要一致
+    const bst = inst.running ? 'st-on' : inst.active === 'failed' ? 'st-bad' : 'st-off';
+    if (r.tr.className !== bst) r.tr.className = bst;
     r.dur.textContent = fmtDur(inst.uptime);
     r.cpu.textContent = inst.cpu == null ? '—' : inst.cpu.toFixed(1) + '%';
     r.mem.textContent = fmtMem(inst.memory);
@@ -826,6 +890,8 @@ async function refresh() {
     } catch { /* 401 已由 req() 处理 */ }
   } catch (e) {
     if (e.message !== '未登录') banner('刷新失败: ' + e.message);
+    // 第一次就没拉回来：别让骨架行一直闪，闪着的灰条比空白更像卡住了
+    if (!booted) $('projList').replaceChildren();
   } finally {
     document.body.classList.remove('fetching');
   }
