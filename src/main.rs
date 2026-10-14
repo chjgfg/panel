@@ -123,6 +123,9 @@ struct BinInst {
     uptime: Option<f64>,
     /// 该 bin 的 unit 失败时的一句话原因
     fail: Option<String>,
+    /// 面板上次用它起来时给的是什么参数（没起过 = None）。
+    /// 项目级只报第一个 bin 的参数，多 bin 项目里看不出每个 bin 各自用的什么
+    args: Option<String>,
 }
 
 // ---------- 接口 ----------
@@ -268,6 +271,11 @@ async fn units(State(app): State<Arc<App>>) -> Json<Vec<Status>> {
                 } else {
                     None
                 };
+                // 这个 bin 上次是用什么参数起来的 —— 按 bin 名查，不是拿项目里第一个的
+                let args = cur
+                    .as_ref()
+                    .and_then(|g| g.iter().find(|(bn, _)| bn == b))
+                    .map(|(_, a)| a.clone());
                 BinInst {
                     bin: b.clone(),
                     active: active.to_string(),
@@ -277,6 +285,7 @@ async fn units(State(app): State<Arc<App>>) -> Json<Vec<Status>> {
                     cpu: raw.and_then(|r| app.cpu(&unit_of(&name, b), r.cpu_nsec)),
                     uptime,
                     fail: raw.and_then(fail_reason),
+                    args,
                 }
             })
             .collect();

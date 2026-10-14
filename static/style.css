@@ -227,6 +227,9 @@ button.ghost:hover:not(:disabled) {
   display: block; height: 100%; border-radius: 3px; background: var(--m);
   /* 起点淡终点实：填充方向一眼可读，比一根纯色条更有指向性 */
   background: linear-gradient(90deg, color-mix(in oklab, var(--m) 55%, transparent), var(--m));
+  /* 条宽跟着新读数滑过去，而不是每 3 秒硬跳一格。这条只有在卡片复用节点之后
+     才成立 —— 以前整排重建，动画每轮从头开始，看着比不滑还碍眼 */
+  transition: width .6s ease;
 }
 #app > header {
   display: flex; align-items: center; flex-wrap: wrap; gap: .75rem; margin-bottom: .75rem;
@@ -690,14 +693,27 @@ td.name .caret:hover { color: var(--accent); }
 #logBody {
   margin: 0; flex: 1; min-height: 0; overflow: auto; padding: .7rem;
   background: var(--card); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
-  font: 12.5px/1.5 ui-monospace, Consolas, monospace;
+  /* 字号收进五档标尺（原来是写死的 12.5px）；font 简写里塞 var() 要靠替换后
+     才解析，拆成长写更稳（同 body 那条） */
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: var(--fs-sm); line-height: 1.5;
   /* 不换行：一行日志就是一条记录，折行之后时间戳对不齐，很难扫。
      太长的横向滚动看。 */
   white-space: pre;
 }
+/* 跨天的日志按日期插一条分组头，并且吸顶：滚到哪一段都知道现在看的是哪天。
+   底色跟正文同档，否则行从底下透上来糊成一片 */
+#logBody .day {
+  position: sticky; top: 0; z-index: 1;
+  margin-top: .35rem; padding: .15rem .35rem;
+  background: var(--card); color: var(--muted);
+  font-size: var(--fs-xs); font-weight: 600; letter-spacing: .06em;
+  border-bottom: 1px solid var(--hairline);
+}
+#logBody .day:first-child { margin-top: 0; }
 /* 源码弹窗：左右分栏。左边目录树窄一些（大项目树会很深），右边占大头看代码 */
 /* 标题里的徽标和文字按中线排（h2 默认基线对齐，inline-flex 的徽标会往下坠） */
-#srcBox .modal-head h2 { display: flex; align-items: center; gap: .45rem; }
+#srcBox .modal-head h2, #runbox .modal-head h2 { display: flex; align-items: center; gap: .45rem; }
 .src-layout {
   flex: 1; min-height: 0;
   display: flex;
@@ -910,9 +926,23 @@ html.light #srcBody {
   flex-shrink: 0; font-size: var(--fs-xs); font-weight: 700; letter-spacing: .03em;
   padding: .1rem .55rem; border-radius: 99px; text-transform: uppercase;
 }
-/* 手机上树放不下 260px,收窄一点 */
+/* 手机上源码弹窗改成上下堆叠。左右分栏在 375px 宽里，树要 180px 才勉强放下
+   图标 + 文件名，代码区只剩一条缝，两边都没法看；堆起来之后树限高、
+   代码区吃满整幅宽，长行照常横向滚 */
 @media (max-width: 640px) {
-  #srcTree { width: 180px; }
+  .src-layout { flex-direction: column; }
+  #srcTree {
+    /* 拖拽调宽存的是内联 px，不用 !important 顶不掉 */
+    width: auto !important; flex: none; max-height: 26vh;
+    border-right: 0; border-bottom: 1px solid var(--hairline);
+  }
+  #srcTreeGrip { display: none; }   /* 堆叠时拖宽没有意义 */
+  .src-right { min-height: 0; }
+  .src-toolbar { flex-wrap: wrap; row-gap: .4rem; }
+  .modal-head { flex-wrap: wrap; }
+  /* 搜索框单独占一行，别和「源码 · 项目名」挤在一起 */
+  .modal-head #srcQuery { flex: 1 1 100%; order: 3; }
+  .modal-log { height: 92vh; }
 }
 @media (max-width: 640px) {
   body { padding: .6rem; }

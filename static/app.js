@@ -28,6 +28,34 @@ function syncScrollLock() {
   document.body.style.overflow = open ? 'hidden' : '';
 }
 
+// ---------- 弹窗焦点管理 ----------
+// 打开时记住是谁把它打开的、把焦点收进弹窗；关掉时再还给那个按钮。
+// 以前焦点一直掉在 body 上：Tab 得从页面最上面重走一遍，屏幕阅读器也听不到
+// 「弹出了一个对话框」。统一挂在 hidden 上做，是因为六个弹窗各有各的 open/close，
+// 挨个改迟早漏一个，而且以后新增的弹窗能自动生效。
+// 故意不做 Tab 锁死（focus trap）：控制台弹窗里 Tab 属于里面那个 shell，锁不得。
+const dialogBack = new Map();
+
+for (const id of ['runbox', 'confirmBox', 'logBox', 'srcBox', 'auditBox', 'termBox', 'keyBox']) {
+  const box = $(id);
+  if (!box) continue;
+  box.setAttribute('role', 'dialog');
+  box.setAttribute('aria-modal', 'true');
+  box.tabIndex = -1;   // 弹窗本身可聚焦：焦点进来，Tab 才从它内部第一个控件起步
+  new MutationObserver(() => {
+    if (box.hidden) {
+      const back = dialogBack.get(box);
+      dialogBack.delete(box);
+      if (back && back.isConnected) back.focus();
+    } else {
+      dialogBack.set(box, document.activeElement);
+      const h = box.querySelector('h2');
+      if (h) box.setAttribute('aria-label', h.textContent.trim());
+      box.focus();
+    }
+  }).observe(box, { attributes: true, attributeFilter: ['hidden'] });
+}
+
 function showLogin() {
   clearInterval(timer);
   timer = null;
@@ -90,51 +118,76 @@ function severity(p) {
   return p >= 90 ? 'var(--bad)' : p >= 70 ? 'var(--warn)' : 'var(--accent)';
 }
 
-function tile(label, value, sub, p) {
-  const d = document.createElement('div');
-  d.className = 'tile';
-  const b = document.createElement('b');
-  b.textContent = label;
-  const v = document.createElement('strong');
-  v.textContent = value;
-  const s = document.createElement('small');
-  s.textContent = sub || '';
-  d.append(b, v, s);
-  if (p != null) {
-    // --m 设在卡上而不是仪表上：数值文字要跟仪表同色（自定义属性往下继承）
-    d.style.setProperty('--m', severity(p));
-    if (p >= 90) d.classList.add('hi');   // 顶到上限的卡整张描边转红
-    const m = document.createElement('div');
-    m.className = 'meter';
-    const i = document.createElement('i');
-    i.style.width = Math.min(100, Math.max(0, p)) + '%';
-    m.appendChild(i);
-    d.appendChild(m);
-  }
-  return d;
+/// 状态卡按 id 常驻，每轮只改文字和条宽。以前每 3 秒整排重建，于是
+/// 鼠标停在卡上时 hover 的抬升每轮丢一次 —— 和项目列表「一跳一跳」同一个
+/// 毛病（见 views 那段），同一个治法：节点复用。
+const tileViews = new Map();
+
+function tileView(id) {
+  let v = tileViews.get(id);
+  if (v) return v;
+  const el = document.createElement('div');
+  el.className = 'tile';
+  const label = document.createElement('b');
+  const val = document.createElement('strong');
+  const sub = document.createElement('small');
+  const meter = document.createElement('div');
+  meter.className = 'meter';
+  const fill = document.createElement('i');
+  meter.appendChild(fill);
+  el.append(label, val, sub, meter);
+  v = { el, label, val, sub, meter, fill };
+  tileViews.set(id, v);
+  return v;
 }
 
 function renderHost(h) {
-  const t = [
-    tile('CPU', h.cpu == null ? '—' : h.cpu.toFixed(1) + '%', `${h.cores} 核`, h.cpu),
-  ];
+  const want = [];
+  const put = (id, label, value, sub, p) => want.push({ id, label, value, sub, p });
+  put('cpu', 'CPU', h.cpu == null ? '—' : h.cpu.toFixed(1) + '%', `${h.cores} 核`, h.cpu);
   const mp = ratio(h.mem_used, h.mem_total);
-  t.push(tile('内存', mp == null ? '—' : mp.toFixed(0) + '%',
-    `${fmtMem(h.mem_used)} / ${fmtMem(h.mem_total)}`, mp));
+  put('mem', '内存', mp == null ? '—' : mp.toFixed(0) + '%',
+    `${fmtMem(h.mem_used)} / ${fmtMem(h.mem_total)}`, mp);
   for (const d of h.disks) {
     const dp = ratio(d.used, d.total);
-    t.push(tile('磁盘 ' + d.mount, dp == null ? '—' : dp.toFixed(0) + '%',
-      `${fmtMem(d.used)} / ${fmtMem(d.total)}`, dp));
+    put('disk:' + d.mount, '磁盘 ' + d.mount, dp == null ? '—' : dp.toFixed(0) + '%',
+      `${fmtMem(d.used)} / ${fmtMem(d.total)}`, dp);
   }
   if (h.swap_total > 0) {
     const sp = ratio(h.swap_used, h.swap_total);
-    t.push(tile('Swap', sp.toFixed(0) + '%',
-      `${fmtMem(h.swap_used)} / ${fmtMem(h.swap_total)}`, sp));
+    put('swap', 'Swap', sp.toFixed(0) + '%',
+      `${fmtMem(h.swap_used)} / ${fmtMem(h.swap_total)}`, sp);
   }
-  t.push(tile('负载', h.load[0].toFixed(2),
-    `5 分 ${h.load[1].toFixed(2)} · 15 分 ${h.load[2].toFixed(2)}`));
-  t.push(tile('已开机', fmtDur(h.uptime)));
-  $('stats').replaceChildren(...t);
+  put('load', '负载', h.load[0].toFixed(2),
+    `5 分 ${h.load[1].toFixed(2)} · 15 分 ${h.load[2].toFixed(2)}`, null);
+  put('up', '已开机', fmtDur(h.uptime), null, null);
+
+  const holder = $('stats');
+  const seen = new Set();
+  let i = 0;
+  for (const t of want) {
+    seen.add(t.id);
+    const v = tileView(t.id);
+    v.label.textContent = t.label;
+    v.val.textContent = t.value;
+    v.sub.textContent = t.sub || '';
+    v.sub.hidden = !t.sub;
+    if (t.p == null) {
+      v.meter.hidden = true;
+      v.el.style.removeProperty('--m');
+    } else {
+      v.meter.hidden = false;
+      // --m 设在卡上而不是仪表上：数值文字要跟仪表同色（自定义属性往下继承）
+      v.el.style.setProperty('--m', severity(t.p));
+      v.el.classList.toggle('hi', t.p >= 90);   // 顶到上限的卡整张描边转红
+      v.fill.style.width = Math.min(100, Math.max(0, t.p)) + '%';
+    }
+    const at = holder.children[i];
+    if (at !== v.el) holder.insertBefore(v.el, at || null);
+    i++;
+  }
+  // 磁盘数量会变（挂/卸），多出来的卡要撤掉
+  for (const [id, v] of [...tileViews]) if (!seen.has(id)) { v.el.remove(); tileViews.delete(id); }
 }
 
 // 全程用 textContent 建 DOM，不拼 innerHTML，就不用操心转义
@@ -613,10 +666,17 @@ function syncBinRows(v, u) {
     if (!r) { r = buildBinRow(v, inst.bin); v.binRows.set(inst.bin, r); }
     r.inst = inst;
     // 副行只在「有话说」时出现：没跑着的 bin 再写一遍「未运行」，跟右边那颗
-    // 胶囊就是同一句话说两遍
-    const sub = inst.running ? (inst.pid ? `pid ${inst.pid}` : '') : (inst.fail || '');
+    // 胶囊就是同一句话说两遍。参数是这里唯一别处看不到的信息 —— 它是面板自己
+    // 记的，「这个 bin 当初是带什么跑起来的」以前只能去猜
+    const args = (inst.args || '').replace(/\s+/g, ' ').trim();
+    const bits = [];
+    if (inst.running) { if (inst.pid) bits.push(`pid ${inst.pid}`); }
+    else if (inst.fail) bits.push(inst.fail);
+    if (args) bits.push('参数 ' + (args.length > 40 ? args.slice(0, 40) + '…' : args));
+    const sub = bits.join(' · ');
     r.sub.textContent = sub;
     r.sub.hidden = !sub;
+    r.sub.title = args.length > 40 ? inst.args : '';
     r.badge.className = 'badge ' + (inst.running ? 'on' : inst.active === 'failed' ? 'bad' : 'off');
     r.badgeText.nodeValue = inst.running ? '运行中' : inst.active === 'failed' ? '失败' : '未运行';
     // 项目行和 bin 行共用同一套左缘档位，两个层级的状态口径要一致
@@ -759,12 +819,25 @@ function openRun(u, bin) {
   runBin = bin;
   // 标题跟随点击的 bin 动态变化；弹窗内部只剩参数文本域
   $('runName').textContent = bin;
-  $('runArgs').value = '';
+  // 带上项目名和那枚徽标：从列表点进来，「我在运行哪个项目的哪个 bin」不该靠记
+  $('runProject').textContent = u.name + ' / ';
+  const av = $('runAv');
+  av.textContent = initials(u.name);
+  av.style.setProperty('--av', hueFor(u.name));
+  av.hidden = false;
+  // 回填这个 bin 上次用的参数（后端按 bin 报回来）。多 bin 项目里每次重敲一遍
+  // 同一串 --config/--port 纯属折磨
+  const inst = (u.instances || []).find(i => i.bin === bin);
+  $('runArgs').value = inst && inst.args ? inst.args : '';
   $('runErr').textContent = '';
   $('runGo').disabled = false;
   $('runbox').hidden = false;
   // syncScrollLock();
-  $('runArgs').focus();
+  const ta = $('runArgs');
+  ta.focus();
+  // 光标放行尾：改末尾一个数字是最高频的操作，全选着容易一敲就把整串换掉
+  const end = ta.value.length;
+  try { ta.setSelectionRange(end, end); } catch { /* 不是所有输入类型都支持选区 */ }
 }
 
 $('runGo').onclick = async () => {
@@ -855,6 +928,9 @@ function renderLogs(jump) {
   const p = $('logBody');
   // 跟随开关：想停在中间看某一行时，每 3 秒的轮询不该把你顶回底部
   const follow = $('logFollow').checked;
+  // 只看错误：判据就是整行标红用的那一个 ERR_RE，不另写一套关键词表 ——
+  // 两套判据迟早对不上，会出现「标了红却没被筛出来」
+  const errOnly = $('logErrOnly').checked;
   // 保持在底部时才跟随滚动（轮询时定位不会被顶到底部打断）
   const atBottom = p.scrollHeight - p.scrollTop - p.clientHeight < 40;
   p.replaceChildren();
@@ -876,17 +952,31 @@ function renderLogs(jump) {
       rows.push({ time: last, src: one.bin, text: line });
     }
   }
-  const keep1 = filter ? rows.filter(r => r.src === filter) : rows;
+  const bySrc = filter ? rows.filter(r => r.src === filter) : rows;
+  const byLvl = errOnly ? bySrc.filter(r => ERR_RE.test(r.text)) : bySrc;
   // 关键字筛：日志里翻一行 panic 不该靠肉眼扫 300 行
-  const keep = q ? keep1.filter(r => r.text.toLowerCase().includes(q)) : keep1;
+  const keep = q ? byLvl.filter(r => r.text.toLowerCase().includes(q)) : byLvl;
   if (keep.length === 0) {
-    $('logCount').textContent = q ? `这 ${keep1.length} 行里没有「${$('logSearch').value.trim()}」` : '';
+    const bits = [];
+    if (errOnly) bits.push('错误');
+    if (q) bits.push(`「${$('logSearch').value.trim()}」`);
+    $('logCount').textContent = bits.length ? `这 ${byLvl.length} 行里没有${bits.join('、')}` : '';
     p.append('(暂无日志)');
     return;
   }
   // 全部模式按 ISO 时间戳字符串排序（字符串序即时间序）；单 bin 模式保持原序不用排
   if (!filter) keep.sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
+  let day = null;
   for (const r of keep) {
+    // 换日插一条分组头：跨天翻日志时「这堆是昨天的」比逐行读时间戳快得多
+    const d = r.time.slice(0, 10);
+    if (d && d !== day) {
+      day = d;
+      const hd = document.createElement('div');
+      hd.className = 'day';
+      hd.textContent = dayLabel(d);
+      p.appendChild(hd);
+    }
     // 一行一个 div：整行才能做 hover 和「这行是错误」的底色，
     // 拼成一坨文本节点就只能靠字色，扫长日志很吃力
     const ln = document.createElement('div');
@@ -909,11 +999,25 @@ function renderLogs(jump) {
     }
     p.appendChild(ln);
   }
-  $('logCount').textContent = q
-    ? `匹配 ${keep.length} / ${keep1.length} 行`
+  const from = [];
+  if (errOnly) from.push('只看错误');
+  if (q) from.push(`筛「${$('logSearch').value.trim()}」`);
+  $('logCount').textContent = from.length
+    ? `匹配 ${keep.length} / ${byLvl.length} 行（${from.join('，')}）`
     : `共 ${keep.length} 行`;
   // 关闭「跟随底部」后，轮询不再把你顶回底部；主动打开/切筛选（jump）仍然直达最新
   if (jump || (follow && atBottom)) p.scrollTop = p.scrollHeight;
+}
+
+/// 分组头写「今天/昨天」，更早的写日期：凌晨看日志「今天」比日期好认，
+/// 而三天前的「10-11」比「3 天前」准（不用每次重算差几天）
+function dayLabel(d) {
+  const p = n => String(n).padStart(2, '0');
+  const key = t => `${t.getFullYear()}-${p(t.getMonth() + 1)}-${p(t.getDate())}`;
+  const now = new Date();
+  if (d === key(now)) return '今天 ' + d.slice(5);
+  if (d === key(new Date(now.getTime() - 86400000))) return '昨天 ' + d.slice(5);
+  return d;
 }
 
 async function refresh() {
@@ -1199,6 +1303,8 @@ $('keySave').onclick = async () => {
 $('logFilter').onchange = () => { if (logCache) renderLogs(true); };
 // 关键字筛选是纯前端的：只在已经拉到的那几百行里挑，打字时不该回头敲服务器
 $('logSearch').oninput = () => { if (logCache) renderLogs(false); };
+// 级别档切换算一次「换视图」，和切来源一样直达最新一行
+$('logErrOnly').onchange = () => { if (logCache) renderLogs(true); };
 
 // 关闭日志弹窗：清空日志内容，下次再点日志按钮重新拉取
 function closeLogBox() {
@@ -1206,6 +1312,7 @@ function closeLogBox() {
   logCache = null;
   $('logBody').replaceChildren();
   $('logSearch').value = '';
+  $('logErrOnly').checked = false;
   $('logCount').textContent = '';
   $('logBox').hidden = true;
   // syncScrollLock();

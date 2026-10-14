@@ -128,12 +128,13 @@ if (document.documentElement.dataset.theme === 'light') {
   <div id="runbox" class="overlay" hidden>
     <div class="modal">
       <div class="modal-head">
-        <h2>运行 · <span id="runName"></span></h2>
+        <h2>运行 · <span class="avatar" id="runAv" aria-hidden="true" hidden></span><span id="runProject"></span><span id="runName"></span></h2>
         <button id="closeRunX" class="close-x" aria-label="关闭" title="关闭">×</button>
       </div>
       <div class="modal-body">
         <div class="run-single">
-          <textarea id="runArgs" class="arg" rows="4" placeholder="启动参数（原样透传，支持多行）\n回车、空格都原样作为参数传过去" spellcheck="false"></textarea>
+          <!-- 属性里的换行只能写 &#10;：直接写 \n 不换行，屏幕上就明晃晃是「\n」两个字符 -->
+          <textarea id="runArgs" class="arg" rows="4" placeholder="启动参数（原样透传，支持多行）&#10;回车、空格都原样作为参数传过去" spellcheck="false"></textarea>
         </div>
         <p id="runErr" class="err"></p>
       </div>
@@ -169,6 +170,7 @@ if (document.documentElement.dataset.theme === 'light') {
         <label class="log-src">来源 <select id="logFilter"></select></label>
         <input id="logSearch" type="search" placeholder="筛关键字，如 panic / Failed" autocomplete="off" aria-label="按关键字筛日志">
         <label class="log-follow"><input id="logFollow" type="checkbox" checked> 跟随底部</label>
+        <label class="log-follow" title="用和整行标红同一套判据筛，不是再写一遍关键词"><input id="logErrOnly" type="checkbox"> 只看错误</label>
         <button id="logCloseX" class="close-x" aria-label="关闭" title="关闭">×</button>
       </div>
       <pre id="logBody"></pre>
@@ -182,7 +184,7 @@ if (document.documentElement.dataset.theme === 'light') {
   <div id="srcBox" class="overlay" hidden>
     <div class="modal modal-log">
       <div class="modal-head">
-        <h2>源码 · <span class="avatar" id="srcAv" hidden></span><span id="srcName"></span></h2>
+        <h2>源码 · <span class="avatar" id="srcAv" aria-hidden="true" hidden></span><span id="srcName"></span></h2>
         <!-- 跨文件搜索：结果占住左边那棵树的位子（同一块地方两种视图，不另开一层弹窗） -->
         <input id="srcQuery" type="search" placeholder="搜项目里的字，如 Keycode" autocomplete="off" aria-label="在项目内搜索" title="快捷键 / 聚焦到这里；Esc 清空搜索">
         <button id="srcCloseX" class="close-x" aria-label="关闭" title="关闭">×</button>
