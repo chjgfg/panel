@@ -338,22 +338,38 @@ main > table.stack-table th:first-child { border-top-left-radius: 10px; }
 main > table.stack-table th:last-child { border-top-right-radius: 10px; }
 /* 吸顶后表头和内容只隔一条 1px 线，滚动时容易糊在一起：补一档向下的近距 */
 main > table.stack-table thead { box-shadow: 0 2px 6px -4px var(--drop); }
-/* bin 独立面板：缩进一点，跟上方项目行区分开；内部列表，行数多时自己滚，不碰外层表格。
-   左右两侧 margin 取同一个值，左右留白对称：左侧跟上方父项目容器保持一致的缩进，
-   右侧留出一模一样的同等留白，展开/收起时面板始终水平居中，不会左右偏移晃动。 */
+/* bin 独立面板：父行展开后接出来的那一段，缩进一点跟上方项目行分开；内部列表，
+   行数多时自己滚，不碰外层表格。左右两侧 margin 取同一个值，留白对称，
+   展开/收起时面板始终水平居中，不会左右偏移晃动。 */
 .bin-panel {
   margin: .35rem 1.6rem 0 1.6rem;
-  border: 1px solid var(--line); border-radius: 8px;
+  border: 1px solid var(--hairline); border-radius: 8px;
   /* 左缘一道 accent：bin 面板和上方父行只靠 1.6rem 缩进表达从属，太弱 */
   border-left: 2px solid color-mix(in oklab, var(--accent) 45%, var(--line));
-  background: color-mix(in oklab, var(--card) 92%, transparent);
+  /* 底色往正文色里压一档且不透明：半透明的话面板会和下面滚过的行互相透，
+     读起来像蒙了层灰；压过之后它明确是「父行肚子里的一段」，不是又一张卡 */
+  background: color-mix(in oklab, var(--fg) 3.5%, var(--card));
   overflow: auto; max-height: 46vh;
   box-shadow: var(--inner-shadow), var(--edge);
   animation: panel-in .16s ease;
 }
 .bin-panel table { border: 0; border-radius: 0; }
-.bin-panel th { font-size: var(--fs-xs); }
-.bin-panel td { padding: .4rem .7rem; }
+/* 子表头收成一条标签带：它复述的就是父表头那六个词，权重必须低一档，
+   否则一屏两条一样的表头，看着像两张不相干的表 */
+.bin-panel th {
+  font-size: var(--fs-xs); color: var(--muted); letter-spacing: .07em;
+  padding: .3rem .7rem; border-bottom-color: var(--hairline);
+  background: color-mix(in oklab, var(--fg) 4%, transparent);
+}
+.bin-panel td { padding: .5rem .7rem; }
+/* bin 名是程序名不是项目名，等宽更认得出来 */
+.bin-panel .bin-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--fs-md); font-weight: 600;
+}
+/* 没跑着的行整体压暗一档：一屏里三列「—」和真读数混在一起时，压暗比给它上色诚实 */
+.bin-panel tbody tr { transition: background-color .12s ease, opacity .25s ease; }
+.bin-panel tbody tr.st-off { opacity: .68; }
 /* 面板里的行线只要「分得开」，不需要「框得住」：一层已经靠缩进和左边线
    表达从属了，行线再实就等于又框了一遍 */
 .bin-panel tbody td { border-bottom-color: var(--hairline); }
@@ -395,13 +411,10 @@ td { font-variant-numeric: tabular-nums; }
   display: inline-block; vertical-align: middle; margin-left: .35rem;
   opacity: .75; overflow: visible;
 }
-.spark polyline { fill: none; stroke: var(--accent); stroke-width: 1.2; stroke-linecap: round; }
-.spark.cpu polyline { stroke: var(--warn); }
-.spark.mem polyline { stroke: var(--accent); }
-/* 折线下面垫一层同色面积：30px 宽里一根 1.2px 的线看不出「在涨」，
-   有了底面积才有体积感。悬停读数走 SVG 自带的 <title>，不另做 tooltip */
-.spark polygon { stroke: none; fill: var(--accent); opacity: .22; }
-.spark.cpu polygon { fill: var(--warn); }
+/* 颜色由 JS 设在 svg 上的 --spk 决定（cpu=warn，mem=accent），
+   折线和面积渐变两端都读同一个变量，不用为两档各写一套规则 */
+.spark polyline { fill: none; stroke: var(--spk, var(--accent)); stroke-width: 1.2; stroke-linecap: round; }
+.spark polygon { stroke: none; }
 /* 行 hover：表格是页面主体，之前鼠标划上去一点反馈都没有。
    节点复用（见 app.js 的 views）之后，:hover 能一直跟着鼠标，不再需要 JS 补类 */
 .stack-table tbody tr, .bin-panel tbody tr { transition: background-color .12s ease; }
@@ -412,18 +425,20 @@ td { font-variant-numeric: tabular-nums; }
    扫行扫不出「哪条在跑」。3px 用 inset 挂在首格上，不占列宽、不改行高，
    档位类由 JS 设在 tr 上（st-on / st-bad / st-off）。
    以前 hover 是在同一个位置刷一道 accent 条 —— 现在那条边归状态了，
-   hover 只改底色，两个信号不再抢地方 */
-.stack-table tbody tr > td:first-child, .bin-panel tbody tr > td:first-child {
+   hover 只改底色，两个信号不再抢地方。
+   只给父行：bin 面板的左缘已经有那道 accent 从属线，再叠一条状态带就成了
+   5px 两色边；bin 行的状态有胶囊和「没跑的行压暗」表达，够了。 */
+.stack-table tbody tr > td:first-child {
   box-shadow: inset 3px 0 0 transparent;
   transition: box-shadow .25s ease;
 }
-.stack-table tr.st-on > td:first-child, .bin-panel tr.st-on > td:first-child {
+.stack-table tr.st-on > td:first-child {
   box-shadow: inset 3px 0 0 color-mix(in oklab, var(--on) 70%, transparent);
 }
-.stack-table tr.st-bad > td:first-child, .bin-panel tr.st-bad > td:first-child {
+.stack-table tr.st-bad > td:first-child {
   box-shadow: inset 3px 0 0 color-mix(in oklab, var(--bad) 70%, transparent);
 }
-.stack-table tr.st-off > td:first-child, .bin-panel tr.st-off > td:first-child {
+.stack-table tr.st-off > td:first-child {
   box-shadow: inset 3px 0 0 color-mix(in oklab, var(--off) 42%, transparent);
 }
 /* 状态胶囊：原来一个灰点 + 一行普通字，跟旁边的时长同权重，扫一眼看不出谁在跑。

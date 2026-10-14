@@ -206,12 +206,17 @@ function pushHist(list) {
   const t = Date.now();
   if (t - lastSample < POLL - 300) return;
   lastSample = t;
-  for (const u of list) {
-    let h = hist.get(u.key);
-    if (!h) { h = { cpu: [], mem: [] }; hist.set(u.key, h); }
-    h.cpu.push(u.cpu || 0);
-    h.mem.push(u.memory || 0);
+  const sample = (k, cpu, mem) => {
+    let h = hist.get(k);
+    if (!h) { h = { cpu: [], mem: [] }; hist.set(k, h); }
+    h.cpu.push(cpu || 0);
+    h.mem.push(mem || 0);
     if (h.cpu.length > HIST) { h.cpu.shift(); h.mem.shift(); }
+  };
+  for (const u of list) {
+    sample(u.key, u.cpu, u.memory);
+    // bin 一级也留历史：子列表的趋势线要和父行同一套读法
+    for (const inst of u.instances || []) sample(u.key + '/' + inst.bin, inst.cpu, inst.memory);
   }
 }
 
@@ -235,33 +240,63 @@ function hueFor(name) {
 /// 迷你折线。用 SVG 不用 canvas：不必管设备像素比，也不会因重绘闪一下。
 /// 走 createElementNS 而不是拼 innerHTML —— 这页其它地方全程 textContent，
 /// 不给注入留口子（这里虽然只有数字，但坏了惯例更糟）
+let sparkSeq = 0;   // 每张图的渐变 id（同页多张，不能重名）
+
 function spark(vals, cls) {
   // 全 0 不画：没跑着的项目攒一整条底线，看着像「趋势平稳」，其实是根本没数据
   if (!vals || vals.length < 2 || vals.every(v => !v)) return null;
   const w = 30, h = 11, ns = 'http://www.w3.org/2000/svg';
+  const mk = t => document.createElementNS(ns, t);
   const max = Math.max(...vals, 1);
-  const svg = document.createElementNS(ns, 'svg');
+  const svg = mk('svg');
   svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
   svg.setAttribute('width', w);
   svg.setAttribute('height', h);
   svg.setAttribute('class', 'spark ' + cls);
+  // 一根线两种颜色靠一个变量带走：折线、渐变两端都读它，不用为 cpu/内存各写一套规则
+  svg.style.setProperty('--spk', cls === 'cpu' ? 'var(--warn)' : 'var(--accent)');
   const pts = vals.map((v, i) =>
     `${(i * w / (vals.length - 1)).toFixed(1)},${(h - 0.5 - v / max * (h - 1)).toFixed(1)}`);
-  // 面积层先入栈，折线压在它上面（首尾两点本来就在 x=0 和 x=w，补两个底角即闭合）
-  const area = document.createElementNS(ns, 'polygon');
+  // 面积层用自上而下的渐隐，而不是平涂一块：只有两三个点时折线几乎是平的，
+  // 平涂会把整条 30×11 糊成一块实心色块（上一版就是这个样子）
+  const gid = 'spk' + (++sparkSeq);
+  const grad = mk('linearGradient');
+  grad.setAttribute('id', gid);
+  grad.setAttribute('x1', '0'); grad.setAttribute('y1', '0');
+  grad.setAttribute('x2', '0'); grad.setAttribute('y2', '1');
+  for (const [off, op] of [['0', '.38'], ['1', '0']]) {
+    const st = mk('stop');
+    st.setAttribute('offset', off);
+    st.style.stopColor = 'var(--spk)';
+    st.style.stopOpacity = op;
+    grad.appendChild(st);
+  }
+  const defs = mk('defs');
+  defs.appendChild(grad);
+  // 首尾两点本来就在 x=0 和 x=w，补两个底角即闭合
+  const area = mk('polygon');
   area.setAttribute('points', `0,${h} ${pts.join(' ')} ${w},${h}`);
-  svg.appendChild(area);
-  const pl = document.createElementNS(ns, 'polyline');
+  area.setAttribute('fill', `url(#${gid})`);
+  const pl = mk('polyline');
   pl.setAttribute('points', pts.join(' '));
-  svg.appendChild(pl);
   // 悬停读数：30px 的线只能看出个方向，「峰值多少、现在多少」得靠这行字
   const fmt = cls === 'cpu' ? x => x.toFixed(1) + '%' : x => fmtMemMB(x);
-  const ti = document.createElementNS(ns, 'title');
+  const ti = mk('title');
   ti.textContent = `${cls === 'cpu' ? 'CPU' : '内存'} 最近 ${vals.length} 次采样：`
     + `现值 ${fmt(vals[vals.length - 1])}，峰值 ${fmt(Math.max(...vals))}，`
     + `谷值 ${fmt(Math.min(...vals))}`;
-  svg.appendChild(ti);
+  svg.append(defs, area, pl, ti);
   return svg;
+}
+
+/// 一格「数字 + 迷你趋势线」：文本节点常驻不动，只换那根 SVG。
+/// 父行和 bin 行是同一种格子，共用一份换法
+function metric(cell, text, slot, vals, cls, txt) {
+  text.nodeValue = txt;
+  if (slot) slot.remove();
+  const s = spark(vals, cls);
+  if (s) cell.appendChild(s);
+  return s;
 }
 
 /// 按当前的筛选/排序条件挑出要显示的项目。排序键取负数是为了「大的在前」
@@ -487,16 +522,11 @@ function syncView(v, u) {
   if (v.tr.className !== st) v.tr.className = st;
 
   v.dur.textContent = fmtDur(u.uptime);
-  v.cpuText.nodeValue = u.cpu == null ? '—' : u.cpu.toFixed(1) + '%';
-  v.memText.nodeValue = fmtMemMB(u.memory);
   // 趋势线要攒够两个点才画（一条横线没有信息量）
   const h = hist.get(u.key);
-  if (v.cpuSvg) { v.cpuSvg.remove(); v.cpuSvg = null; }
-  if (v.memSvg) { v.memSvg.remove(); v.memSvg = null; }
-  v.cpuSvg = spark(h && h.cpu, 'cpu');
-  v.memSvg = spark(h && h.mem, 'mem');
-  if (v.cpuSvg) v.cpu.appendChild(v.cpuSvg);
-  if (v.memSvg) v.mem.appendChild(v.memSvg);
+  v.cpuSvg = metric(v.cpu, v.cpuText, v.cpuSvg, h && h.cpu, 'cpu',
+    u.cpu == null ? '—' : u.cpu.toFixed(1) + '%');
+  v.memSvg = metric(v.mem, v.memText, v.memSvg, h && h.mem, 'mem', fmtMemMB(u.memory));
 
   if (v.btn.expand) {
     v.btn.expand.hidden = !expandable;
@@ -543,6 +573,7 @@ function buildBinRow(v, bin) {
   const name = cell(r.tr, '');
   name.className = 'name';
   const nm = document.createElement('span');
+  nm.className = 'bin-name';
   nm.textContent = bin;            // 行按 bin 名建，这一格不用每轮再刷
   r.sub = document.createElement('small');
   r.sub.className = 'subline';
@@ -551,8 +582,13 @@ function buildBinRow(v, bin) {
   r.badge = b.badge;
   r.badgeText = b.text;
   r.dur = cell(r.tr, '');
+  // CPU / 内存和父行同款：数字后面挂一条趋势线（按这个 bin 自己的采样）
+  r.cpuText = document.createTextNode('');
+  r.memText = document.createTextNode('');
   r.cpu = cell(r.tr, '');
+  r.cpu.appendChild(r.cpuText);
   r.mem = cell(r.tr, '');
+  r.mem.appendChild(r.memText);
   const ops = cell(r.tr, '');
   ops.className = 'ops';
   // 四个按钮永远都在，运行态只改 disabled：
@@ -576,16 +612,22 @@ function syncBinRows(v, u) {
     let r = v.binRows.get(inst.bin);
     if (!r) { r = buildBinRow(v, inst.bin); v.binRows.set(inst.bin, r); }
     r.inst = inst;
-    r.sub.textContent = inst.running ? (inst.pid ? `pid ${inst.pid}` : '运行中')
-      : (inst.fail || (inst.active === 'failed' ? '上次失败' : '未运行'));
+    // 副行只在「有话说」时出现：没跑着的 bin 再写一遍「未运行」，跟右边那颗
+    // 胶囊就是同一句话说两遍
+    const sub = inst.running ? (inst.pid ? `pid ${inst.pid}` : '') : (inst.fail || '');
+    r.sub.textContent = sub;
+    r.sub.hidden = !sub;
     r.badge.className = 'badge ' + (inst.running ? 'on' : inst.active === 'failed' ? 'bad' : 'off');
     r.badgeText.nodeValue = inst.running ? '运行中' : inst.active === 'failed' ? '失败' : '未运行';
     // 项目行和 bin 行共用同一套左缘档位，两个层级的状态口径要一致
     const bst = inst.running ? 'st-on' : inst.active === 'failed' ? 'st-bad' : 'st-off';
     if (r.tr.className !== bst) r.tr.className = bst;
     r.dur.textContent = fmtDur(inst.uptime);
-    r.cpu.textContent = inst.cpu == null ? '—' : inst.cpu.toFixed(1) + '%';
-    r.mem.textContent = fmtMem(inst.memory);
+    // 单位跟父行同一把尺：父行 1159.1MB、子行 1.1GB 那种两套口径最掉价
+    const ih = hist.get(v.key + '/' + inst.bin);
+    r.cpuSvg = metric(r.cpu, r.cpuText, r.cpuSvg, ih && ih.cpu, 'cpu',
+      inst.cpu == null ? '—' : inst.cpu.toFixed(1) + '%');
+    r.memSvg = metric(r.mem, r.memText, r.memSvg, ih && ih.mem, 'mem', fmtMemMB(inst.memory));
     r.btn.start.disabled = inst.running;
     r.btn.stop.disabled = !inst.running;
     r.btn.restart.disabled = !inst.running;
