@@ -228,7 +228,7 @@ if (document.documentElement.dataset.theme === 'light') {
 <div id="termBox" class="overlay" hidden>
   <div class="modal modal-term">
     <div class="modal-head">
-      <h2>控制台 <span id="termDot" class="term-dot"></span> <span id="termTarget" class="term-target"></span></h2>
+      <h2>控制台 <span id="termDot" class="term-dot"></span><span class="avatar" id="termAv" aria-hidden="true" hidden></span><span id="termProject"></span><span id="termTarget" class="term-target"></span><span id="termCwd" class="term-cwd"></span></h2>
       <button id="termCloseX" class="close-x" aria-label="关闭" title="关闭">×</button>
     </div>
     <div id="termBody"></div>
@@ -236,7 +236,9 @@ if (document.documentElement.dataset.theme === 'light') {
       <span id="termKeyHint" class="term-key-hint"></span>
       <button id="termKey" class="chip">配置密钥</button>
       <button id="termReconnect" class="chip">重连</button>
-      <button id="termClose" class="chip">关闭</button>
+      <!-- 关闭不是「操作」而是「出去」，降一档到 ghost，三个同权重按钮里
+           眼睛才找得到主次（配置密钥/重连才是真动作） -->
+      <button id="termClose" class="ghost">关闭</button>
     </div>
   </div>
 </div>

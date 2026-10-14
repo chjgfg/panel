@@ -1132,9 +1132,15 @@ function ensureTerm() {
   term = new Terminal({
     cursorBlink: true,
     fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Cascadia Code", monospace',
-    fontSize: 13,
-    lineHeight: 1.15,
+    // 13px/1.15 是从前抄的默认手感，跟整页 14px 正文比小了一号。行距只给到
+    // 1.25：xterm 的 lineHeight 乘的是字体自然行高（约 1.12em），1.4 会撑出
+    // 26px 一行，控制台读起来太松（实测 1.4 时 159px 高的屏幕只放得下 5 行）
+    fontSize: 14,
+    lineHeight: 1.25,
     letterSpacing: 0,
+    // 焦点不在终端上时（比如去点下面的按钮）光标收成空心框：xterm 的
+    // cursorInactiveStyle 支持 outline，实心块留给「正在往里打字」那一刻
+    cursorInactiveStyle: 'outline',
     scrollback: 5000,
     // GitHub 暗色调色板，和面板的深色卡片协调，比默认纯黑更耐看
     theme: {
@@ -1174,16 +1180,30 @@ function fitTerm() {
   if (fitAddon) { try { fitAddon.fit(); } catch {} }
 }
 
+// 容器尺寸一变就重新算行列数：弹窗现在能拖右下角改大小，光监听 window
+// 的 resize 接不到这种变化（FitAddon 算错的话最后一行会被切掉半截）
+if (typeof ResizeObserver !== 'undefined') {
+  new ResizeObserver(() => { if (!$('termBox').hidden) fitTerm(); }).observe($('termBody'));
+}
+
 function connectTerm() {
   termAuthFail = false;
   // 每条新连接都是一个全新的远端 shell，屏幕上留着的旧会话内容已经是历史了。
   // 不清的话新提示符直接接在旧提示符后面，切几个项目就攒出一长串路径
   if (term) term.reset();
+  // 连接中在屏幕顶上来一条扫动的进度线：连上机器有时要一两秒，光靠标题那个
+  // 小圆点变色，人不知道是没连上还是卡住了
+  $('termBody').classList.add('conn');
   const ws = new WebSocket(termUrl());
   ws.binaryType = 'arraybuffer';
   termWs = ws;
   // 私钥在服务器上，后端连接时自己读取，前端不用再发。连上直接 fit。
-  ws.onopen = () => { $('termDot').classList.add('on'); fitTerm(); term.focus(); };
+  ws.onopen = () => {
+    $('termBody').classList.remove('conn');
+    $('termDot').classList.add('on');
+    fitTerm();
+    term.focus();
+  };
   ws.onmessage = e => {
     // 二进制帧 = 终端内容；文本帧 = 后端状态消息
     if (typeof e.data !== 'string') { term.write(new Uint8Array(e.data)); return; }
@@ -1193,6 +1213,7 @@ function connectTerm() {
   ws.onclose = () => {
     if (termWs !== ws) return;
     termWs = null;
+    $('termBody').classList.remove('conn');
     $('termDot').classList.remove('on');
     if (termAuthFail) {
       term.write('\r\n\x1b[31m[公钥认证失败] 服务器拒绝了这把私钥。请点“配置密钥”检查：'
@@ -1208,7 +1229,21 @@ function connectTerm() {
 function openTerm(u) {
   const prev = termKey;
   termKey = u ? u.key : null;
-  $('termTarget').textContent = u ? `${location.hostname} · ${u.name}` : location.hostname;
+  $('termTarget').textContent = location.hostname;
+  // 项目名 + 徽标 + 目录：进弹窗后「我在哪台机器的哪个目录」不用去读提示符
+  $('termProject').textContent = u ? u.name : '';
+  const av = $('termAv');
+  if (u) {
+    av.textContent = initials(u.name);
+    av.style.setProperty('--av', hueFor(u.name));
+    av.hidden = false;
+  } else {
+    av.hidden = true;
+  }
+  const cwd = $('termCwd');
+  // 导航栏那个不 cd，落在 ssh 用户的家目录，写 ~ 而不是猜一个绝对路径
+  cwd.textContent = u ? (u.dir || '') : '~';
+  cwd.hidden = !cwd.textContent;
   $('termBox').hidden = false;
   updateKeyHint();
   ensureTerm();
@@ -1225,6 +1260,7 @@ function openTerm(u) {
 
 function closeTerm() {
   if (termWs) { try { termWs.close(); } catch {} termWs = null; }
+  $('termBody').classList.remove('conn');   // 半路关掉，进度线别留在屏幕上
   $('termBox').hidden = true;
 }
 

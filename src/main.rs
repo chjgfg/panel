@@ -107,6 +107,10 @@ struct Status {
     /// 失败时的一句话原因（systemd 的 Result + 退出码）。不失败为 null。
     /// 省得看到「失败」还得点进日志翻到底才知道为什么挂。
     fail: Option<String>,
+    /// 项目在服务器上的绝对目录。控制台标题要写清「我现在在哪个目录」，
+    /// 不然只能去读 shell 提示符 —— 面板挂在你自己的机器上，这个路径本来
+    /// 你在终端里天天看，不算新暴露的东西。
+    dir: String,
 }
 
 /// 一个项目下某个 bin 的实例明细。面板让每个 bin 独立成 unit，
@@ -337,6 +341,7 @@ async fn units(State(app): State<Arc<App>>) -> Json<Vec<Status>> {
             running_bins: p.running_bins,
             outside_pid,
             fail,
+            dir: dir.display().to_string(),
         });
     }
     Json(v)
