@@ -554,14 +554,21 @@ td.name .caret:hover { color: var(--accent); }
    由 table-layout:fixed 那套说了算，数据到手换成真行时横不跳；第一格做两行，
    照真行的「项目名 + 副行」（两行的行高框 22.4/18 也照抄，真行实测 57.2 高）。
    静止、不闪 —— 加载指示已经有右上角那个呼吸点，灰条自己再眨一次就成了满屏乱跳。
-   出现时机在 JS 里延迟 250ms：快的时候压根不该让人看见它 */
-.sk i {
+   出现时机：一进页面就摆（第一次 /api/units 在这台机器上要一两秒，不摆就是整块空白） */
+/* 灰条底色。这一条必须同时命中 .sk-tile i：上一版只写了 .sk i，占位卡里的
+   灰条根本没上色（盒子撑着了、里面全透明），所以整排状态卡看着就是一片空 ——
+   被点「跟没改有啥区别」的正是这个 */
+.sk i, .sk-tile i {
   display: block; height: .8rem; border-radius: 4px;
-  background: color-mix(in oklab, var(--muted) 20%, transparent);
+  /* 26% 是量出来的：20% 时灰条对白卡只有 1.31、对深卡 1.42，淡到近乎看不见。
+     占位看不见就等于没做。26% 两档都到 1.6 */
+  background: color-mix(in oklab, var(--muted) 26%, transparent);
 }
 .sk .l1 { display: flex; align-items: center; height: 1.4rem; }
 .sk .l2 { display: flex; align-items: center; height: 1.125rem; }
 .sk .l2 i { height: .65rem; }
+/* 照真行的首字母徽标：一排通用灰条看着像"没做"，有个圆点才像"一张没填的表" */
+.sk .dot { width: 1.4rem; height: 1.4rem; border-radius: 50%; flex: none; margin-right: .45rem; }
 .sk td { cursor: default; }
 /* 占位卡：结构和真卡一样（b/strong/small/meter），但空元素的行高盒是 0 ——
    实测不钉高度的话占位卡只有 42 高、真卡 93.2，数据一到整排往下顶。
@@ -575,6 +582,9 @@ td.name .caret:hover { color: var(--accent); }
 .sk-tile strong i { height: 1.1rem; width: 46%; }
 .sk-tile small { min-height: 1.125rem; }
 .sk-tile small i { height: .65rem; width: 62%; }
+/* 占位卡的仪表轨道必须自己给底色：真卡那条读的是 var(--m)（JS 按严重度设在卡上），
+   占位卡没有 --m → 整条 background 按 IACVT 失效变成全透明，轨道看不见 */
+.sk-tile .meter { background: var(--line); }
 .sk-tile { cursor: default; }
 
 #projList { margin-top: .4rem; }

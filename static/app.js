@@ -86,8 +86,9 @@ function showLogin(why) {
 function showApp() {
   $('login').hidden = true;
   $('app').hidden = false;
-  // 骨架不立刻摆：先给真数据 250ms 的机会，快的时候不该让人看见灰条
-  armSkeleton();
+  // 一进页面就摆骨架：这台机器上第一次 /api/units 要一两秒，
+  // 那期间不摆东西就是整块空白，比摆个占位更难看
+  showSkeleton();
   refresh();
   loadVersion();
   timer ||= setInterval(refresh, POLL);
@@ -431,21 +432,14 @@ $('fltState').onchange = onFilterChange;
 $('sortBy').onchange = onFilterChange;
 
 let booted = false;   // 第一批数据到手没有（首屏骨架行用）
-let skTimer = 0;
-
-/// 首屏占位。三处讲究，都是上一版被「加载的一瞬间不好看」打回来的账：
-/// ① 延迟 250ms 才出现 —— 局域网里常常一百毫秒就回来了，那种情况下闪一下灰条
-///    比什么都不闪更难看，所以「快」的时候根本不该让它露面；
-/// ② 灰条长在真的那张表里（.proj-block > table.stack-table），六列宽由
+/// 首屏占位。上一版被「加载的一瞬间不好看」打回来，我加了 250ms 延迟，
+/// 结果是把丑占位换成了空白一下 —— 更没区别，延迟这条撤了：一进页面就摆。
+/// 真正该修的是外观：
+/// ① 灰条长在真的那张表里（.proj-block > table.stack-table），六列宽由
 ///    table-layout:fixed 那套说了算，数据到手换成真行时不会横向跳；
-/// ③ 行数照上次看到的真行数（listCount 存 localStorage），不会从三行突然变七行。
-function armSkeleton() {
-  clearTimeout(skTimer);
-  skTimer = setTimeout(showSkeleton, 250);
-}
-
+/// ② 行数照上次看到的真行数（listRows 存 localStorage），不会从三行突然变七行；
+/// ③ 静止不闪，加载指示只留右上角那个呼吸点。
 function clearSkeleton() {
-  clearTimeout(skTimer);
   $('projList').replaceChildren();
 }
 
@@ -479,9 +473,13 @@ function showSkeleton() {
     l2.className = 'l2';
     const b1 = document.createElement('i');
     const b2 = document.createElement('i');
-    b1.style.width = '58%';
+    // 第一行前面那颗圆点是照真行的首字母徽标放的 —— 骨架要一眼看着像
+    // 「一张还没填的表」，而不是一排通用灰条，否则和没做没区别
+    const dot = document.createElement('i');
+    dot.className = 'dot';
+    b1.style.width = '42%';
     b2.style.width = '34%';
-    l1.appendChild(b1);
+    l1.append(dot, b1);
     l2.appendChild(b2);
     name.append(l1, l2);
     tr.appendChild(name);
