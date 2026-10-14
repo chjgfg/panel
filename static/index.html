@@ -17,11 +17,11 @@
 <!-- 网页控制台的终端样式，vendored、相对路径自动带前缀 -->
 <link rel="stylesheet" href="vendor/xterm.5.5.0.min.css">
 <script>
-// 防闪烁：必须在首次渲染前同步执行。三档：
+// 防闪烁：必须在首次渲染前同步执行。
 //   'light' / 'dark' = 用户点名要的，写进 data-theme；
-//   'auto'（或从没选过）= 干脆不写 data-theme —— 样式表里那套
-//     @media (prefers-color-scheme: light) html:not([data-theme]) 的兜底才会生效。
-//   以前这里永远写死一个值，兜底一次都没用上，新设备第一次打开被强行按成深色。
+//   从没选过 = 干脆不写 data-theme —— 样式表里那套
+//     @media (prefers-color-scheme: light) html:not([data-theme]) 的兜底才会生效，
+//     新设备第一次打开跟着系统走。按钮只有黑夜/白天两档，不摆第三态。
 (() => {
   const want = localStorage.getItem('theme');
   if (want === 'light' || want === 'dark') document.documentElement.dataset.theme = want;
@@ -83,7 +83,7 @@
     <div class="login-top">
       <h1>项目面板</h1>
       <!-- 登录页也能切主题：以前主题按钮在 #app 里，没登进去只能被按着看深色 -->
-      <button id="loginTheme" type="button" class="chip" title="切换 跟随系统 / 黑夜 / 白天">主题</button>
+      <button id="loginTheme" type="button" class="chip" title="切换黑夜/白天">主题</button>
     </div>
     <!-- 被 401 踢回来时得说清为什么又要登录：不然看着像密码错了、像面板坏了 -->
     <p id="loginWhy" class="login-why" hidden></p>

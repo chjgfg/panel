@@ -208,10 +208,13 @@ function renderHost(h) {
       v.el.classList.toggle('hi', t.p >= 90);   // 顶到上限的卡整张描边转红
       v.fill.style.width = Math.min(100, Math.max(0, t.p)) + '%';
       if (sample) hostSample(t.id, t.p);
-      // 趋势线跟着数值的严重度变色：卡上「红」这件事只该有一种颜色
-      const s = spark(hostHist.get(t.id), 'tile',
+      // 线的颜色跟数值的严重度走：卡上「红」这件事只该有一种颜色。
+      // 第二个参数会被拼成 class，所以这里绝不能传 'tile' —— 那会让这根线
+      // 自己套上 .tile 的卡片样式（padding + 白底 + 描边 + 圆角），
+      // 在卡里撑出一个圆疙瘩（上一版就是这么翻车的）
+      const s = spark(hostHist.get(t.id), 'host',
         { label: t.label, fmt: x => x.toFixed(0) + '%', color: severity(t.p) });
-      if (s) { s.classList.add('tile-spark'); v.sub.appendChild(s); v.spark = s; }
+      if (s) { v.sub.appendChild(s); v.spark = s; }
     }
     v.sub.hidden = !t.sub && !v.spark;
     const at = holder.children[i];
@@ -1145,29 +1148,23 @@ $('ddia').onclick = () => window.open(
 );
 $('refresh').onclick = () => refresh();
 
-// ---------- 主题切换（跟随系统 ↔ 黑夜 ↔ 白天）----------
-// 三档而不是两档：以前启动脚本永远把 data-theme 写死，样式表里那套
-// @media (prefers-color-scheme: light) 的兜底一次都没生效过，新设备第一次
-// 打开被强行按成深色。存 'auto'（或从没选过）时干脆不写 data-theme，兜底才轮到它。
-const THEMES = ['auto', 'dark', 'light'];
-
-function themeWant() {
+// ---------- 主题切换（黑夜 ↔ 白天）----------
+// 只有两档。从没选过时不写 data-theme，样式表里那套 prefers-color-scheme 兜底
+// 才轮到它，新设备第一次打开跟着系统走；一点按钮就固定成点出来的那档。
+function themeLight() {
   const w = localStorage.getItem('theme');
-  return THEMES.includes(w) ? w : 'auto';
+  if (w === 'light' || w === 'dark') return w === 'light';
+  return matchMedia('(prefers-color-scheme: light)').matches;
 }
 
 function applyTheme() {
-  const want = themeWant();
-  const light = want === 'light'
-    || (want === 'auto' && matchMedia('(prefers-color-scheme: light)').matches);
+  const light = themeLight();
+  const w = localStorage.getItem('theme');
   document.documentElement.classList.toggle('light', light);
-  if (want === 'auto') delete document.documentElement.dataset.theme;
-  else document.documentElement.dataset.theme = want;
-  const label = want === 'auto' ? '◐ 跟随' : light ? '☀ 白天' : '☾ 黑夜';
-  const now = light ? '白天' : '黑夜';
-  const next = want === 'auto' ? '黑夜' : want === 'dark' ? '白天' : '跟随系统';
-  const title = want === 'auto' ? `跟随系统（现在是${now}）· 点这里切到${next}`
-    : `当前${now} · 点这里切到${next}`;
+  if (w === 'light' || w === 'dark') document.documentElement.dataset.theme = w;
+  else delete document.documentElement.dataset.theme;
+  const label = light ? '☀ 白天' : '☾ 黑夜';
+  const title = `当前${label} · 点这里切到${light ? '☾ 黑夜' : '☀ 白天'}`;
   // 登录页那个按钮和头部那个是同一个开关，两处文案必须一起动
   for (const id of ['themeBtn', 'loginTheme']) {
     const b = $(id);
@@ -1177,19 +1174,17 @@ function applyTheme() {
   }
 }
 
-function cycleTheme() {
-  const next = THEMES[(THEMES.indexOf(themeWant()) + 1) % THEMES.length];
-  if (next === 'auto') localStorage.removeItem('theme');
-  else localStorage.setItem('theme', next);
+function toggleTheme() {
+  localStorage.setItem('theme', themeLight() ? 'dark' : 'light');
   applyTheme();
 }
 
-$('themeBtn').onclick = cycleTheme;
-$('loginTheme').onclick = cycleTheme;
-// 停在「跟随系统」时，操作系统换档页面也该跟着换，不用重开
+$('themeBtn').onclick = toggleTheme;
+$('loginTheme').onclick = toggleTheme;
+// 还没选过的时候页面跟着系统走，操作系统换档不用重开
 if (matchMedia('(prefers-color-scheme: light)').addEventListener) {
   matchMedia('(prefers-color-scheme: light)')
-    .addEventListener('change', () => { if (themeWant() === 'auto') applyTheme(); });
+    .addEventListener('change', () => { if (!localStorage.getItem('theme')) applyTheme(); });
 }
 applyTheme();
 

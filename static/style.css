@@ -112,9 +112,10 @@ body.fetching #tick::before { background: var(--accent); animation: breathe 1s e
   border: 1px solid var(--line); border-radius: 10px;
   box-shadow: var(--shadow), var(--edge);
 }
-#loginForm h1 { margin-bottom: 1rem; }
 /* 登录页是全站最素的一块，也是别人打开面板看到的第一眼：
-   标题行留出主题开关（没登进去的人不该被按着看深色） */
+   标题行留出主题开关（没登进去的人不该被按着看深色）。
+   这里不写 #loginForm h1 { margin-bottom } —— 它按 id 特异性压过下面那条
+   margin:0，在 flex 行里变成块轴外边距，标题会被顶得比按钮高一截 */
 .login-top { display: flex; align-items: center; gap: .6rem; margin-bottom: 1rem; }
 .login-top h1 { margin: 0 auto 0 0; }
 #loginTheme { flex: none; }
@@ -150,7 +151,9 @@ button {
   transition: background-color .15s, border-color .15s, color .15s, opacity .15s;
 }
 button:hover:not(:disabled) { filter: brightness(1.1); }
-#loginForm button { width: 100%; margin-top: .75rem; padding: .55rem; font-size: var(--fs-md); }
+/* 只吃登录按钮，不能用 #loginForm button：那样连标题行里的主题开关一起撑满
+   整行，h1 被挤成一个字一行（上一版登录页就是这么坏的） */
+#loginBtn { width: 100%; margin-top: .75rem; padding: .55rem; font-size: var(--fs-md); }
 button:disabled { opacity: .35; cursor: not-allowed; }
 
 /* 中性软按钮：实底比 card 亮一档，正文色文字。常规动作的默认档 */
