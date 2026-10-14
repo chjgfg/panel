@@ -1265,6 +1265,65 @@ function renderTree() {
   tree.appendChild(treeNodes(srcCache.children, false));
 }
 
+/// 文件后缀 → 语言品牌色。色表就是右上角那枚语言徽标用的同一份（LANG_TAG），
+/// 一处真源：文件点的颜色和点开之后那个标签的颜色必然对得上
+function langColor(name) {
+  const l = langOf(name);
+  return l && LANG_TAG[l] ? LANG_TAG[l][1] : null;
+}
+
+/* ---------- 文件图标 ----------
+   图标本体是 index.html 里那套内联 <symbol>（描边式、只用 currentColor 上色）。
+   这里只管两件事：用哪个图形、上什么色。色还是从 LANG_TAG 取，不另开一份表 */
+const ICON_BY_LANG = {
+  rust: 'i-code', python: 'i-code', javascript: 'i-code', typescript: 'i-code',
+  go: 'i-code', c: 'i-code', cpp: 'i-code', csharp: 'i-code', java: 'i-code',
+  kotlin: 'i-code', swift: 'i-code', php: 'i-code', ruby: 'i-code', lua: 'i-code',
+  perl: 'i-code', graphql: 'i-code', wasm: 'i-code', diff: 'i-code', r: 'i-code',
+  css: 'i-code', scss: 'i-code', less: 'i-code', xml: 'i-code',
+  markdown: 'i-doc', bash: 'i-term', sql: 'i-db',
+  ini: 'i-gear', toml: 'i-gear', json: 'i-gear', yaml: 'i-gear', makefile: 'i-gear',
+};
+// 图片/压缩包/二进制这些后缀不是「语言」，langOf 认不出来，单独一张表。
+// 这张表要先问：.svg 才能按图片算（否则被认成 xml，一堆尖括号）
+const ICON_BY_EXT = {
+  png: 'i-img', jpg: 'i-img', jpeg: 'i-img', gif: 'i-img', webp: 'i-img', bmp: 'i-img',
+  ico: 'i-img', avif: 'i-img', svg: 'i-img', pdf: 'i-doc',
+  zip: 'i-cube', tar: 'i-cube', gz: 'i-cube', xz: 'i-cube', bz2: 'i-cube', '7z': 'i-cube',
+  exe: 'i-cube', so: 'i-cube', dll: 'i-cube', bin: 'i-cube', dat: 'i-cube',
+  woff: 'i-cube', woff2: 'i-cube', ttf: 'i-cube', otf: 'i-cube',
+};
+// 锁文件按整个文件名判：Cargo.lock 的语义是「锁」，而它会被认成 toml，
+// 不先拦一步就上一副齿轮了
+const LOCK_NAMES = {
+  'cargo.lock': 1, 'package-lock.json': 1, 'yarn.lock': 1, 'pnpm-lock.yaml': 1,
+  'uv.lock': 1, 'poetry.lock': 1, 'composer.lock': 1, 'go.sum': 1,
+};
+
+function iconOf(name) {
+  const low = name.toLowerCase();
+  if (LOCK_NAMES[low]) return 'i-lock';
+  const m = /\.([^.]+)$/.exec(low);
+  if (m && ICON_BY_EXT[m[1]]) return ICON_BY_EXT[m[1]];
+  const lang = langOf(name);
+  return (lang && ICON_BY_LANG[lang]) || 'i-file';
+}
+
+/// 造一个图标。nameForColor 传文件名就按语言上色，传 null（目录）就走灰档 ——
+/// 一屏里颜色只用来回答「这是什么文件」，不给目录抢戏
+function iconEl(id, nameForColor) {
+  const NS = 'http://www.w3.org/2000/svg';
+  const s = document.createElementNS(NS, 'svg');
+  s.setAttribute('class', 'fico');
+  s.setAttribute('aria-hidden', 'true');
+  const c = nameForColor && langColor(nameForColor);
+  if (c) s.style.setProperty('--fc', c);
+  const u = document.createElementNS(NS, 'use');
+  u.setAttribute('href', '#' + id);
+  s.appendChild(u);
+  return s;
+}
+
 function treeNodes(nodes, expanded) {
   const wrap = document.createElement('div');
   wrap.className = 'kids';
@@ -1273,12 +1332,13 @@ function treeNodes(nodes, expanded) {
     row.type = 'button';
     row.className = 'node';
     row.textContent = n.name;
+    // 图标固定占一格（1em）：目录那格是箭头，文件那格留空，名字才对齐得起来
+    const tw = document.createElement('span');
+    tw.className = 'tw';
     if (n.dir) {
       row.classList.add('dir');   // 目录名略粗：和文件只靠箭头区分不够，扫树时看不出层级骨架
-      const tw = document.createElement('span');
-      tw.className = 'tw';
       tw.textContent = expanded ? '▾' : '▸';
-      row.prepend(tw);
+      row.prepend(tw, iconEl('i-folder', null));
       let open = expanded;
       let kids = null;
       row.onclick = () => {
@@ -1298,6 +1358,7 @@ function treeNodes(nodes, expanded) {
       wrap.appendChild(row);
       if (kids) wrap.appendChild(kids);
     } else {
+      row.prepend(tw, iconEl(iconOf(n.name), n.name));
       row.onclick = () => showFile(n, row);
       wrap.appendChild(row);
     }

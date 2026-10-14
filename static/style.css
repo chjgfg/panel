@@ -745,6 +745,20 @@ td.name .caret:hover { color: var(--accent); }
   display: inline-block; width: 1em; color: var(--muted);
   user-select: none;
 }
+/* 文件类型图标：13px 描边，只用 currentColor 上色（JS 把语言品牌色注进 --fc，
+   取色表和右上角那枚语言徽标是同一份）。目录不给色、保持灰 ——
+   一屏里颜色只用来回答「这是什么文件」，不给结构抢戏。
+   stroke/fill 这些是可继承的 SVG 属性，设在 <svg> 上会穿过 <use> 进到图形里 */
+#srcTree .fico {
+  display: inline-block; width: 13px; height: 13px; margin-right: .35rem;
+  vertical-align: -2px;
+  color: var(--fc, var(--muted));
+  fill: none; stroke: currentColor; stroke-width: 1.7;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+/* 白天档把品牌色整体压暗一点：那套色是为深色背景调的（青 #2ac3de、黄绿 #9ece6a），
+   1.7px 的细描边放在白底上只有 2.2 左右对比，看着像没画完。整体压一档比逐个改色表稳 */
+html.light #srcTree .fico { filter: brightness(.78) saturate(1.1); }
 #srcTree .kids { margin-left: 1.5rem; border-left: 1px solid var(--hairline); padding-left: .25rem; }
 /* 顶层容器就是整棵树的根,不吃缩进 */
 #srcTree > .kids { margin-left: 0; border-left: 0; padding-left: 0; }
