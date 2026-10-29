@@ -1570,7 +1570,10 @@ function openSrc(u) {
   $('srcQuery').value = '';
   endFind();
   $('srcPath').textContent = '';
-  $('srcBody').textContent = '';
+  // 空状态引导：右栏整片空白看着像没加载出来，写一句比白屏诚实
+  const sb = $('srcBody');
+  sb.textContent = '从左边挑个文件看代码';
+  sb.classList.add('src-empty');
   srcMsg('');
   $('srcBox').hidden = false;
   // syncScrollLock();
@@ -1971,6 +1974,7 @@ function showPath(p) {
 
 async function showFile(n, row) {
   srcCur = n;
+  $('srcBody').classList.remove('src-empty');
   $('srcTree').querySelectorAll('.node.cur').forEach(el => el.classList.remove('cur'));
   if (row) row.classList.add('cur');
   showPath(n.path);
@@ -2140,7 +2144,7 @@ async function loadVersion() {
     const v = await (await req('api/version')).json();
     const el = $('ver');
     el.textContent = `v${v.ver} · ${v.git} · 起于 ${shortTime(v.started)}`;
-    el.title = `代码 ${v.git}\n构建于 ${fullTime(v.built)}\n本次启动 ${fullTime(v.started)}`;
+    el.title = `代码 ${v.git}\n构建于 ${fullTime(v.built)}\n本次启动 ${fullTime(v.started)}\n快捷键：r 刷新 · / 源码内搜索 · Esc 关弹窗`;
   } catch { /* 读不到版本不影响主界面，留着空位就行 */ }
 }
 

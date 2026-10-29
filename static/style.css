@@ -10,7 +10,15 @@
   --on: #3fb950; --off: #6e7681; --bad: #f85149; --warn: #e3b341;
   /* 按钮语义色：绿=启动/运行，红=停止/危险，黄=重启/谨慎。亮度和 accent
      同档，深色下不用提亮也能和背景拉开对比。 */
-  --go: #3fb950; --danger: #f85149; --caution: #e3b341;
+  --go: #3fb950; --danger: #ff7b72; --caution: #e3b341;
+  /* 实底语义钮（弹窗里的确定/运行）上的文字色：深色下亮底配深字，浅色下深底配白字 */
+  --on-go: #0b0d12; --on-danger: #0b0d12; --on-caution: #14161c;
+  /* 输入框/下拉：比页面再沉一档的"槽"，别和页面同色只剩一根边框勾形 */
+  --field: #07090d; --field-line: #3a4358;
+  /* 选中文字底色：accent 兑淡，深浅两档浓度分开定 */
+  --sel: color-mix(in oklab, var(--accent) 26%, transparent);
+  /* 下拉框的折线箭头（原生那个是系统画的粗箭头），随主题换色 */
+  --chev: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 6l4 4 4-4' fill='none' stroke='%2398a2b5' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   /* 字号只有这五档，别处不许再冒出新数字。原来散着 .68/.72/.75/.78/.8/.82/.85/
      .9/.92/.95/1/1.15/1.25/1.4 十四档，同屏并排看就是一会儿小一会儿大。
      xs 12 表头·副行·标签 | sm 13 按钮·输入·提示 | md 14 正文
@@ -39,7 +47,12 @@ html.light {
   --bg: #f4f5f7; --card: #fff; --line: #dfe3e9;
   --fg: #1b1f24; --muted: #5f6773; --accent: #0550ae;
   --on: #1a7f37; --off: #9aa0a6; --bad: #cf222e; --warn: #bf8700;
-  --go: #1a7f37; --danger: #cf222e; --caution: #9a6700;
+  --go: #116329; --danger: #a40e26; --caution: #7a5200;
+  --on-go: #fff; --on-danger: #fff; --on-caution: #fff;
+  /* 输入框/下拉：比页面更白一档的"槽"，边框单独深一档（原 --line 只有 1.29 对比） */
+  --field: #fafbfc; --field-line: #c9ced6;
+  --sel: color-mix(in oklab, var(--accent) 30%, transparent);
+  --chev: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 6l4 4 4-4' fill='none' stroke='%235f6773' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   /* 浅色下投影必须更淡，否则白底发脏 */
   --shadow: 0 1px 2px rgba(16, 24, 40, .06), 0 8px 20px -12px rgba(16, 24, 40, .18);
   --edge: inset 0 1px 0 rgba(255, 255, 255, .9);
@@ -61,7 +74,12 @@ html.light {
     --bg: #f4f5f7; --card: #fff; --line: #dfe3e9;
     --fg: #1b1f24; --muted: #5f6773; --accent: #0550ae;
     --on: #1a7f37; --off: #9aa0a6; --bad: #cf222e; --warn: #bf8700;
-    --go: #1a7f37; --danger: #cf222e; --caution: #9a6700;
+    --go: #116329; --danger: #a40e26; --caution: #7a5200;
+  --on-go: #fff; --on-danger: #fff; --on-caution: #fff;
+  /* 输入框/下拉：比页面更白一档的"槽"，边框单独深一档（原 --line 只有 1.29 对比） */
+  --field: #fafbfc; --field-line: #c9ced6;
+  --sel: color-mix(in oklab, var(--accent) 30%, transparent);
+  --chev: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 6l4 4 4-4' fill='none' stroke='%235f6773' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
     --shadow: 0 1px 2px rgba(16, 24, 40, .06), 0 8px 20px -12px rgba(16, 24, 40, .18);
     --edge: inset 0 1px 0 rgba(255, 255, 255, .9);
     --scrim: rgba(16, 24, 40, .30);
@@ -130,9 +148,20 @@ body.fetching #tick::before { background: var(--accent); animation: breathe 1s e
 input, button, select {
   font: inherit; border-radius: 6px; border: 1px solid var(--line);
 }
-input, select {
-  padding: .45rem .6rem; background: var(--bg); color: var(--fg);
+input, select, textarea {
+  padding: .45rem .6rem; background: var(--field); color: var(--fg);
+  border-color: var(--field-line);
 }
+/* 原生下拉箭头是系统画的粗箭头，换成和「▾」同款折线，颜色随主题 */
+select {
+  appearance: none; -webkit-appearance: none;
+  padding-right: 1.7rem;
+  background-image: var(--chev);
+  background-repeat: no-repeat;
+  background-position: right .55rem center;
+  background-size: .7rem;
+}
+::selection { background: var(--sel); }
 #loginForm input { width: 100%; padding: .55rem .7rem; }
 /* ---------- 按钮体系：一套设计语言，按语义分档 ----------
    统一的部分：圆角、边框 1px、150ms 过渡、hover 提亮一档、同样的内边距。
@@ -283,7 +312,7 @@ button.ghost:hover:not(:disabled) {
   flex: 1 1 10rem; min-width: 7rem; max-width: 20rem;
   font-size: var(--fs-sm); padding: .35rem .55rem;
 }
-.listbar select { flex: none; font-size: var(--fs-sm); padding: .35rem .5rem; }
+.listbar select { flex: none; font-size: var(--fs-sm); padding: .35rem 1.7rem .35rem .5rem; }
 /* 计数贴在条子右端：它是读数，不是控件，不该混在控件堆里 */
 .list-count {
   margin-left: auto; color: var(--muted); font-size: var(--fs-xs);
@@ -632,10 +661,10 @@ td.name .caret:hover { color: var(--accent); }
 /* 确定按钮用主色调（默认 button 已是 accent 蓝，这里显式声明语义一致）。
    停止/重启的确认按钮换对应语义色实心，让「我在确认什么」在按钮上就有预告 */
 .modal-foot button.primary { background: var(--accent); color: #fff; border-color: transparent; }
-.modal-foot button.danger { background: var(--danger); color: #fff; border-color: transparent; }
-.modal-foot button.caution { background: var(--caution); color: #14161c; border-color: transparent; }
+.modal-foot button.danger { background: var(--danger); color: var(--on-danger); border-color: transparent; }
+.modal-foot button.caution { background: var(--caution); color: var(--on-caution); border-color: transparent; }
 /* 运行弹窗的主操作：绿色实心，和表格里绿色「启动」一个语义 */
-.modal-foot button.go-solid { background: var(--go); color: #fff; border-color: transparent; }
+.modal-foot button.go-solid { background: var(--go); color: var(--on-go); border-color: transparent; }
 /* 运行弹窗内容（单 bin）：bin 名 + 参数文本域，原样透传 */
 .run-single { display: flex; flex-direction: column; gap: .5rem; }
 .run-bin-name { font-size: var(--fs-md); color: var(--fg); font-weight: 600; }
@@ -649,7 +678,7 @@ td.name .caret:hover { color: var(--accent); }
   max-height: none;
 }
 .modal-head .log-src { display: inline-flex; align-items: center; gap: .4rem; color: var(--muted); font-size: var(--fs-sm); }
-.modal-head .log-src select { padding: .3rem .5rem; font-size: var(--fs-sm); }
+.modal-head .log-src select { padding: .3rem 1.6rem .3rem .5rem; font-size: var(--fs-sm); }
 /* 关键字框吃掉表头剩余宽度：日志表头本来就空一段，给它一条明确的「在这儿找」的口子 */
 .modal-head #logSearch {
   flex: 1 1 10rem; min-width: 7rem; padding: .3rem .5rem; font-size: var(--fs-sm);
@@ -933,8 +962,7 @@ html.light #srcTree .fico { filter: brightness(.78) saturate(1.1); }
 .src-msg.ok { color: var(--on); }
 .src-msg.bad { color: var(--bad); }
 #srcBody {
-  flex: 1; min-height: 0; overflow: auto; margin: 0; padding: .65rem 0;
-  /* 定位锚点：搜索跳转用 offsetTop 自己算滚动（scrollIntoView 会连祖先一起滚，
+  flex: 1; min-height: 0; overflow: auto; margin: 0; padding: .65rem 0;  /* 定位锚点：搜索跳转用 offsetTop 自己算滚动（scrollIntoView 会连祖先一起滚，
      弹窗后面的列表会跟着跳位），offsetTop 需要一个有定位的父元素才准 */
   position: relative;
   /* 不用 font 简写：简写里塞 var() 要靠替换后才解析，拆成长写更稳（同 body 那条） */
@@ -961,6 +989,13 @@ html.light #srcBody {
   --tk-fg: #2a2f3a; --tk-kw: #8250df; --tk-fn: #0550ae; --tk-str: #0a7d3f;
   --tk-num: #b3541e; --tk-com: #6e7781; --tk-type: #0f7ea8; --tk-attr: #954f0e;
   --tk-var: #cf222e;
+}
+/* 空状态引导：一行灰字，选中文件即撤（showFile 会摘掉这个类） */
+#srcBody.src-empty {
+  color: var(--muted);
+  font-family: system-ui, "Microsoft YaHei", sans-serif;
+  padding: 1.1rem 1.3rem;
+  white-space: normal;
 }
 /* ---------- 源码行:gutter 与代码两列 ----------
    每行 .cl 是一行 flex:左列 ::before 是行号(右对齐、定宽,宽度 --ln-w 由 JS
