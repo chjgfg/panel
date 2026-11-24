@@ -92,7 +92,7 @@ panel 自己启动不再要求安装 Cargo。只在启动 Rust 自动发现的�
 - 显式配置阶段对照：移除参数追加和 systemd 环境注入后，两个相关测试失败；恢复后全量通过。原状态测试的共享临时文件名冲突已隔离。
 - 自动发现阶段 `cargo test --locked -- --include-ignored`：83 passed，0 failed，0 ignored；Windows 真实 npm 探针使用 `PANEL_TEST_POSIX_SHELL` 指定本机 Git 的 sh，包含真实 Python 和 npm 子进程、混合项目、包管理器、Python 引用、JAR 清单、Go 伪入口及错误分支验证。普通测试默认跳过两个需外部运行时的探针。
 - 本轮对照：移除名称转义的防碰撞规则及 Go main 包双重约束，两个测试失败；恢复后全量通过。JAR 相对扫描路径的回归测试在修正前失败、修正后通过；JAR 参数现在相对于项目工作目录解析。
-- 修订：显式配置阶段只验证五类命令模板；本轮增加真实 Python 调用和 npm/POSIX shell 透传验证。Windows npm/cmd.exe 的换行截断已实测确认，未降低断言要求。Java/Go 实际运行和服务器 Linux systemd 尚未验证。
+- 修订：显式配置阶段只验证五类命令模板；自动发现阶段增加真实 Python 调用和 npm/POSIX shell 透传验证。Windows npm/cmd.exe 的换行截断已实测确认，未降低断言要求。截至该阶段 Java/Go 实际运行和服务器 Linux systemd 尚未验证，后续结果见服务器账本。
 - 启停可靠性阶段：`cargo test --locked -- --include-ignored` 为 95 passed，0 failed；`cargo check --locked` 通过；`node --test tests/ui.test.cjs` 为 2 passed。覆盖停止失败阻断、停止后复查、未知状态、结果聚合、HTTP 状态以及两个真实 handler 等待同一项目锁。
 - 可靠性对照：分别移除停止阻断、将未确认返回改为成功、移除 handler 锁后，三个相关测试均失败；源码按字节恢复。Linux 实际启停尚待本轮后续验收。
 - 命令预览阶段：96 passed，0 failed（含真实 npm/Python 探针）；编译检查和构建通过；页面行为测试为 4 passed。实际浏览器检查了未知状态、运行时缺失的禁用按钮和 Python 命令预览；多行参数显示为末尾一个 JSON 参数。Windows 的 Cargo 默认路径探测未命中时明确报错；Linux 路径将在服务器验收。
@@ -102,6 +102,44 @@ panel 自己启动不再要求安装 Cargo。只在启动 Rust 自动发现的�
 - 用户环境修复：Windows `cargo test --locked` 为 104 passed、0 failed、6 ignored；`cargo check --locked` 通过。清空真实子进程的继承环境后，参数、工作目录和 HOME 仍通过；移除生产 HOME 补全的对照测试失败，按字节恢复后全量通过。Clippy 退出码 0，仅保留 `terminal.rs:524` 的原有警告。
 
 服务器验收过程（独立 checkout 与 `panel-validation-*` unit，线上程序未替换）：
+
+最终代码验收版本为 `9a3effc83167dfac00ebb7fa166d5d213196a1e0`，以下结果来自实际命令退出码和探针输出：
+
+| 环境 | 最终结果 | 实际覆盖 |
+| --- | --- | --- |
+| Windows | `cargo test --locked`：104 passed、0 failed、6 ignored；`cargo check --locked` 通过 | 默认/显式 HOME、错误分支、无/单/多 feature、程序参数位置与完整透传、预览和启停逻辑；外部工具测试另计 |
+| `217.142.189.7`，aarch64，systemd 255 | `cargo build --locked`、`cargo check --locked` 通过；全量含 ignored：114 passed、0 failed、0 ignored，59.25 秒 | 真实 Node/npm、Python 声明及单文件、Go、Maven Spring Boot、Gradle application；systemd 八入口逐个验证完整参数、日志、cgroup 和停止；Rust 包含无门槛、单 feature、多 feature |
+| `217.142.185.156`，aarch64，systemd 259 | 编译检查通过；普通测试 106 passed、0 failed、8 ignored；真实通用 systemd 探针 1 passed | unit 创建、环境/参数/工作目录、日志、cgroup、停止、重启、错误/未知状态；未安装完整语言工具，不作为五语言实跑证明 |
+
+两个 Linux 环境均实际验证了在父进程没有 HOME 时读取账户主目录。systemd 255 的语言循环没有在测试中单独设置 HOME 或 GOCACHE，Go 成功依赖生产启动准备的环境补全。Java 使用同次构建的 panel CLI，构建与应用在同一 unit 中运行；Rust feature 探针的门槛缺失会使构建失败。
+
+验收结束后，两台服务器的 `panel-validation-*` unit 和验证进程均无残留，独立 checkout 与线上 checkout 均干净。线上 PID 分别仍为 1804480、574376，执行文件仍为 `/root/rust_project/panel/target/release/panel`；线上源码分别保持 `aec89f6`、`24ae505`。本轮没有部署或重启线上 panel。探针清理时的 `Unit ... not loaded` 表示成功停止后 transient unit 已回收，最终残留查询为空；这些输出不代表启动验收失败。
+
+续验记录（北京时间 2026-11-25 03:45:23）：原会话在模型服务中断前已经完成测试、残留检查和上述账本草稿，尚未提交验收文档。本次读取原命令输出核实测试结果，并重新通过 SSH 运行只读检查；两台命令退出码均为 0，输出均为 `READ_ONLY_FINAL_AUDIT_PASS`。查询 `systemctl list-units --all --no-legend --no-pager 'panel-validation-*'` 得到空字符串；扫描 `/proc` 中的 cgroup、执行文件和工作目录得到验证进程空列表。线上 PID 和进程启动时刻均与原检查相同，运行中执行文件的 inode 与线上文件一致；独立 checkout 仍为上述最终代码验收版本，四个 checkout 的 `git status --porcelain` 均为空。
+
+| 环境 | 线上源码完整提交 | 线上 PID | `/proc/PID/stat` 的 starttime |
+| --- | --- | --- | --- |
+| systemd 255 | `aec89f625d2bbe4f2edf313eab441515ae78512b` | 1804480 | 771191497 |
+| systemd 259 | `24ae5058f84597b6dcd99296ad36f63351cf2566` | 574376 | 357422719 |
+
+原始测试证据来自会话“修复 panel 启动 bin 的 feature 门槛”（ID `01a20e5b-5a6f-7551-9ccd-705a11dfedc0`）：systemd 255 命令 `exec-de265330-75f9-4590-bfe1-2bcef0b95d9b`，systemd 259 命令 `exec-61c0c274-9ff2-416c-9daa-6192a68ae559`；两项均退出 0。此次续验没有重新运行全量测试，表内测试数字保留原实跑结果；新增的是残留、线上进程及文档引用复查。八入口逐项成功输出、测试汇总和两机旧进程 starttime 均已与原记录核对。
+
+systemd 255 的工具来自 `/root/panel-validation-toolchains` 独立目录，实际版本：Node v26.13.1、npm 11.20.0、Temurin JDK 21.0.13.1+2、Maven 3.9.11、Gradle 8.14.3、Go 1.27.4。安装时核对官方分发校验值，每组 `panel-source.json` 保存来源 URL 与 SHA；对应子目录为 `node`、`jdk`、`maven`、`gradle`、`go`。未修改全局 PATH 或替换原工具。
+
+该机可复跑的命令（从独立 checkout 执行，工具与 fixture 路径均已实证存在）：
+
+```bash
+cd /root/panel-validation-20261125
+export PATH="/root/panel-validation-toolchains/node/node-v26.13.1-linux-arm64/bin:/root/panel-validation-toolchains/jdk/jdk-21.0.13.1+2/bin:/root/panel-validation-toolchains/maven/apache-maven-3.9.11/bin:/root/panel-validation-toolchains/gradle/gradle-8.14.3/bin:/root/panel-validation-toolchains/go/go/bin:/root/.cargo/bin:$PATH"
+export JAVA_HOME=/root/panel-validation-toolchains/jdk/jdk-21.0.13.1+2
+export PANEL_TEST_PANEL_BIN="$PWD/target/debug/panel"
+export CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 PYTHONDONTWRITEBYTECODE=1 MAVEN_OPTS=-Xmx384m
+nice -n 10 /root/.cargo/bin/cargo build --locked
+nice -n 10 /root/.cargo/bin/cargo test --locked -- --include-ignored --nocapture --test-threads=1
+nice -n 10 /root/.cargo/bin/cargo check --locked
+```
+
+此前失败及修订记录：
 
 - `84827ec` 在 systemd 259 的真实探针通过：unit 创建、参数/环境/工作目录、cgroup、日志、停止、重启、启动错误及未知状态；编译检查通过。
 - `84827ec` 在 systemd 255 首轮全量结果为 107 passed、2 failed：失败均因服务器缺 npm，分别影响真实 npm 和各语言 systemd 探针。真实 Python、Go、Gradle installDist 与 Maven Spring Boot repackage 已通过，Java 应用实际收到完整的空格、单双引号、换行及制表符参数。
