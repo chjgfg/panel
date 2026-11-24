@@ -8,6 +8,8 @@ Linux systemd 项目运行面板：启动、停止、重启、日志、资源采
 - `panel-run.toml.example`：项目启动入口示例，包含 Java、Node、Python、Rust、Go 的命令模板。
 - `src/launch.rs`：项目配置解析、入口来源选择、运行时检查和 systemd-run 参数生成的实现及测试。
 - `src/auto_launch.rs`：各语言的自动入口发现及测试。
+- `src/lifecycle.rs`：停止证明、启动确认及独立 Linux systemd 探针。
+- `tests/ui.test.cjs`：页面状态提示的行为验证，执行 `node --test tests/ui.test.cjs`。
 - `tests/fixtures/launch/README.md`：固定测试输入的索引和本地运行方式。
 
 每个被扫描的项目，可以在项目根目录放一个 `panel-run.toml`。从示例中仅保留这个项目需要的 `[[targets]]`，替换 `YOUR_*` 占位值后保存。刷新页面即可看到入口，无需重启 panel。
@@ -62,6 +64,8 @@ panel 自己启动不再要求安装 Cargo。只在启动 Rust 自动发现的�
 
 ## 验证与边界
 
+项目操作与单入口操作共用项目异步锁，同项目按顺序执行，不同项目可并行。停止命令成功后仍复查 PID 和状态；停止失败或无法确认停止时不创建新实例。仅有效的 `LoadState=not-found` 可以视为已不存在，错误文本不能充当证明。启动后只有确认 active 才返回 HTTP 204；状态查询失败或持续启动中返回 HTTP 202，页面显示黄色“状态未确认”；确定失败返回 HTTP 500。未知和过渡状态单独显示，并保留停止入口。
+
 在项目目录执行 `cargo test --locked`、`cargo check --locked` 和 `cargo build --locked`。
 
 测试覆盖入口来源选择、配置错误、五类命令、参数边界、环境变量、工作目录、运行时缺失、Cargo feature、旧实例管理、配置往返序列化及自动发现。真实 Node/Python 探针作为可选测试，运行方式见测试输入索引。本地子进程验证不经过 systemd；Linux systemd 的实际创建、cgroup 管理和日志读取需要在服务器另外验收。
@@ -76,5 +80,7 @@ panel 自己启动不再要求安装 Cargo。只在启动 Rust 自动发现的�
 - 自动发现阶段 `cargo test --locked -- --include-ignored`：83 passed，0 failed，0 ignored；Windows 真实 npm 探针使用 `PANEL_TEST_POSIX_SHELL` 指定本机 Git 的 sh，包含真实 Python 和 npm 子进程、混合项目、包管理器、Python 引用、JAR 清单、Go 伪入口及错误分支验证。普通测试默认跳过两个需外部运行时的探针。
 - 本轮对照：移除名称转义的防碰撞规则及 Go main 包双重约束，两个测试失败；恢复后全量通过。JAR 相对扫描路径的回归测试在修正前失败、修正后通过；JAR 参数现在相对于项目工作目录解析。
 - 修订：显式配置阶段只验证五类命令模板；本轮增加真实 Python 调用和 npm/POSIX shell 透传验证。Windows npm/cmd.exe 的换行截断已实测确认，未降低断言要求。Java/Go 实际运行和服务器 Linux systemd 尚未验证。
+- 启停可靠性阶段：`cargo test --locked -- --include-ignored` 为 95 passed，0 failed；`cargo check --locked` 通过；`node --test tests/ui.test.cjs` 为 2 passed。覆盖停止失败阻断、停止后复查、未知状态、结果聚合、HTTP 状态以及两个真实 handler 等待同一项目锁。
+- 可靠性对照：分别移除停止阻断、将未确认返回改为成功、移除 handler 锁后，三个相关测试均失败；源码按字节恢复。Linux 实际启停尚待本轮后续验收。
 
 移除本项目的显式启动配置会恢复自动发现；配置变更不会自动停止已运行实例。回退本轮自动发现功能可恢复提交 `2e3cc0d` 后重新编译部署，该版本仍支持显式多语言配置和 Rust feature 修复。

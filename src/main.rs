@@ -17,6 +17,7 @@ mod config;
 mod discover;
 mod hostinfo;
 mod launch;
+mod lifecycle;
 mod procs;
 mod srctree;
 mod state;
@@ -40,7 +41,10 @@ use serde::{Deserialize, Serialize};
 use crate::auth::cookie_token;
 use crate::config::{BoxErr, Config, config_path};
 use crate::discover::{discover, ok_name};
-use crate::launch::{PreparedCommand, ProjectTargets, load_targets, systemd_run_argv};
+use crate::launch::{PreparedCommand, ProjectTargets, load_targets};
+#[cfg(test)]
+use crate::launch::systemd_run_argv;
+use crate::lifecycle::{Outcome, SystemServices};
 use crate::procs::{find_outside, proc_exes, stop_pids};
 use crate::state::{lock, App};
 use crate::srctree::{Node, file_path_ok, read_file, search_dir, walk_tree};
@@ -306,7 +310,7 @@ async fn units(State(app): State<Arc<App>>) -> Json<Vec<Status>> {
             .iter()
             .map(|b| {
                 let raw = shown.get(&unit_of(&name, b));
-                let active = raw.map(|r| r.active.as_str()).unwrap_or("");
+                let active = raw.map(|r| r.active.as_str()).filter(|s| !s.is_empty()).unwrap_or("unknown");
                 let running = active == "active";
                 let uptime = if running {
                     raw.and_then(|r| r.active_since_us)
@@ -373,7 +377,7 @@ async fn units(State(app): State<Arc<App>>) -> Json<Vec<Status>> {
             external: p.external,
             loaded: p.raw.load == "loaded",
             enabled: p.raw.enabled == "enabled",
-            active: p.raw.active,
+            active: if p.raw.active.is_empty() { "unknown".into() } else { p.raw.active },
             sub: p.raw.sub,
             pid: if p.raw.pid > 0 {
                 p.raw.pid
@@ -420,82 +424,30 @@ struct BinArg {
     args: String,
 }
 
-/// 失败时把 journal 尾巴捞出来当错误信息（cargo 的编译错误就在里面）
-async fn journal_tail(unit: &str) -> String {
-    let n = "12";
-    let args = ["-u", unit, "-n", n, "--no-pager", "-o", "short-iso"];
-    match run("journalctl", &args).await {
-        Ok((_, out, err)) => drop_noise(&format!("{out}{err}")).trim().to_string(),
-        Err(e) => format!("读日志失败：{e}"),
+fn operation_response(outcome: Outcome) -> Response {
+    match outcome {
+        Outcome::Complete => StatusCode::NO_CONTENT.into_response(),
+        Outcome::Unconfirmed(message) => (StatusCode::ACCEPTED, format!("状态未确认：{message}")).into_response(),
+        Outcome::Failed(message) => (StatusCode::INTERNAL_SERVER_ERROR, message).into_response(),
     }
 }
 
-/// systemd-run 返回 0 只代表「transient unit 建起来了」，不代表程序真在跑：
-/// 找不到 bin、起来就 panic、端口被占，都发生在它返回之后，只在 journal 里。
-/// 以前 spawn 就此报成功，界面显示绿色而实际什么都没跑。这里短促回读 unit 状态，
-/// 秒级失败当场把 journal 尾巴带回前端；慢失败（编译几十秒才报错）仍由每 3 秒
-/// 一次的刷新兜住 —— 不在请求里干等，单核机器上编译本来就慢。
-async fn settle(unit: &str) -> (bool, String) {
-    let want = [unit.to_string()];
-    for _ in 0..8 {
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        let shown = show_many(&want).await;
-        let Some(r) = shown.get(unit) else { continue };
-        match r.active.as_str() {
-            // cargo run 的父进程就是 unit 的主进程，编译期间它一直是 active，
-            // 所以这里抓得住的是「秒退」，不是「编译慢」
-            "active" | "activating" | "reloading" => return (true, String::new()),
-            "failed" => return (false, journal_tail(unit).await),
-            "inactive" | "deactivating" | "dead" => {
-                return (false, "起来就退了，没留住进程".to_string());
+/// 启动与重启共用停止证明；unit 创建后记录参数，秒退的实例也能继续查日志。
+async fn spawn(app: &App, project: &str, bin: &str, args: &str, command: &PreparedCommand) -> Outcome {
+    let result = lifecycle::launch(&SystemServices, &unit_of(project, bin), command).await;
+    if result.created {
+        {
+            let mut last = lock(&app.last);
+            let group = last.entry(project.to_string()).or_default();
+            if let Some(slot) = group.iter_mut().find(|(b, _)| b == bin) {
+                *slot = (bin.to_string(), args.to_string());
+            } else {
+                group.push((bin.to_string(), args.to_string()));
             }
-            _ => {}
         }
+        app.save_last();
     }
-    // 一直读不清状态就别再拖，交给界面的轮询
-    (true, String::new())
-}
-
-/// 用 systemd-run 起一个 transient unit，等于临时造了个 systemd 服务。
-/// 这样状态、运行时长、CPU、内存、日志全都沿用现成那套，
-/// 面板不用自己管子进程和日志收集。
-async fn spawn(
-    app: &App,
-    project: &str,
-    bin: &str,
-    args: &str,
-    command: &PreparedCommand,
-) -> (bool, String) {
-    let unit = unit_of(project, bin);
-    // 上一次跑完/跑挂的同名 unit 还挂在那儿的话，systemd-run 会拒绝创建
-    let _ = run("systemctl", &["reset-failed", "--", unit.as_str()]).await;
-
-    let argv = systemd_run_argv(&unit, command);
-    let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-
-    match run("systemd-run", &refs).await {
-        Ok((true, ..)) => {
-            // 用一个块把锁先放掉再落盘：std 的 Mutex 不可重入，save_last 自己也要取锁
-            {
-                let mut last = lock(&app.last);
-                let group = last.entry(project.to_string()).or_default();
-                // 同一批里重复养同一个 bin 就覆盖掉，不重复记
-                if let Some(slot) = group.iter_mut().find(|(b, _)| b == bin) {
-                    *slot = (bin.to_string(), args.to_string());
-                } else {
-                    group.push((bin.to_string(), args.to_string()));
-                }
-            }
-            // 落盘：面板或服务器重启后，「重启」还要能沿用这组 bin + 参数
-            app.save_last();
-            settle(&unit).await
-        }
-        Ok((false, out, err)) => {
-            let msg = if err.trim().is_empty() { out } else { err };
-            (false, msg.trim().to_string())
-        }
-        Err(e) => (false, e.to_string()),
-    }
+    result.outcome
 }
 
 async fn action(
@@ -509,6 +461,7 @@ async fn action(
         return (StatusCode::NOT_FOUND, "未知项目").into_response();
     };
     let req = body.map(|Json(b)| b).unwrap_or_default();
+    let _operation = app.project_operation(&project).await;
     let targets = load_targets(&dir).await;
     if (act == "start" || act == "restart") && let Err(error) = &targets {
         return (StatusCode::INTERNAL_SERVER_ERROR, error.clone()).into_response();
@@ -541,51 +494,25 @@ async fn action(
             .into_iter().filter(|(bin, _)| runnable(&targets, bin)).collect()
     };
 
-    // quiet=true 时「unit 根本没在跑」不算错（systemctl stop 一个没 loaded 的会报 not loaded，
-    // 但停一个没跑的东西本来就该是空操作，不该弹红字）
-    let sysctl_on = async |u: &str, act: &str, quiet: bool| -> (bool, String) {
-        let (ok, msg) = match run("systemctl", &[act, "--", u]).await {
-            Ok((ok, out, err)) => (ok, if err.trim().is_empty() { out } else { err }),
-            Err(e) => (false, e.to_string()),
-        };
-        (ok || (quiet && !ok), msg)
-    };
-
-    let (ok, msg) = match act.as_str() {
+    let outcome = match act.as_str() {
         "stop" => {
-            // 累加式下可能同时起着好几个 bin 的 unit，stop 把所有在跑的面板 unit、
-            // 你手写的 unit、以及面板外的裸进程一律停掉
-            let theirs = format!("{project}.service");
-            let proj_units = project_units(&project, &this_bins);
-            let shown = show_many(&proj_units).await;
-            let mut failed = String::new();
-            for u in &proj_units {
-                let theirs_ok = *u == theirs;
-                let active = shown.get(u).map_or(false, |r| r.active == "active");
-                if active && (theirs_ok || u.starts_with(&format!("panel-{project}-"))) {
-                    let (ok, msg) = sysctl_on(u, "stop", true).await;
-                    if !ok && !msg.trim().is_empty() {
-                        failed.push_str(&msg);
-                    }
-                }
+            let mut outcome = Outcome::Complete;
+            for unit in project_units(&project, &this_bins) {
+                outcome = outcome.merge(lifecycle::stop(&SystemServices, &unit).await);
             }
             if !outside.is_empty() {
-                let (ok, msg) = stop_pids(&outside).await;
-                if !ok {
-                    failed.push_str(&msg);
-                }
+                let (ok, message) = stop_pids(&outside).await;
+                if !ok { outcome = outcome.merge(Outcome::Failed(message)); }
             }
-            if failed.trim().is_empty() {
-                (true, String::new())
-            } else {
-                (false, failed)
-            }
+            outcome
         }
-        // 你自己写的 unit，ExecStart 是你定的，面板不插手怎么起
         _ if external => match act.as_str() {
-            "start" | "restart" => {
+        "start" | "restart" => {
                 let u = picked.unit.clone();
-                sysctl_on(u.as_str(), act.as_str(), false).await
+                match lifecycle::Services::invoke(&SystemServices, "systemctl", &[act.as_str(), "--", &u]).await {
+                    Ok(()) => lifecycle::settle(&SystemServices, &u).await,
+                    Err(error) => Outcome::Failed(error),
+                }
             }
             _ => return (StatusCode::BAD_REQUEST, "非法操作").into_response(),
         },
@@ -610,54 +537,17 @@ async fn action(
                     return (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response();
                 }
             }
-            // 累加式：对每个勾选的 bin 分别起；已经起着同 unit 的先停掉再起（保证用它当前参数）
-            let mut errs = Vec::new();
-            // 一次把所有候选 unit 的 ActiveState 问齐，循环里就不一个个 fork systemctl 了
-            let active_units: Vec<String> = {
-                let shown = show_many(&project_units(&project, &this_bins)).await;
-                this_bins
-                    .iter()
-                    .map(|b| unit_of(&project, b))
-                    .filter(|u| shown.get(u).map_or(false, |r| r.active == "active"))
-                    .collect()
-            };
+            let mut outcome = Outcome::Complete;
             for ((bin, args), command) in chosen.iter().zip(&prepared) {
-                let u = unit_of(&project, bin);
-                // 若这个 bin 的 unit 还在 active，先停掉，否则 systemd-run 同名会拒绝
-                if active_units.contains(&u) {
-                    let _ = sysctl_on(&u, "stop", true).await;
-                }
-                let (ok, msg) = spawn(&app, &project, bin, args, command).await;
-                if !ok {
-                    let msg = msg.trim();
-                    errs.push(if msg.is_empty() {
-                        format!("「{bin}」起不来")
-                    } else {
-                        format!("「{bin}」：{msg}")
-                    });
-                }
+                outcome = outcome.merge(spawn(&app, &project, bin, args, command).await);
             }
-            if !errs.is_empty() {
-                (false, errs.join("；"))
-            } else {
-                (true, String::new())
-            }
+            outcome
         }
         _ => return (StatusCode::BAD_REQUEST, "非法操作").into_response(),
     };
 
-    // 谁、对哪个项目、做了什么、成没成 —— 记进审计环形缓冲
-    app.note(
-        &who(ip, &headers),
-        format!("{act} 「{project}」{}", if ok { String::new() } else { format!(" 失败：{}", msg.trim()) }),
-    );
-    if ok {
-        StatusCode::NO_CONTENT.into_response()
-    } else {
-        let msg = msg.trim();
-        let msg = if msg.is_empty() { "操作失败" } else { msg };
-        (StatusCode::INTERNAL_SERVER_ERROR, msg.to_string()).into_response()
-    }
+    app.note(&who(ip, &headers), format!("{act} 「{project}」{}", outcome.note()));
+    operation_response(outcome)
 }
 
 /// 单个 bin 的启停：项目下每个 bin 独立成 unit，所以能单独停/重启某一个，
@@ -671,6 +561,7 @@ async fn bin_action(
     let Some((project, dir)) = resolve(&app, &key).await else {
         return (StatusCode::NOT_FOUND, "未知项目").into_response();
     };
+    let _operation = app.project_operation(&project).await;
     let targets = load_targets(&dir).await;
     if act == "restart" && let Err(error) = &targets {
         return (StatusCode::INTERNAL_SERVER_ERROR, error.clone()).into_response();
@@ -681,19 +572,8 @@ async fn bin_action(
     }
     let unit = unit_of(&project, &bin);
 
-    let sysctl = || async {
-        match run("systemctl", &["stop", "--", unit.as_str()]).await {
-            Ok((ok, out, err)) => (ok, if err.trim().is_empty() { out } else { err }),
-            Err(e) => (false, e.to_string()),
-        }
-    };
-
-    let (ok, msg) = match act.as_str() {
-        // 单个 bin 的 unit 停掉；没在跑时 systemctl 报 not loaded，按空操作放行、不弹红字
-        "stop" => {
-            let (ok, msg) = sysctl().await;
-            (ok || msg.contains("not loaded"), msg)
-        }
+    let outcome = match act.as_str() {
+        "stop" => lifecycle::stop(&SystemServices, &unit).await,
         // 重启这一个 bin：停掉它的 unit 再按上次参数（或空参数）重新拉起
         "restart" => {
             let args = lock(&app.last)
@@ -709,7 +589,6 @@ async fn bin_action(
                 Ok(command) => command,
                 Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
             };
-            let _ = sysctl().await;
             spawn(&app, &project, &bin, &args, &command).await
         }
         _ => {
@@ -717,17 +596,8 @@ async fn bin_action(
         }
     };
 
-    app.note(
-        &who(ip, &headers),
-        format!("{act} 「{project}」的 bin「{bin}」{}", if ok { String::new() } else { format!(" 失败：{}", msg.trim()) }),
-    );
-    if ok {
-        StatusCode::NO_CONTENT.into_response()
-    } else {
-        let msg = msg.trim();
-        let msg = if msg.is_empty() { "操作失败" } else { msg };
-        (StatusCode::INTERNAL_SERVER_ERROR, msg.to_string()).into_response()
-    }
+    app.note(&who(ip, &headers), format!("{act} 「{project}」的入口「{bin}」{}", outcome.note()));
+    operation_response(outcome)
 }
 
 #[derive(Deserialize)]
@@ -1079,6 +949,46 @@ async fn start() -> Result<(), BoxErr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn project_and_bin_handlers_wait_for_same_project_lock() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let cfg: Config = toml::from_str(&format!("password='test'\ndirs=[{}]", serde_json::to_string(&root.join("tests/fixtures").display().to_string()).unwrap())).unwrap();
+        let app = App::new(cfg, root.join("README.md"), root.join("README.md"));
+        let held = app.project_operation("cargo-tooling").await;
+        let ip = "127.0.0.1:1234".parse().unwrap();
+        let invoke = |bin| {
+            let app = app.clone();
+            async move {
+                if bin {
+                    bin_action(State(app), ConnectInfo(ip), HeaderMap::new(), Path(("cargo-tooling".into(), "nonexistent".into(), "invalid".into()))).await
+                } else {
+                    action(State(app), ConnectInfo(ip), HeaderMap::new(), Path(("cargo-tooling".into(), "invalid".into())), None).await
+                }
+            }
+        };
+        for bin in [false, true] {
+            assert!(tokio::time::timeout(std::time::Duration::from_millis(80), invoke(bin)).await.is_err(), "handler {bin} 没有等待共用锁");
+        }
+        drop(held);
+        for bin in [false, true] {
+            let response = tokio::time::timeout(std::time::Duration::from_secs(5), invoke(bin)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[tokio::test]
+    async fn operation_responses_distinguish_confirmed_pending_and_failed() {
+        for (outcome, status, body) in [
+            (Outcome::Complete, StatusCode::NO_CONTENT, ""),
+            (Outcome::Unconfirmed("查询失败".into()), StatusCode::ACCEPTED, "状态未确认：查询失败"),
+            (Outcome::Failed("停止失败".into()), StatusCode::INTERNAL_SERVER_ERROR, "停止失败"),
+        ] {
+            let response = operation_response(outcome);
+            assert_eq!(response.status(), status);
+            assert_eq!(axum::body::to_bytes(response.into_body(), 1024).await.unwrap(), body);
+        }
+    }
 
     fn cargo_argv(cargo: &str, unit: &str, dir: &str, bin: &str, features: &[String], args: &str) -> Vec<String> {
         let command = PreparedCommand::cargo(cargo, std::path::Path::new(dir), bin, features, args);

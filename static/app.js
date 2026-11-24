@@ -15,10 +15,27 @@ async function req(path, opts) {
 }
 
 // 顶部横幅：默认报错（红），ok=true 报成功（绿）。
-function banner(msg, ok) {
+function banner(msg, ok, pending = false) {
   $('banner').textContent = msg || '';
   $('banner').hidden = !msg;
   $('banner').classList.toggle('ok', !!ok);
+  $('banner').classList.toggle('pending', !!pending);
+}
+
+// 已接受的操作与状态确认分开显示，HTTP 202 不能被绿色成功提示吞掉。
+async function actionResult(response) {
+  if (response.status === 202) banner((await response.text()).trim() || '状态未确认', false, true);
+  else banner('');
+}
+
+// 未知及过渡状态都保留停止入口，避免查询失败时误报已经停止。
+function serviceState(active) {
+  const states = {
+    active: ['运行中', 'on'], failed: ['失败', 'bad'], inactive: ['已停止', 'off'],
+    activating: ['启动中', 'pending'], deactivating: ['停止中', 'pending'],
+    reloading: ['重载中', 'pending'],
+  };
+  return states[active] || ['状态未知', 'pending'];
 }
 
 // 弹窗滚动锁：模态弹窗打开时锁掉 body 滚动，否则滚轮在弹窗里滚到头之后
@@ -675,17 +692,13 @@ function syncView(v, u) {
   // 「失败」，为什么挂的必须点进日志翻到底才知道
   if (u.fail) v.sub.textContent = v.sub.textContent ? `${v.sub.textContent} · ${u.fail}` : u.fail;
 
-  let statusText;
-  if (outside) statusText = '运行中（面板外）';
-  else if (!u.loaded) statusText = '未运行';
-  else if (running) statusText = '运行中';
-  else if (u.active === 'failed') statusText = '失败';
-  else statusText = '已停止';
-  v.badge.className = 'badge ' + (alive ? 'on' : u.active === 'failed' ? 'bad' : 'off');
+  const [text, tone] = serviceState(u.active);
+  const statusText = outside ? '运行中（面板外）' : text;
+  v.badge.className = 'badge ' + (outside ? 'on' : tone);
   v.badgeText.nodeValue = statusText;
   // 行左缘那条状态色带的档位（CSS 里的 .st-*）。同值不重设：class 一变，
   // box-shadow 过渡就重播，每 3 秒轮询会让它一直闪
-  const st = alive ? 'st-on' : u.active === 'failed' ? 'st-bad' : 'st-off';
+  const st = 'st-' + (outside ? 'on' : tone);
   if (v.tr.className !== st) v.tr.className = st;
 
   v.dur.textContent = fmtDur(u.uptime);
@@ -792,10 +805,11 @@ function syncBinRows(v, u) {
     r.sub.textContent = sub;
     r.sub.hidden = !sub;
     r.sub.title = args.length > 40 ? inst.args : '';
-    r.badge.className = 'badge ' + (inst.running ? 'on' : inst.active === 'failed' ? 'bad' : 'off');
-    r.badgeText.nodeValue = inst.running ? '运行中' : inst.active === 'failed' ? '失败' : '未运行';
+    const [text, tone] = serviceState(inst.active);
+    r.badge.className = 'badge ' + tone;
+    r.badgeText.nodeValue = text;
     // 项目行和 bin 行共用同一套左缘档位，两个层级的状态口径要一致
-    const bst = inst.running ? 'st-on' : inst.active === 'failed' ? 'st-bad' : 'st-off';
+    const bst = 'st-' + tone;
     if (r.tr.className !== bst) r.tr.className = bst;
     r.dur.textContent = fmtDur(inst.uptime);
     // 单位跟父行同一把尺：父行 1159.1MB、子行 1.1GB 那种两套口径最掉价
@@ -804,7 +818,7 @@ function syncBinRows(v, u) {
       inst.cpu == null ? '—' : inst.cpu.toFixed(1) + '%');
     r.memSvg = metric(r.mem, r.memText, r.memSvg, ih && ih.mem, 'mem', fmtMemMB(inst.memory));
     r.btn.start.disabled = inst.running || inst.runnable === false;
-    r.btn.stop.disabled = !inst.running;
+    r.btn.stop.disabled = !inst.running && tone !== 'pending' && inst.active !== 'failed';
     r.btn.restart.disabled = !inst.running || inst.runnable === false;
     const at = v.binBody.children[i];
     if (at !== r.tr) v.binBody.insertBefore(r.tr, at || null);
@@ -820,12 +834,12 @@ function doAction(u, act, label) {
   const tone = act === 'stop' ? 'danger' : act === 'restart' ? 'caution' : '';
   openConfirm(`确认${label}`, `确认${label}该程序「${u.name}」吗？`, async () => {
     try {
-      await req(`api/units/${u.key}/${act}`, {
+      const response = await req(`api/units/${u.key}/${act}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: '{}',
       });
-      banner('');
+      await actionResult(response);
     } catch (e) {
       if (e.message !== '未登录') banner(`${label}「${u.name}」失败: ${e.message}`);
     }
@@ -867,12 +881,12 @@ function binAction(u, inst, act) {
   const tone = act === 'stop' ? 'danger' : 'caution';
   openConfirm(`确认${label}`, `确认${label}该 bin 程序「${inst.bin}」吗？`, async () => {
     try {
-      await req(`api/units/${u.key}/bins/${encodeURIComponent(inst.bin)}/${act}`, {
+      const response = await req(`api/units/${u.key}/bins/${encodeURIComponent(inst.bin)}/${act}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: '{}',
       });
-      banner('');
+      await actionResult(response);
     } catch (e) {
       if (e.message !== '未登录') banner(`${label}「${inst.bin}」失败: ${e.message}`);
     }
@@ -962,11 +976,12 @@ $('runGo').onclick = async () => {
   $('runErr').textContent = '';
   try {
     // 只提交当前这个 bin；参数原样透传（空格、换行都不拆）
-    await req(`api/units/${runKey}/start`, {
+    const response = await req(`api/units/${runKey}/start`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ bins: [{ bin: runBin, args: $('runArgs').value }] }),
     });
+    await actionResult(response);
     // 执行完成自动关闭弹窗
     $('runbox').hidden = true;
     // syncScrollLock();

@@ -1,7 +1,7 @@
 // 全局共享状态：配置、会话表、各类采样缓存、启动参数的落盘、操作审计。
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -41,6 +41,8 @@ pub fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 pub struct App {
     pub cfg: Config,
+    /// 项目级操作共用异步锁，弱引用在下次操作时回收，避免已删除项目长期占用内存。
+    pub operations: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
     /// 网页控制台用的 SSH 私钥落盘路径（跟配置文件同目录的 panel_ssh_key）。
     /// 存服务器上而不是浏览器里，换个浏览器也不用重配。文件权限 0600。
     pub ssh_key_path: PathBuf,
@@ -97,6 +99,7 @@ impl App {
     ) -> Arc<App> {
         let app = Arc::new(App {
             cfg,
+            operations: Mutex::new(HashMap::new()),
             ssh_key_path,
             state_path,
             sessions: Mutex::new(HashMap::new()),
@@ -111,6 +114,22 @@ impl App {
         });
         app.load_last();
         app
+    }
+
+    pub async fn project_operation(&self, project: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let operation = {
+            let mut operations = lock(&self.operations);
+            operations.retain(|_, operation| operation.strong_count() > 0);
+            match operations.get(project).and_then(Weak::upgrade) {
+                Some(operation) => operation,
+                None => {
+                    let operation = Arc::new(tokio::sync::Mutex::new(()));
+                    operations.insert(project.into(), Arc::downgrade(&operation));
+                    operation
+                }
+            }
+        };
+        operation.lock_owned().await
     }
 
     /// 记一条操作审计。who 用「IP · 会话前 8 位」，不记密码也够回溯是谁干的。
@@ -253,6 +272,28 @@ impl App {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn project_operations_serialize_both_handlers_without_blocking_other_projects() {
+        let app = Arc::new(test_app(PathBuf::new()));
+        let first = app.project_operation("same").await;
+        let second_app = app.clone();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let waiter = tokio::spawn(async move {
+            let _second = second_app.project_operation("same").await;
+            tx.send(()).await.unwrap();
+        });
+        tokio::task::yield_now().await;
+        assert!(rx.try_recv().is_err());
+        let other = app.project_operation("other").await;
+        drop(other);
+        assert!(rx.try_recv().is_err());
+        drop(first);
+        rx.recv().await.unwrap();
+        waiter.await.unwrap();
+        let _fresh = app.project_operation("fresh").await;
+        assert_eq!(lock(&app.operations).len(), 1);
+    }
+
     fn tmp(name: &str) -> PathBuf {
         let mut p = std::env::temp_dir();
         p.push(format!("panel-test-{name}-{}", std::process::id()));
@@ -263,6 +304,7 @@ mod tests {
     /// 只用于测试的 App：状态文件指到临时路径，不碰真配置旁边那个
     fn test_app(state_path: PathBuf) -> App {
         App {
+            operations: Mutex::new(HashMap::new()),
             cfg: Config {
                 bind: "127.0.0.1:0".into(),
                 password: "x".repeat(12),

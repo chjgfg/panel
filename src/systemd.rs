@@ -115,6 +115,33 @@ pub async fn show_many(units: &[String]) -> HashMap<String, Raw> {
     out
 }
 
+/// 启停校验必须分清读取失败和 unit 确实不存在，不能把空表当作已经停止。
+pub async fn show_checked(unit: &str) -> Result<Raw, String> {
+    let (ok, stdout, stderr) = run("systemctl", &["show", "--no-pager", "--property", PROPS, "--", unit])
+        .await.map_err(|e| format!("查询 {unit} 失败：{e}"))?;
+    if !ok {
+        return Err(format!("查询 {unit} 失败：{}", command_message(&stdout, &stderr)));
+    }
+    checked_state(&stdout, unit)
+}
+
+fn checked_state(stdout: &str, unit: &str) -> Result<Raw, String> {
+    let props: HashMap<_, _> = stdout.lines().filter_map(|line| line.split_once('=')).collect();
+    let raw = parse_show(stdout);
+    // MainPID 缺失不能用默认的 0 充当停止证明，Id 也必须与请求一致。
+    if raw.load.is_empty() || raw.active.is_empty() || props.get("Id") != Some(&unit)
+        || props.get("MainPID").and_then(|pid| num(pid)).is_none()
+    {
+        return Err(format!("查询 {unit} 返回的状态不完整或不匹配"));
+    }
+    Ok(raw)
+}
+
+pub fn command_message(stdout: &str, stderr: &str) -> String {
+    let message = if stderr.trim().is_empty() { stdout } else { stderr }.trim();
+    if message.is_empty() { "命令执行失败，未返回错误信息".into() } else { message.into() }
+}
+
 /// systemd 给的是 monotonic 时间戳，要配 /proc/uptime 才能换算成「运行了多久」
 pub async fn boot_secs() -> f64 {
     tokio::fs::read_to_string("/proc/uptime")
@@ -231,6 +258,16 @@ pub async fn pick_project_checked(project: &str, bins: &[String], configured: bo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn incomplete_pid_or_wrong_unit_never_proves_a_stopped_state() {
+        for text in [
+            "Id=x.service\nLoadState=loaded\nActiveState=inactive",
+            "Id=x.service\nLoadState=loaded\nActiveState=inactive\nMainPID=bad",
+            "Id=other.service\nLoadState=loaded\nActiveState=inactive\nMainPID=0",
+        ] { assert!(checked_state(text, "x.service").is_err()); }
+        assert_eq!(checked_state("Id=x.service\nLoadState=not-found\nActiveState=inactive\nMainPID=0", "x.service").unwrap().load, "not-found");
+    }
 
     #[test]
     fn configured_targets_are_not_hidden_by_external_service() {
