@@ -1,0 +1,18 @@
+[package]
+name = "rust-probe"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+alpha = []
+beta = []
+
+[[bin]]
+name = "single"
+path = "src/bin/single.rs"
+required-features = ["alpha"]
+
+[[bin]]
+name = "multiple"
+path = "src/bin/multiple.rs"
+required-features = ["alpha", "beta"]

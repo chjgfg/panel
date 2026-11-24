@@ -62,6 +62,17 @@ test('preview renders literal values as text and preserves JSON argument boundar
   assert.equal($('runPreviewMeta').children[1].textContent, '<b>Cargo.toml</b>');
 });
 
+test('Java previews distinguish the build command from the eventual artifact', () => {
+  const { context, $ } = previewContext();
+  const extra = '  literal\n\t ';
+  context.renderRunPreview({ program: '/jdk/bin/java', args: [extra], source: 'pom.xml', features: [], working_dir: '/project',
+    build: { program: '/maven/bin/mvn', args: ['package'], artifact: '构建后选择唯一 JAR' } });
+  assert.match($('runPreviewStatus').textContent, /构建成功后确定/);
+  assert.match($('runPreviewCommand').textContent, /构建命令/);
+  assert.equal($('runPreviewCommand').textContent.split('\n').at(-1), JSON.stringify(extra));
+  assert.doesNotMatch($('runPreviewCommand').textContent, /--panel-java-build/);
+});
+
 test('an older preview cannot overwrite a new bin or re-enable its button', async () => {
   let finish;
   let signalReady;
@@ -78,4 +89,35 @@ test('an older preview cannot overwrite a new bin or re-enable its button', asyn
   await pending;
   assert.equal($('runPreviewCommand').textContent, '');
   assert.equal($('runGo').disabled, true);
+});
+
+test('restart previews the original whole argument before preserving the bin action protocol', async () => {
+  const calls = []; let confirmation;
+  const extra = '  --label "two words"\nnext\t ';
+  const context = vm.createContext({
+    req: async (url, request) => { calls.push({ url, request }); return { json: async () => [{ program: 'java', args: [extra], source: 'pom.xml', features: [], working_dir: '/project' }] }; },
+    openConfirm: (_title, message, callback) => { confirmation = { message, callback }; },
+    actionResult: async () => {}, refresh() {}, banner() {},
+  });
+  vm.runInContext(source.slice(source.indexOf('async function binAction('),source.indexOf('// ---------- 拉取代码')),context);
+  await context.binAction({ key: 'project' },{ bin: 'worker', args: extra },'restart');
+  assert.equal(calls.length,1);
+  assert.equal(JSON.parse(calls[0].request.body).bins[0].args,extra);
+  assert.match(confirmation.message,/pom.xml/);
+  assert.ok(confirmation.message.includes(JSON.stringify(extra)));
+  await confirmation.callback();
+  assert.equal(calls[1].url,'api/units/project/bins/worker/restart');
+  assert.equal(calls[1].request.body,'{}');
+});
+
+test('a valid new preview becomes runnable after an older submission finishes', async () => {
+  const { context, $ } = previewContext(async () => ({ json: async () => [{ program: 'java', args: [], source: 'new', features: [], working_dir: '/new' }] }));
+  vm.runInContext('runSubmitting=true',context);
+  await context.loadRunPreview(1);
+  assert.equal($('runGo').disabled,true);
+  context.finishRunSubmission();
+  assert.equal($('runGo').disabled,false);
+  vm.runInContext('runPreviewVersion=2',context);
+  context.finishRunSubmission();
+  assert.equal($('runGo').disabled,true);
 });

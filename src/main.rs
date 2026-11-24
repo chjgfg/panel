@@ -16,6 +16,7 @@ mod auto_launch;
 mod config;
 mod discover;
 mod hostinfo;
+mod java_launch;
 mod launch;
 mod lifecycle;
 mod procs;
@@ -790,6 +791,18 @@ async fn pull(
 
 #[tokio::main]
 async fn main() {
+    let mut cli = std::env::args().skip(1);
+    if cli.next().as_deref() == Some(java_launch::RUN_MODE) {
+        let result = match cli.next().ok_or_else(|| "Java 构建计划缺失".to_string())
+            .and_then(|text| serde_json::from_str(&text).map_err(|e| format!("解析 Java 构建计划失败：{e}"))) {
+            Ok(plan) => java_launch::execute(plan, cli.collect()).await,
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(code) => std::process::exit(code),
+            Err(error) => { eprintln!("{error}"); std::process::exit(1); }
+        }
+    }
     // 单独包一层：直接从 main 返回 Err 的话，输出是 Debug 格式
     // （Os { code: 2, ... } 这种），看不出到底哪个文件不见了
     if let Err(e) = start().await {

@@ -8,6 +8,7 @@ Linux systemd 项目运行面板：启动、停止、重启、日志、资源采
 - `panel-run.toml.example`：项目启动入口示例，包含 Java、Node、Python、Rust、Go 的命令模板。
 - `src/launch.rs`：项目配置解析、入口来源选择、运行时检查和 systemd-run 参数生成的实现及测试。
 - `src/auto_launch.rs`：各语言的自动入口发现及测试。
+- `src/java_launch.rs`：Maven/Gradle 入口、构建产物校验和 Java 前台运行链路。
 - `src/lifecycle.rs`：停止证明、启动确认及独立 Linux systemd 探针。
 - `tests/ui.test.cjs`：页面状态和命令预览的行为验证，执行 `node --test tests/ui.test.cjs`。
 - `tests/fixtures/ui/panel.toml`：回环地址的页面验收配置；从项目根目录指定 `PANEL_CONFIG` 后运行 panel，只检查预览，不启动样本。
@@ -25,19 +26,25 @@ Linux systemd 项目运行面板：启动、停止、重启、日志、资源采
 | --- | --- | --- |
 | Rust | `Cargo.toml`、默认 bin 路径和显式 `[[bin]]` | `cargo run [--features 必要特性] --bin 名称`；只启用所选 bin 的 `required-features`，不默认开启全部 feature |
 | Node | `package.json` 的 `scripts` | 列出 `start`、`dev`、`serve` 及 `start:*`、`dev:*`、`serve:*`；生成 `npm run 脚本 --` 或其他管理器的 `run 脚本`，不把 build/test 当作启动入口 |
-| Python | `pyproject.toml` 的 `[project.scripts]`、`[tool.poetry.scripts]` | 通过 `python -u -c` 导入 `module:callable` 并调用；支持点分隔的 callable 和 Poetry console 表格声明，保留脚本名为 `sys.argv[0]` |
+| Python | `pyproject.toml` 的 `[project.scripts]`、`[tool.poetry.scripts]`；无声明脚本时使用根目录 `main.py`、`app.py`、`__main__.py` | 声明入口通过 `python -u -c` 导入 `module:callable` 并调用；单文件通过 `python -u 文件` 启动 |
 | Java | 项目根、`target/`、`build/libs/` 的直接子文件 `*.jar` | 只有主清单段声明 `Main-Class` 才生成 `java -jar 相对项目的路径`；支持清单续行，不把库 JAR 或命名段字段当作可执行入口 |
+| Maven | `pom.xml` 实际 `build/plugins` 中的 Spring Boot 插件 | 优先 `./mvnw`，否则 `mvn`；执行 `-B -ntp -DskipTests package`，成功后直接 `java -jar` 启动唯一可执行产物 |
+| Gradle | `build.gradle` 或 `build.gradle.kts` 的 `plugins` 中实际应用的 Spring Boot/application 插件 | 优先 `./gradlew`，否则 `gradle`；Spring Boot 使用 `bootJar`，application 使用 `installDist` 后的 lib classpath 与静态 mainClass；不使用会再拆分参数的 `run --args` |
 | Go | `go.mod`、根目录及 `cmd/` 下的 Go 源码 | 根 main 包生成 `go run .`；cmd main 包生成 `go run ./cmd/相对路径`；忽略测试文件、隐藏目录、vendor、注释和字符串里的伪入口，跳过嵌套 module |
 
 Node 优先使用 `packageManager` 声明的 npm/pnpm/yarn/bun；否则依据 `package-lock.json`、`npm-shrinkwrap.json`、`pnpm-lock.yaml`、`yarn.lock`、`bun.lock`、`bun.lockb` 选择。未声明且多种管理器锁文件共存时报错；都没有时使用 npm。声明的版本用于识别管理器，不负责安装或切换版本。自定义脚本名不在上述系列内时，可用显式配置。
 
-Python 优先使用项目 `.venv` 的解释器；环境存在却缺解释器时直接报错。没有 `.venv` 时在 Linux 使用 `python3`，Windows 本地测试使用 `python`。包和依赖须已安装到所选环境，源码采用 src 布局时同样如此。脚本引用按 `module:callable` 处理；Poetry file 类型、extras、GUI 脚本和没有声明的 `main.py` 不自动猜测，可通过显式配置启动。
+Python 优先使用项目 `.venv` 的解释器；环境存在却缺解释器时直接报错。没有 `.venv` 时在 Linux 使用 `python3`，Windows 本地测试使用 `python`。包和依赖须已安装到所选环境，源码采用 src 布局时同样如此。声明的脚本入口优先于约定文件，Poetry file 类型、extras 和 GUI 脚本仍需显式配置。单文件仅列根目录上述三个约定名称，不扫描任意模块；文件必须能以前台脚本方式运行，仅导出 Flask/FastAPI app 的模块应显式配置框架命令。
 
-Java 需要先完成 Maven/Gradle 等打包；仅有 `pom.xml` 或 Gradle 构建文件时不假定项目能运行。JAR 清单损坏或无法读取时明确报错，清单读取限制为 64 KiB。Go 使用静态源码发现候选，不在发现时执行工具链；`go.mod` 检查唯一 module 声明，完整语法、构建标签、平台文件选择和依赖有效性由启动时的 Go 工具链判断。cmd 目录扫描最多 16 层，不沿其子目录的符号链接递归。
+Java 已打包的 JAR 可以直接运行；源码构建入口仅按上表识别。Maven 的 pluginManagement、注释、profile 和 packaging=pom 不算实际启动声明；Gradle 支持常规 Groovy/Kotlin plugins 声明，apply false 不算已应用，application 要求静态 mainClass。两个 Gradle 构建文件共存、配置损坏、动态/冲突 mainClass 或构建后产物不唯一时明确报错。多模块、自定义任务或其他 Maven 运行插件应显式配置。JAR 清单损坏或无法读取时明确报错，清单读取限制为 64 KiB。Go 使用静态源码发现候选，不在发现时执行工具链；`go.mod` 检查唯一 module 声明，完整语法、构建标签、平台文件选择和依赖有效性由启动时的 Go 工具链判断。cmd 目录扫描最多 16 层，不沿其子目录的符号链接递归。
+
+Java 构建及应用均在同一 transient unit 的进程组内，停止时一起结束。构建日志和应用日志均进入 journald；构建失败不运行旧产物。构建入口的预览区分别显示构建命令和应用运行时，并明确产物路径待构建成功后确定。active 表示进程正在运行，Cargo/Java 构建期间也可能 active，不表示业务已经就绪。
+
+参数处理依据：[Spring Boot RunArguments](https://github.com/spring-projects/spring-boot/blob/main/build-plugin/spring-boot-maven-plugin/src/main/java/org/springframework/boot/maven/RunArguments.java) 会把换行和制表符改为空格；[Gradle ArgumentsSplitter](https://github.com/gradle/gradle/blob/master/platforms/core-runtime/stdlib-java-extensions/src/main/java/org/gradle/util/internal/ArgumentsSplitter.java) 会解释引号并按空白拆分（2026-11-25 读取）。因此自动入口构建成功后直接以 argv 调用 Java，保持参数框原语义。
 
 自动入口名带语言前缀，如 `node-start`、`python-worker`、`go-main`、`java-app.jar`。冒号、斜杠、下划线和其他特殊字符按 UTF-8 字节转为 `_hh`，因此 `dev:api` 对应 `node-dev_3aapi`，`cmd/api` 对应 `go-cmd_2fapi`；原始脚本名及路径传给工具时保持原样。编码后超过 100 字节或与 Cargo bin 重名时报错，可用显式配置指定短名称。
 
-发现过程只读文件，不安装依赖、不构建、不启动任何候选。没有可确定的入口时不会自动执行项目命令；显式配置可以覆盖所有上述规则。
+发现过程只读文件，不安装依赖、不构建、不启动任何候选。点击 Maven/Gradle 源码入口的运行按钮后才构建，此时构建工具可按项目配置下载依赖。没有可确定的入口时不会自动执行项目命令；显式配置可以覆盖所有上述规则。
 
 ## 每个启动入口的字段
 
@@ -67,7 +74,7 @@ panel 自己启动不再要求安装 Cargo。只在启动 Rust 自动发现的�
 
 项目操作与单入口操作共用项目异步锁，同项目按顺序执行，不同项目可并行。停止命令成功后仍复查 PID 和状态；停止失败或无法确认停止时不创建新实例。仅有效的 `LoadState=not-found` 可以视为已不存在，错误文本不能充当证明。启动后只有确认 active 才返回 HTTP 204；状态查询失败或持续启动中返回 HTTP 202，页面显示黄色“状态未确认”；确定失败返回 HTTP 500。未知和过渡状态单独显示，并保留停止入口。
 
-启动弹窗会先请求只读的命令预览，显示运行时实际路径、逐参数内容、必要 feature、工作目录和配置来源；引号内是一整个参数，换行及制表符以 JSON 转义显示。预览与启动共用准备函数，不执行项目命令，也不返回环境变量值。配置或运行时检查失败时禁用运行按钮；输入变化立即禁用按钮，旧响应不能覆盖新入口或新参数。启动时仍重新检查配置，预览不是执行授权缓存。
+启动弹窗及单入口重启确认会先请求只读的命令预览，显示运行时实际路径、逐参数内容、必要 feature、工作目录和配置来源；引号内是一整个参数，换行及制表符以 JSON 转义显示。预览与启动共用准备函数，不执行项目命令，也不返回环境变量值。配置或运行时检查失败时禁用运行按钮；输入变化立即禁用按钮，旧响应不能覆盖新入口或新参数。启动时仍重新检查配置，预览不是执行授权缓存。
 
 在项目目录执行 `cargo test --locked`、`cargo check --locked` 和 `cargo build --locked`。
 
@@ -86,5 +93,7 @@ panel 自己启动不再要求安装 Cargo。只在启动 Rust 自动发现的�
 - 启停可靠性阶段：`cargo test --locked -- --include-ignored` 为 95 passed，0 failed；`cargo check --locked` 通过；`node --test tests/ui.test.cjs` 为 2 passed。覆盖停止失败阻断、停止后复查、未知状态、结果聚合、HTTP 状态以及两个真实 handler 等待同一项目锁。
 - 可靠性对照：分别移除停止阻断、将未确认返回改为成功、移除 handler 锁后，三个相关测试均失败；源码按字节恢复。Linux 实际启停尚待本轮后续验收。
 - 命令预览阶段：96 passed，0 failed（含真实 npm/Python 探针）；编译检查和构建通过；页面行为测试为 4 passed。实际浏览器检查了未知状态、运行时缺失的禁用按钮和 Python 命令预览；多行参数显示为末尾一个 JSON 参数。Windows 的 Cargo 默认路径探测未命中时明确报错；Linux 路径将在服务器验收。
+- 源码构建与单文件阶段：Windows 普通测试为 101 passed，0 failed，6 ignored；单独执行真实 Python 两项和 npm 一项均通过。页面行为测试为 7 passed，包含单入口重启预览与原请求格式。`cargo check --locked` 通过；Clippy 退出码 0，仅余 `terminal.rs:524` 的原有警告。
+- 本阶段对照：去掉 Java 程序参数追加、去掉 Gradle application 插件门槛后，对应测试失败；按字节恢复后普通测试全部通过。真实 Maven/Gradle/Go 和 systemd 探针在 Windows 不作为已验收结果，服务器结果另行记录。
 
-移除本项目的显式启动配置会恢复自动发现；配置变更不会自动停止已运行实例。回退本轮自动发现功能可恢复提交 `2e3cc0d` 后重新编译部署，该版本仍支持显式多语言配置和 Rust feature 修复。
+移除本项目的显式启动配置会恢复自动发现；配置变更不会自动停止已运行实例。回退源码构建与 Python 单文件入口可使用提交 `e82962d` 重新编译部署，该版本保留命令预览、启停可靠性、此前自动发现和 Rust feature 修复。更早的显式多语言配置版本为 `2e3cc0d`。

@@ -17,7 +17,7 @@ async fn exists(path: &Path) -> Result<bool, String> {
     }
 }
 
-async fn entries(path: &Path) -> Result<Vec<PathBuf>, String> {
+pub(crate) async fn entries(path: &Path) -> Result<Vec<PathBuf>, String> {
     if !exists(path).await? {
         return Ok(vec![]);
     }
@@ -68,14 +68,24 @@ pub async fn discover_targets(dir: &Path) -> Result<ProjectTargets, String> {
         targets.extend(node_targets(package, &locks, &node_path)?);
     }
     let python_path = dir.join("pyproject.toml");
+    let mut python_declared = false;
     if let FileSource::Present(text) = read_config(&python_path).await? {
         other = true;
         let scripts = python_scripts(&text, &python_path)?;
         if !scripts.is_empty() {
+            python_declared = true;
             let interpreter = python_interpreter(dir).await?;
             targets.extend(python_targets(scripts, &interpreter)?);
         }
     }
+    if !python_declared {
+        let scripts = python_files(dir).await?;
+        other |= !scripts.is_empty();
+        targets.extend(scripts);
+    }
+    let java_builds = crate::java_launch::discover(dir).await?;
+    other |= !java_builds.is_empty();
+    targets.extend(java_builds);
     let jars = java_targets(dir).await?;
     other |= !jars.is_empty();
     targets.extend(jars);
@@ -119,6 +129,17 @@ fn command(language: &str, name: &str, program: &str, args: Vec<String>) -> Resu
         working_dir: ".".into(),
         env: BTreeMap::new(),
     }))
+}
+
+async fn python_files(dir: &Path) -> Result<Vec<Target>, String> {
+    let mut files = vec![];
+    // 只列根目录约定入口，不把任意库模块当作可运行程序。
+    for file in ["main.py", "app.py", "__main__.py"] {
+        if let FileSource::Present(_) = read_config(&dir.join(file)).await? { files.push(file); }
+    }
+    if files.is_empty() { return Ok(vec![]); }
+    let interpreter = python_interpreter(dir).await?;
+    files.into_iter().map(|file| command("python", file, &interpreter, vec!["-u".into(), file.into()])).collect()
 }
 
 fn entry_name(language: &str, name: &str) -> Result<String, String> {
@@ -362,7 +383,7 @@ fn jar_runnable(reader: impl Read + Seek, path: &Path) -> Result<bool, String> {
         .is_some_and(|value| !value.trim().is_empty()))
 }
 
-async fn java_targets(dir: &Path) -> Result<Vec<Target>, String> {
+pub(crate) async fn java_targets(dir: &Path) -> Result<Vec<Target>, String> {
     let mut targets = vec![];
     for relative in [".", "target", "build/libs"] {
         for path in entries(&dir.join(relative)).await? {
@@ -548,6 +569,49 @@ mod tests {
 
     fn fixture() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/launch")
+    }
+
+    #[tokio::test]
+    async fn python_files_are_fallback_entries_and_keep_sources_and_literal_args() {
+        let dir = fixture().with_file_name("python-files");
+        let targets = load_targets(&dir).await.unwrap();
+        assert_eq!(targets.names(), ["python-_5f_5fmain_5f_5f.py", "python-app.py", "python-main.py"]);
+        let extra = "  literal \"quote\"\nnext\t ";
+        let mut spec = spec(targets.target("python-main.py").unwrap()).clone();
+        spec.program = std::env::current_exe().unwrap().display().to_string();
+        let simulated = ProjectTargets::Discovered(vec![Target::Command(spec)]);
+        assert_eq!(simulated.target("python-main.py").unwrap().prepare(&dir,extra,None).unwrap().args, ["-u", "main.py", extra]);
+        assert_eq!(simulated.preview(&dir,"python-main.py",extra,None).unwrap().source, "main.py");
+        assert_eq!(python_files(&fixture()).await.unwrap().len(), 0);
+        assert_eq!(load_targets(&fixture()).await.unwrap().names().iter().filter(|n| n.starts_with("python-")).count(), 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "需要 Python 运行时"]
+    async fn real_python_file_receives_literal_argument() {
+        let dir = fixture().with_file_name("python-files");
+        let targets = load_targets(&dir).await.unwrap();
+        let extra = "  --label \"two words\" 'single'\nnext\t ";
+        for name in targets.names() {
+            let command = targets.target(&name).unwrap().prepare(&dir,extra,None).unwrap();
+            let output = tokio::process::Command::new(&command.program).args(&command.args).envs(&command.env)
+                .env("PANEL_EXPECT_ARGUMENT",extra).env("PYTHONDONTWRITEBYTECODE","1").current_dir(&dir).output().await.unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            assert!(String::from_utf8_lossy(&output.stdout).contains("PYTHON_FILE_OK"));
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "需要 Go 工具链"]
+    async fn real_go_entry_receives_literal_argument() {
+        let dir = fixture().with_file_name("go-probe");
+        let targets = load_targets(&dir).await.unwrap();
+        let extra = "  --label \"two words\" 'single'\nnext\t ";
+        let command = targets.target("go-main").unwrap().prepare(&dir,extra,None).unwrap();
+        let output = tokio::process::Command::new(&command.program).args(&command.args).envs(&command.env)
+            .env("PANEL_EXPECT_ARGUMENT",extra).current_dir(&dir).output().await.unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("GO_LAUNCH_OK"));
     }
 
     fn spec(target: &Target) -> &CommandTarget {

@@ -507,6 +507,7 @@ dependencies = [
  "futures-util",
  "getrandom",
  "portable-pty",
+ "roxmltree",
  "serde",
  "serde_json",
  "tokio",
@@ -609,6 +610,12 @@ checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
 dependencies = [
  "getrandom",
 ]
+
+[[package]]
+name = "roxmltree"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 
 [[package]]
 name = "ryu"

@@ -114,6 +114,7 @@ h2 { font-size: var(--fs-md); margin: 0; }
 .run-preview dt { color: var(--muted); }
 .run-preview dd { margin: 0; overflow-wrap: anywhere; }
 .run-preview pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--fs-sm); margin-bottom: 0; }
+.confirm-msg { white-space: pre-wrap; overflow-wrap: anywhere; }
 #tick { color: var(--muted); font-size: var(--fs-sm); }
 /* 刷新中的小点：单核机器上拉一次列表要一两秒，没任何反馈看着像卡死。
    点平时也占位（透明），免得一开始刷新文字就跳一格 */

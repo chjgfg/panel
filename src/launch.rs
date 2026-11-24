@@ -37,6 +37,7 @@ fn project_dir() -> String {
 pub enum Target {
     Cargo { name: String, features: Vec<String> },
     Command(CommandTarget),
+    JavaBuild(crate::java_launch::JavaTarget),
 }
 
 impl Target {
@@ -44,6 +45,7 @@ impl Target {
         match self {
             Self::Cargo { name, .. } => name,
             Self::Command(target) => &target.name,
+            Self::JavaBuild(target) => &target.name,
         }
     }
 
@@ -57,6 +59,7 @@ impl Target {
             return Err("程序参数不能包含 NUL 字符".into());
         }
         match self {
+            Self::JavaBuild(target) => target.prepare(dir, extra_args),
             Self::Cargo { name, features } => {
                 let cargo = find_cargo(cargo).ok_or_else(|| {
                     "找不到 cargo，请在 panel.toml 的 cargo 项指定可执行文件的绝对路径".to_string()
@@ -110,15 +113,26 @@ impl ProjectTargets {
             Self::Cargo(_) => "Cargo.toml".into(),
             _ => match target {
                 Target::Cargo { .. } => "Cargo.toml".into(),
+                Target::JavaBuild(spec) => spec.source.clone(),
                 Target::Command(_) if name.starts_with("node-") => "package.json".into(),
                 Target::Command(spec) if name.starts_with("java-") => spec.args.get(1).cloned().unwrap_or_default(),
-                Target::Command(_) if name.starts_with("python-") => "pyproject.toml".into(),
+                Target::Command(spec) if name.starts_with("python-") => {
+                    if spec.args.get(1).is_some_and(|p| p.ends_with(".py")) { spec.args[1].clone() } else { "pyproject.toml".into() }
+                },
                 _ => "go.mod / Go 源码".into(),
             },
         };
         let features = match target { Target::Cargo { features, .. } => features.clone(), _ => vec![] };
-        Ok(CommandPreview { bin: name.into(), source, features, program: command.program,
-            args: command.args, working_dir: command.working_dir })
+        let (program, args, build) = if let Target::JavaBuild(_) = target {
+            let plan: crate::java_launch::RunPlan = serde_json::from_str(&command.args[1]).map_err(|e| e.to_string())?;
+            let artifact = match plan.artifact {
+                crate::java_launch::Artifact::Jar => "构建后选择唯一带 Main-Class 的 JAR，使用 java -jar 启动".into(),
+                crate::java_launch::Artifact::Distribution { main_class } => format!("构建后使用 distribution/lib/* 的 classpath 启动 {main_class}"),
+            };
+            (plan.java, command.args[2..].to_vec(), Some(BuildPreview { program: plan.builder, args: plan.build_args, artifact }))
+        } else { (command.program, command.args, None) };
+        Ok(CommandPreview { bin: name.into(), source, features, program,
+            args, working_dir: command.working_dir, build })
     }
     pub fn names(&self) -> Vec<String> {
         self.entries()
@@ -156,7 +170,11 @@ pub struct CommandPreview {
     pub program: String,
     pub args: Vec<String>,
     pub working_dir: PathBuf,
+    pub build: Option<BuildPreview>,
 }
+
+#[derive(Debug, Serialize)]
+pub struct BuildPreview { pub program: String, pub args: Vec<String>, pub artifact: String }
 
 pub(crate) enum FileSource {
     Present(String),

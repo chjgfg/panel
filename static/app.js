@@ -876,10 +876,26 @@ $('confirmOk').onclick = async () => {          // 确定：执行完毕后关�
 };
 
 /// 单个 bin 的停止/重启：先弹自定义确认，确定后才执行，只动这一个 bin 的 unit
-function binAction(u, inst, act) {
+async function binAction(u, inst, act) {
   const label = act === 'stop' ? '停止' : '重启';
   const tone = act === 'stop' ? 'danger' : 'caution';
-  openConfirm(`确认${label}`, `确认${label}该 bin 程序「${inst.bin}」吗？`, async () => {
+  let message = `确认${label}该 bin 程序「${inst.bin}」吗？`;
+  if (act === 'restart') {
+    try {
+      const commands = await (await req(`api/units/${u.key}/preview`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bins: [{ bin: inst.bin, args: inst.args || '' }] }),
+      })).json();
+      const command = commands[0];
+      message += `\n\n来源：${command.source}\n工作目录：${command.working_dir}\nfeature：${command.features.join(', ') || '无'}\n`;
+      if (command.build) message += '先构建：\n' + [command.build.program, ...command.build.args].map(arg => JSON.stringify(arg)).join('\n') + '\n' + command.build.artifact + '\n';
+      message += [command.program, ...command.args].map(arg => JSON.stringify(arg)).join('\n');
+    } catch (error) {
+      if (error.message !== '未登录') banner(`重启「${inst.bin}」检查失败: ${error.message}`);
+      return;
+    }
+  }
+  openConfirm(`确认${label}`, message, async () => {
     try {
       const response = await req(`api/units/${u.key}/bins/${encodeURIComponent(inst.bin)}/${act}`, {
         method: 'POST',
@@ -945,6 +961,12 @@ let runBin = null;   // 当前弹窗要运行的 bin
 let runPreviewVersion = 0;
 let runPreviewTimer = null;
 let runSubmitting = false;
+let runReadyVersion = -1;
+
+function finishRunSubmission() {
+  runSubmitting = false;
+  $('runGo').disabled = runReadyVersion !== runPreviewVersion;
+}
 
 function renderRunPreview(command) {
   const meta = $('runPreviewMeta');
@@ -955,12 +977,20 @@ function renderRunPreview(command) {
     dt.textContent = label; dd.textContent = value;
     meta.append(dt, dd);
   }
-  $('runPreviewStatus').textContent = '启动命令 · 引号内为一个完整参数';
-  $('runPreviewCommand').textContent = [command.program, ...command.args].map(arg => JSON.stringify(arg)).join('\n');
+  const lines = [command.program, ...command.args].map(arg => JSON.stringify(arg)).join('\n');
+  if (command.build) {
+    $('runPreviewStatus').textContent = '先构建再运行 · 产物路径在构建成功后确定';
+    $('runPreviewCommand').textContent = '构建命令\n' + [command.build.program, ...command.build.args].map(arg => JSON.stringify(arg)).join('\n')
+      + '\n\n' + command.build.artifact + '\n应用运行时和完整程序参数\n' + lines;
+  } else {
+    $('runPreviewStatus').textContent = '启动命令 · 引号内为一个完整参数';
+    $('runPreviewCommand').textContent = lines;
+  }
 }
 
 function scheduleRunPreview(delay = 180) {
   const version = ++runPreviewVersion;
+  runReadyVersion = -1;
   clearTimeout(runPreviewTimer);
   $('runGo').disabled = true;
   $('runPreviewStatus').textContent = '正在检查启动命令…';
@@ -981,6 +1011,7 @@ async function loadRunPreview(version) {
     // 旧入口或旧参数的响应不能覆盖新输入，也不能重新启用运行按钮。
     if (version !== runPreviewVersion || key !== runKey || bin !== runBin || args !== $('runArgs').value) return;
     renderRunPreview(commands[0]);
+    runReadyVersion = version;
     $('runErr').textContent = '';
     $('runGo').disabled = runSubmitting;
   } catch (error) {
@@ -1038,8 +1069,7 @@ $('runGo').onclick = async () => {
   } catch (e) {
     if (version === runPreviewVersion && e.message !== '未登录') $('runErr').textContent = e.message;
   } finally {
-    runSubmitting = false;
-    if (version === runPreviewVersion) go.disabled = false;
+    finishRunSubmission();
     refresh();
   }
 };

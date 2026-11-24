@@ -117,10 +117,9 @@ pub struct LaunchResult {
 pub async fn launch(services: &impl Services, unit: &str, command: &PreparedCommand) -> LaunchResult {
     let outcome = stop(services, unit).await;
     if outcome != Outcome::Complete { return LaunchResult { created: false, outcome }; }
-    if let Err(error) = services.invoke("systemctl", &["reset-failed", "--", unit]).await {
-        if !services.show(unit).await.is_ok_and(|raw| raw.load == "not-found") {
+    if let Err(error) = services.invoke("systemctl", &["reset-failed", "--", unit]).await
+        && !services.show(unit).await.is_ok_and(|raw| raw.load == "not-found") {
             return LaunchResult { created: false, outcome: Outcome::Failed(format!("重置 {unit} 失败：{error}")) };
-        }
     }
     let argv = systemd_run_argv(unit, command);
     let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
@@ -244,6 +243,61 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
+    #[ignore = "需要 Linux systemd、五种运行时以及 PANEL_TEST_PANEL_BIN"]
+    async fn real_systemd_language_targets_keep_literal_arguments() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let extra = "  --label \"two words\" 'single'\nnext\t $literal ";
+        for (index, (project, target, marker)) in [
+            ("node-service", "node-start", "NODE_SERVICE_OK"),
+            ("python-files", "python-main.py", "PYTHON_FILE_OK"),
+            ("go-probe", "go-main", "GO_LAUNCH_OK"),
+            ("java-maven", "java-maven", "JAVA_LAUNCH_OK"),
+            ("java-gradle", "java-gradle", "JAVA_LAUNCH_OK"),
+            ("cargo-feature-probe", "rust-probe", "RUST_LAUNCH_OK"),
+            ("cargo-feature-probe", "single", "RUST_LAUNCH_OK"),
+            ("cargo-feature-probe", "multiple", "RUST_LAUNCH_OK"),
+        ].into_iter().enumerate() {
+            let dir = root.join("tests/fixtures").join(project);
+            let targets = crate::launch::load_targets(&dir).await.unwrap();
+            let selected = targets.target(target).unwrap();
+            let mut command = selected.prepare(&dir,extra,None).unwrap();
+            if matches!(selected, crate::launch::Target::JavaBuild(_)) {
+                command.program = std::env::var("PANEL_TEST_PANEL_BIN").unwrap();
+            }
+            command.env.insert("PANEL_EXPECT_ARGUMENT".into(), extra.into());
+            command.env.insert("PANEL_PROBE_SLEEP".into(), "1".into());
+            command.env.insert("PYTHONDONTWRITEBYTECODE".into(), "1".into());
+            let unit = format!("panel-validation-{}-{stamp}-{index}.service",std::process::id());
+            struct Cleanup(String);
+            impl Drop for Cleanup {
+                fn drop(&mut self) {
+                    let _ = std::process::Command::new("systemctl").args(["stop", "--", &self.0]).status();
+                    let _ = std::process::Command::new("systemctl").args(["reset-failed", "--", &self.0]).status();
+                }
+            }
+            let _cleanup = Cleanup(unit.clone());
+            let result = launch(&SystemServices,&unit,&command).await;
+            assert!(result.created && result.outcome == Outcome::Complete, "{target}: {:?}",result.outcome);
+            let mut ready = false;
+            for _ in 0..120 {
+                if SystemServices.journal(&unit).await.contains(marker) { ready = true; break; }
+                if let Ok(raw) = show_checked(&unit).await {
+                    assert_eq!(raw.active,"active","{target}: {}",SystemServices.journal(&unit).await);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            assert!(ready,"{target}: {}",SystemServices.journal(&unit).await);
+            let raw = show_checked(&unit).await.unwrap();
+            assert!(std::fs::read_to_string(format!("/proc/{}/cgroup",raw.pid)).unwrap().contains(&unit));
+            assert_eq!(stop(&SystemServices,&unit).await,Outcome::Complete);
+            assert!(!std::path::Path::new(&format!("/proc/{}",raw.pid)).exists());
+            println!("Linux 实跑通过：{project}/{target}；完整参数、日志、cgroup、停止；{unit}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
     #[ignore = "需要 Linux systemd 与创建 transient unit 的权限"]
     async fn real_systemd_creates_tracks_logs_and_stops_only_probe_unit() {
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
@@ -257,7 +311,7 @@ mod tests {
         }
         let _cleanup = Cleanup(unit.clone());
         let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let command = PreparedCommand {
+        let mut command = PreparedCommand {
             program: std::env::current_exe().unwrap().display().to_string(),
             args: vec!["--exact".into(), "lifecycle::tests::service_probe".into(), "--nocapture".into(), "--test-threads=1".into()],
             working_dir: dir.clone(),
@@ -277,8 +331,24 @@ mod tests {
             SystemServices.pause().await;
         }
         assert!(ready, "探针未完成环境与参数检查");
+        command.env.insert("PANEL_SYSTEMD_SECOND".into(), "1".into());
+        let restarted = launch(&SystemServices, &unit, &command).await;
+        assert!(restarted.created && restarted.outcome == Outcome::Complete);
+        let next = show_checked(&unit).await.unwrap();
+        assert_ne!(next.pid, state.pid);
+        assert!(!std::path::Path::new(&format!("/proc/{}", state.pid)).exists());
+        let mut second_ready = false;
+        for _ in 0..30 {
+            if SystemServices.journal(&unit).await.contains("PANEL_SYSTEMD_SECOND_READY") { second_ready = true; break; }
+            SystemServices.pause().await;
+        }
+        assert!(second_ready, "重启后的探针未完成检查");
         assert_eq!(stop(&SystemServices, &unit).await, Outcome::Complete);
-        println!("已验证 transient unit、cgroup、日志、参数、环境、目录和停止：{unit}");
+        command.program = "/panel-validation-executable-does-not-exist".into();
+        let failed = launch(&SystemServices, &unit, &command).await;
+        assert!(matches!(failed.outcome, Outcome::Failed(_)), "{:?}", failed.outcome);
+        assert!(matches!(launch(&SystemServices,"panel-validation/invalid.service",&command).await.outcome, Outcome::Unconfirmed(_)));
+        println!("已验证 transient unit、cgroup、日志、参数、环境、目录、停止、重启、错误与未知状态：{unit}");
     }
 
     #[test]
@@ -289,6 +359,7 @@ mod tests {
         assert_eq!(std::env::current_dir().unwrap(), std::path::PathBuf::from(std::env::var("PANEL_SYSTEMD_CWD").unwrap()));
         assert!(std::fs::read_to_string("/proc/self/cgroup").unwrap().contains(&unit));
         println!("PANEL_SYSTEMD_READY");
+        if std::env::var("PANEL_SYSTEMD_SECOND").as_deref() == Ok("1") { println!("PANEL_SYSTEMD_SECOND_READY"); }
         std::thread::sleep(std::time::Duration::from_secs(30));
     }
 }
