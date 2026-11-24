@@ -7,6 +7,7 @@ Linux systemd 项目运行面板：启动、停止、重启、日志、资源采
 - `panel.toml.example`：面板监听地址、登录密码、项目扫描目录等全局配置。
 - `panel-run.toml.example`：项目启动入口示例，包含 Java、Node、Python、Rust、Go 的命令模板。
 - `src/launch.rs`：项目配置解析、入口来源选择、运行时检查和 systemd-run 参数生成的实现及测试。
+- `src/runtime_env.rs`：各语言共用的 HOME 补全、账户主目录读取和错误检查。
 - `src/auto_launch.rs`：各语言的自动入口发现及测试。
 - `src/java_launch.rs`：Maven/Gradle 入口、构建产物校验和 Java 前台运行链路。
 - `src/lifecycle.rs`：停止证明、启动确认及独立 Linux systemd 探针。
@@ -66,6 +67,8 @@ panel 到运行工具的参数始终以 argv 传递，不经过 shell。Node 包
 
 工作目录在启动前检查。相对 `program` 路径从该工作目录解析；裸程序名从入口的 `env.PATH` 查找，未指定时使用面板进程的 PATH。未显式设置 PATH 时，会把解析出的程序所在目录补到启动 PATH 前面，便于程序寻找同目录工具。Node 版本管理器、自定义 JDK 和虚拟环境建议填写实际程序路径，或明确配置 PATH。Java 的 JVM 选项可通过 `JAVA_TOOL_OPTIONS` 传递；Python 可使用 `-u` 或 `PYTHONUNBUFFERED` 及时输出日志。
 
+systemd 不会自动继承 panel 的用户环境。所有入口在启动准备时补齐 HOME：显式 `env.HOME` 优先，其次使用 panel 的 HOME；Linux 两者都缺失时从当前有效用户的账户信息读取主目录，Windows 本地验证使用 USERPROFILE。HOME 必须是存在的绝对目录，空值、非法路径或账户读取失败会明确报错，不静默启动。显式 HOME 保持原值；仅补必要的 HOME 和 PATH，不自动复制 panel 的其他环境变量。
+
 panel 自己启动不再要求安装 Cargo。只在启动 Rust 自动发现的入口时检查 Cargo，其余入口检查各自的可执行程序。构建和依赖安装由项目自行完成；需要复合流程时，可以把真实的前台脚本作为入口，并明确配置解释器及脚本参数。
 
 整批入口在停止旧实例前检查配置、入口名称、工作目录和可执行程序。检查失败保留旧实例。配置损坏、删除或入口移除时，仍根据上次启动记录查询旧 unit；已加载或状态未知的旧实例会保留在列表中，可停止和查看日志，启动/重启按钮禁用。历史入口只有确认 unit 不存在后才隐藏，也不会自动重新启动；查询失败不能用空表证明它已消失。未曾由面板记录的实例不能凭损坏配置推断。面板外进程的现有识别仍限于 Rust 的 target 目录，多语言解释器进程不会被猜测归属。
@@ -96,11 +99,14 @@ panel 自己启动不再要求安装 Cargo。只在启动 Rust 自动发现的�
 - 源码构建与单文件阶段：Windows 普通测试为 101 passed，0 failed，6 ignored；单独执行真实 Python 两项和 npm 一项均通过。页面行为测试为 7 passed，包含单入口重启预览与原请求格式。`cargo check --locked` 通过；Clippy 退出码 0，仅余 `terminal.rs:524` 的原有警告。
 - 本阶段对照：去掉 Java 程序参数追加、去掉 Gradle application 插件门槛后，对应测试失败；按字节恢复后普通测试全部通过。真实 Maven/Gradle/Go 和 systemd 探针在 Windows 不作为已验收结果，服务器结果另行记录。
 - 状态显示修订：此前用空表隐藏历史入口的判据混淆了“读取失败”和“确认不存在”。改为保留未知状态，仅有效 not-found 才隐藏；Windows 101 项普通测试和编译检查通过。
+- 用户环境修复：Windows `cargo test --locked` 为 104 passed、0 failed、6 ignored；`cargo check --locked` 通过。清空真实子进程的继承环境后，参数、工作目录和 HOME 仍通过；移除生产 HOME 补全的对照测试失败，按字节恢复后全量通过。Clippy 退出码 0，仅保留 `terminal.rs:524` 的原有警告。
 
 服务器验收过程（独立 checkout 与 `panel-validation-*` unit，线上程序未替换）：
 
 - `84827ec` 在 systemd 259 的真实探针通过：unit 创建、参数/环境/工作目录、cgroup、日志、停止、重启、启动错误及未知状态；编译检查通过。
 - `84827ec` 在 systemd 255 首轮全量结果为 107 passed、2 failed：失败均因服务器缺 npm，分别影响真实 npm 和各语言 systemd 探针。真实 Python、Go、Gradle installDist 与 Maven Spring Boot repackage 已通过，Java 应用实际收到完整的空格、单双引号、换行及制表符参数。
-- 缺少 npm 的环境已补充独立 Node LTS 工具目录；后续全量重跑结果以本账本的新记录为准，不把首轮失败当作成功。
+- 缺少 npm 的环境已补充独立 Node/npm 工具目录；后续全量重跑结果以本账本的新记录为准，不把首轮失败当作成功。
+- `9ef97bd` 在 systemd 255 重跑为 108 passed、1 failed：真实 npm 已通过，语言 systemd 循环在 Go 因没有 HOME、无法定位构建缓存而失败。此前 Java 子进程成功不能证明 Java systemd 已通过；该轮尚未执行到 Java 与 Rust 的 systemd 验收。此问题在公共启动环境中修复，不以给测试单独设置 GOCACHE 绕过。
+- `9ef97bd` 在 systemd 259 编译检查和通用真实 systemd 探针通过；普通测试为 101 passed、0 failed、8 ignored，该机未安装其余语言工具，不作为五语言实跑证明。
 
 移除本项目的显式启动配置会恢复自动发现；配置变更不会自动停止已运行实例。回退源码构建与 Python 单文件入口可使用提交 `e82962d` 重新编译部署，该版本保留命令预览、启停可靠性、此前自动发现和 Rust feature 修复。更早的显式多语言配置版本为 `2e3cc0d`。

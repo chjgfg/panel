@@ -27,6 +27,10 @@ portable-pty = "0.9"
 # 拆分 WebSocket 的 Sink/Stream，收发两头并发（axum 已传递依赖它）
 futures-util = "0.3"
 
+[target.'cfg(unix)'.dependencies]
+# 从当前有效用户的账户信息读取主目录，兼容没有 HOME 的 systemd 服务。
+libc = "0.2"
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 

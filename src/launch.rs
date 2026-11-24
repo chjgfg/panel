@@ -58,7 +58,7 @@ impl Target {
         if extra_args.contains('\0') {
             return Err("程序参数不能包含 NUL 字符".into());
         }
-        match self {
+        let mut command = match self {
             Self::JavaBuild(target) => target.prepare(dir, extra_args),
             Self::Cargo { name, features } => {
                 let cargo = find_cargo(cargo).ok_or_else(|| {
@@ -91,7 +91,10 @@ impl Target {
                     env,
                 })
             }
-        }
+        }?;
+        // systemd 不继承面板的用户环境，各语言工具链都需要有效的主目录。
+        crate::runtime_env::ensure_home(&mut command.env)?;
+        Ok(command)
     }
 }
 
@@ -667,15 +670,17 @@ mod tests {
                 "value with spaces \"quotes\" $literal".into(),
             ),
         ]);
-        let command = Target::Command(spec)
+        let mut command = Target::Command(spec)
             .prepare(root(), "--test-threads=1", None)
             .unwrap();
+        command.env.insert("PANEL_EXPECTED_HOME".into(), command.env["HOME"].clone());
         let argv = systemd_run_argv("panel-example-probe.service", &command);
         assert!(argv.contains(
             &"--setenv=PANEL_LITERAL_ENV=value with spaces \"quotes\" $literal".to_string()
         ));
         let output = std::process::Command::new(&command.program)
             .args(&command.args)
+            .env_clear()
             .envs(&command.env)
             .current_dir(&command.working_dir)
             .output()
@@ -705,5 +710,6 @@ mod tests {
             "value with spaces \"quotes\" $literal"
         );
         assert_eq!(std::env::args().next_back().unwrap(), "--test-threads=1");
+        assert_eq!(std::env::var("HOME").unwrap(), std::env::var("PANEL_EXPECTED_HOME").unwrap());
     }
 }

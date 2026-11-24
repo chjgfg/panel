@@ -20,6 +20,7 @@ mod java_launch;
 mod launch;
 mod lifecycle;
 mod procs;
+mod runtime_env;
 mod srctree;
 mod state;
 mod systemd;

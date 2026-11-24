@@ -506,6 +506,7 @@ dependencies = [
  "axum",
  "futures-util",
  "getrandom",
+ "libc",
  "portable-pty",
  "roxmltree",
  "serde",
