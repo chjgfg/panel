@@ -41,8 +41,6 @@ pub fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 pub struct App {
     pub cfg: Config,
-    /// cargo 的绝对路径，启动时定好
-    pub cargo: String,
     /// 网页控制台用的 SSH 私钥落盘路径（跟配置文件同目录的 panel_ssh_key）。
     /// 存服务器上而不是浏览器里，换个浏览器也不用重配。文件权限 0600。
     pub ssh_key_path: PathBuf,
@@ -94,13 +92,11 @@ struct SavedEntry {
 impl App {
     pub fn new(
         cfg: Config,
-        cargo: String,
         ssh_key_path: PathBuf,
         state_path: PathBuf,
     ) -> Arc<App> {
         let app = Arc::new(App {
             cfg,
-            cargo,
             ssh_key_path,
             state_path,
             sessions: Mutex::new(HashMap::new()),
@@ -275,7 +271,6 @@ mod tests {
                 cargo: None,
                 prefix: String::new(),
             },
-            cargo: "/usr/bin/cargo".into(),
             ssh_key_path: tmp("appkey"),   // 别叫 "key"：跟 terminal.rs 的临时文件测试撞名
             state_path,
             sessions: Mutex::new(HashMap::new()),
@@ -333,7 +328,7 @@ mod tests {
 
     #[test]
     fn term_slots_capped_and_released() {
-        let app = test_app(tmp("state"));
+        let app = test_app(tmp("term-slots-state"));
         for _ in 0..MAX_TERMS {
             assert!(app.take_term(), "没满之前都要给额度");
         }

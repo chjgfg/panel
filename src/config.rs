@@ -19,7 +19,8 @@ pub struct Config {
     ///   "/srv/x/old"   带 / 就按完整路径匹配，只排掉这一个
     #[serde(default)]
     pub exclude: Vec<String>,
-    /// cargo 的绝对路径。留空自动探测——systemd 起进程时 PATH 里
+    /// cargo 的绝对路径，只在启动 Rust 自动发现的入口时检查。
+    /// 留空自动探测——systemd 起进程时 PATH 里
     /// 通常没有 ~/.cargo/bin，所以不能直接写 "cargo"
     #[serde(default)]
     pub cargo: Option<String>,

@@ -1,0 +1,43 @@
+# 项目级启动配置。仅保留本项目需要的入口，修改示例值后保存为项目根目录的 panel-run.toml。
+# 该文件存在时，入口列表完全按这里配置；删除该文件才恢复 Cargo 自动发现。
+# 所有入口直接启动可执行程序，不经过 shell；程序必须在前台运行。
+# program 可以是绝对路径、相对于 working_dir 的路径，或可从 PATH 找到的程序名。
+# args 数组中每个元素是一个参数。面板参数框另行整串追加为一个参数。
+# working_dir 默认是项目根目录，可填相对项目根目录的目录或绝对目录。
+
+[[targets]]
+name = "java-api"
+program = "java"
+args = ["-jar", "YOUR_APP.jar"]
+working_dir = "."
+[targets.env]
+JAVA_TOOL_OPTIONS = "-Xms128m -Xmx512m"
+
+[[targets]]
+name = "node-api"
+program = "npm"
+# 由项目自己的 package.json 定义 start，最后的 -- 由 npm 将追加参数交给脚本。
+args = ["run", "start", "--"]
+[targets.env]
+NODE_ENV = "production"
+
+[[targets]]
+name = "python-worker"
+# 使用虚拟环境时，替换为该环境解释器的绝对路径或相对工作目录的路径。
+program = "python3"
+args = ["-u", "-m", "YOUR_MODULE"]
+[targets.env]
+PYTHONUNBUFFERED = "1"
+
+[[targets]]
+name = "rust-worker"
+# 显式命令的全部 Cargo 参数由本配置负责；有 feature 门槛时在 args 中加 --features。
+# 不需要定制时，Rust 项目直接不放 panel-run.toml，沿用 bin 和 required-features 自动发现。
+program = "cargo"
+args = ["run", "--bin", "YOUR_BIN", "--"]
+
+[[targets]]
+name = "go-api"
+# 先编译项目，再把这里换成真实的可执行程序；./ 表示从工作目录查找。
+program = "./YOUR_GO_BINARY"
+args = []

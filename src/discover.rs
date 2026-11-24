@@ -1,4 +1,5 @@
 // 项目发现：扫目录、黑名单/通配排除、名字校验、项目 bin 探测。
+use std::collections::HashMap;
 use std::format;
 use std::path::PathBuf;
 
@@ -128,25 +129,29 @@ impl CargoToml {
     }
 }
 
-/// 启动前重新读配置，读取或解析失败必须报错，不能当成没有 feature 门槛。
-pub async fn required_features(dir: &std::path::Path, bin: &str) -> Result<Vec<String>, String> {
-    Ok(read_manifest(dir).await?.required_features(bin))
+/// 一次读配置，返回每个 Cargo bin 及其必要 feature；失败不能退成无门槛。
+pub async fn cargo_targets(dir: &std::path::Path) -> Result<Vec<(String, Vec<String>)>, String> {
+    let manifest = read_manifest(dir).await?;
+    let features: HashMap<String, Vec<String>> = manifest
+        .bin
+        .iter()
+        .map(|target| (target.name.clone(), manifest.required_features(&target.name)))
+        .collect();
+    Ok(bins_with_manifest(dir, Some(manifest))
+        .await
+        .into_iter()
+        .map(|name| {
+            let required = features.get(&name).cloned().unwrap_or_default();
+            (name, required)
+        })
+        .collect())
 }
 
-/// 启动入口用严格检查，配置坏了要在停止旧进程之前返回具体错误。
-pub async fn bins_for_run(dir: &std::path::Path) -> Result<Vec<String>, String> {
-    Ok(bins_with_manifest(dir, Some(read_manifest(dir).await?)).await)
-}
-
-/// 列出项目里所有能 `cargo run --bin X` 的 X：
+/// 列出 Cargo 项目里的 bin：
 ///   src/main.rs        -> Cargo.toml 里的包名（cargo 就是这么命名默认 bin 的）
 ///   src/bin/foo.rs     -> foo
 ///   src/bin/foo/main.rs -> foo
 ///   [[bin]] name       -> 显式声明的名字，支持自定义源码路径
-pub async fn bins(dir: &std::path::Path) -> Vec<String> {
-    bins_with_manifest(dir, read_manifest(dir).await.ok()).await
-}
-
 async fn bins_with_manifest(dir: &std::path::Path, manifest: Option<CargoToml>) -> Vec<String> {
     let mut v = Vec::new();
 
@@ -268,10 +273,9 @@ mod tests {
     async fn unreadable_manifest_fails_start_checks() {
         // 用已有文件充当目录，保证读取失败，同时无需创建临时产物。
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
-        let error = required_features(&dir, "worker").await.unwrap_err();
+        let error = cargo_targets(&dir).await.unwrap_err();
         assert!(error.contains("读取"), "{error}");
         assert!(error.contains("Cargo.toml"), "{error}");
-        assert!(bins_for_run(&dir).await.is_err());
     }
 
     #[tokio::test]

@@ -27,7 +27,8 @@ dirs = ["/opt/apps"]
 exclude = []
 
 # cargo 的绝对路径。留空会自动探测（$HOME/.cargo/bin、/root/.cargo/bin、
-# /usr/local/bin、/usr/bin）。探测不到时启动会直接报错，那就在这里写死。
+# /usr/local/bin、/usr/bin）。只在启动 Rust 自动发现的入口时检查，其他项目不需要 Cargo。
+# 探测不到时该入口报错，那就在这里写死。
 # 查路径：which cargo
 #cargo = "/root/.cargo/bin/cargo"
 

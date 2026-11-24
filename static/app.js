@@ -665,11 +665,11 @@ function syncView(v, u) {
     v.sub.textContent = u.unit + '（你自己的 service）';
   } else if ((u.running_bins || []).length || u.pid) {
     const parts = [];
-    if (u.running_bins && u.running_bins.length) parts.push(`运行 ${u.running_bins.length} 个 bin`);
+    if (u.running_bins && u.running_bins.length) parts.push(`运行 ${u.running_bins.length} 个入口`);
     if (u.pid) parts.push('pid ' + u.pid);
     v.sub.textContent = parts.join(' · ');
   } else {
-    v.sub.textContent = `${(u.bins || []).length} 个可运行程序`;
+    v.sub.textContent = `${(u.bins || []).length} 个启动入口`;
   }
   // 失败时把 systemd 给的原因（Result + 退出码）直接缀在后面：以前只有一个
   // 「失败」，为什么挂的必须点进日志翻到底才知道
@@ -716,7 +716,7 @@ function buildPanel(v) {
   const tbl = document.createElement('table');
   const thead = document.createElement('thead');
   const htr = document.createElement('tr');
-  for (const t of ['bin', '状态', '运行时长', 'CPU', '内存', '操作']) {
+  for (const t of ['启动入口', '状态', '运行时长', 'CPU', '内存', '操作']) {
     const th = document.createElement('th');
     th.textContent = t;
     htr.appendChild(th);
@@ -727,7 +727,7 @@ function buildPanel(v) {
   v.binEmpty = document.createElement('tr');
   const td = document.createElement('td');
   td.colSpan = 6;
-  td.textContent = '这个项目没有可运行的 bin';
+  td.textContent = '这个项目没有配置启动入口';
   v.binEmpty.appendChild(td);
   v.binBody.appendChild(v.binEmpty);
   tbl.appendChild(v.binBody);
@@ -784,6 +784,7 @@ function syncBinRows(v, u) {
     // 记的，「这个 bin 当初是带什么跑起来的」以前只能去猜
     const args = (inst.args || '').replace(/\s+/g, ' ').trim();
     const bits = [];
+    if (inst.runnable === false) bits.push('启动配置不可用，可停止或查看日志');
     if (inst.running) { if (inst.pid) bits.push(`pid ${inst.pid}`); }
     else if (inst.fail) bits.push(inst.fail);
     if (args) bits.push('参数 ' + (args.length > 40 ? args.slice(0, 40) + '…' : args));
@@ -802,9 +803,9 @@ function syncBinRows(v, u) {
     r.cpuSvg = metric(r.cpu, r.cpuText, r.cpuSvg, ih && ih.cpu, 'cpu',
       inst.cpu == null ? '—' : inst.cpu.toFixed(1) + '%');
     r.memSvg = metric(r.mem, r.memText, r.memSvg, ih && ih.mem, 'mem', fmtMemMB(inst.memory));
-    r.btn.start.disabled = inst.running;
+    r.btn.start.disabled = inst.running || inst.runnable === false;
     r.btn.stop.disabled = !inst.running;
-    r.btn.restart.disabled = !inst.running;
+    r.btn.restart.disabled = !inst.running || inst.runnable === false;
     const at = v.binBody.children[i];
     if (at !== r.tr) v.binBody.insertBefore(r.tr, at || null);
     i++;

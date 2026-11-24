@@ -15,6 +15,7 @@ mod auth;
 mod config;
 mod discover;
 mod hostinfo;
+mod launch;
 mod procs;
 mod srctree;
 mod state;
@@ -37,12 +38,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::cookie_token;
 use crate::config::{BoxErr, Config, config_path};
-use crate::discover::{bins, bins_for_run, discover, find_cargo, ok_name, required_features};
+use crate::discover::{discover, ok_name};
+use crate::launch::{PreparedCommand, ProjectTargets, load_targets, systemd_run_argv};
 use crate::procs::{find_outside, proc_exes, stop_pids};
 use crate::state::{lock, App};
 use crate::srctree::{Node, file_path_ok, read_file, search_dir, walk_tree};
 use crate::systemd::{
-    Picked, boot_secs, fail_reason, pick_project, pick_project_checked, project_units, run,
+    Picked, boot_secs, fail_reason, pick_launch_project, pick_project_checked, project_units, run,
     show_many, unit_of,
 };
 
@@ -91,7 +93,7 @@ struct Status {
     memory: Option<u64>,
     cpu: Option<f64>,
     uptime: Option<f64>,
-    /// 这个项目里所有能 cargo run --bin 的名字
+    /// 可运行入口名称；沿用 bins 字段以兼容前端和保存的启动参数。
     bins: Vec<String>,
     /// 每个可运行 bin 一条实例明细（名称/状态/pid/资源），前端展开项目行时逐行显示
     instances: Vec<BinInst>,
@@ -119,6 +121,8 @@ struct Status {
 #[derive(Serialize)]
 struct BinInst {
     bin: String,
+    /// 配置损坏或入口已删除时只允许停止和查看日志，不能启动旧配置。
+    runnable: bool,
     /// active / failed / inactive（该 bin 没跑）
     active: String,
     running: bool,
@@ -210,17 +214,48 @@ async fn host(State(app): State<Arc<App>>) -> Json<hostinfo::Host> {
     Json(hostinfo::host_stats(&app).await)
 }
 
+fn listed_names(app: &App, project: &str, targets: &Result<ProjectTargets, String>) -> Vec<String> {
+    let last = lock(&app.last);
+    retained_names(targets, last.get(project).map(Vec::as_slice).unwrap_or_default())
+}
+
+fn retained_names(targets: &Result<ProjectTargets, String>, remembered: &[(String, String)]) -> Vec<String> {
+    let mut names = targets.as_ref().map(ProjectTargets::names).unwrap_or_default();
+    // 配置损坏、删除或入口移除时仍保留已知 unit，避免正在运行的实例失去管理入口。
+    for (name, _) in remembered {
+        if !names.contains(name) {
+            names.push(name.clone());
+        }
+    }
+    names
+}
+
+fn runnable(targets: &Result<ProjectTargets, String>, name: &str) -> bool {
+    targets.as_ref().is_ok_and(|targets| targets.target(name).is_ok())
+}
+
+fn visible_names(names: &[String], targets: &Result<ProjectTargets, String>, project: &str,
+    shown: &HashMap<String, crate::systemd::Raw>) -> Vec<String>
+{
+    names.iter().filter(|name| runnable(targets, name)
+        || shown.get(&unit_of(project, name)).is_some_and(|raw| raw.load == "loaded"))
+        .cloned().collect()
+}
+
 async fn units(State(app): State<Arc<App>>) -> Json<Vec<Status>> {
     let boot = boot_secs().await;
     let found = discover(&app.cfg.dirs, &app.cfg.exclude).await;
 
     // 先扫一遍每个项目的可选 bin（拼候选 unit 和 running_bins 都要用它）
     let mut found_bins: Vec<(String, Vec<String>)> = Vec::with_capacity(found.len());
+    let mut found_targets = HashMap::new();
     let mut cands: Vec<String> = Vec::new();
     for (n, dir) in &found {
-        let b = bins(dir).await;
+        let targets = load_targets(dir).await;
+        let b = listed_names(&app, n, &targets);
         cands.extend(project_units(n, &b));
         found_bins.push((n.clone(), b));
+        found_targets.insert(n.clone(), targets);
     }
     // 所有项目的全部候选 unit 一次问完 —— 原来是每个项目 fork 两次 systemctl
     let shown = show_many(&cands).await;
@@ -232,7 +267,9 @@ async fn units(State(app): State<Arc<App>>) -> Json<Vec<Status>> {
                 .find(|(bn, _)| bn == n)
                 .map(|(_, b)| b.clone())
                 .unwrap_or_default();
-            pick_project(&shown, n, &b)
+            let configured = found_targets.get(n).and_then(|targets| targets.as_ref().ok())
+                .is_some_and(ProjectTargets::is_configured);
+            pick_launch_project(&shown, n, &b, configured)
         })
         .collect();
 
@@ -261,7 +298,7 @@ async fn units(State(app): State<Arc<App>>) -> Json<Vec<Status>> {
         let bins = found_bins
             .iter()
             .find(|(bn, _)| bn == &name)
-            .map(|(_, b)| b.clone())
+            .map(|(_, b)| visible_names(b, &found_targets[&name], &name, &shown))
             .unwrap_or_default();
         // 每个 bin 一条实例：对着该 bin 的 unit 报状态和资源
         let instances: Vec<BinInst> = bins
@@ -283,6 +320,7 @@ async fn units(State(app): State<Arc<App>>) -> Json<Vec<Status>> {
                     .map(|(_, a)| a.clone());
                 BinInst {
                     bin: b.clone(),
+                    runnable: runnable(&found_targets[&name], b),
                     active: active.to_string(),
                     running,
                     pid: raw.map(|r| r.pid).unwrap_or(0),
@@ -317,7 +355,13 @@ async fn units(State(app): State<Arc<App>>) -> Json<Vec<Status>> {
         };
 
         // 下面 Status 的字面量会把 p.raw 的几个字段搬走（move），失败原因必须先取好
-        let fail = fail_reason(&p.raw);
+        let mut fail = fail_reason(&p.raw);
+        if let Some(Err(error)) = found_targets.get(&name) {
+            fail = Some(match fail {
+                Some(reason) => format!("{error}；{reason}"),
+                None => error.clone(),
+            });
+        }
         v.push(Status {
             key: name.clone(),
             bins,
@@ -375,44 +419,6 @@ struct BinArg {
     args: String,
 }
 
-/// 拼 systemd-run 的参数。抽成纯函数是为了能单测——真正跑起来只有 Linux 上能验。
-fn systemd_run_argv(
-    cargo: &str,
-    unit: &str,
-    dir: &str,
-    bin: &str,
-    features: &[String],
-    args: &str,
-) -> Vec<String> {
-    let cargo_dir = std::path::Path::new(cargo)
-        .parent()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
-    let mut v = vec![
-        format!("--unit={unit}"),
-        format!("--working-directory={dir}"),
-        // systemd 起的进程 PATH 很干净，cargo 自己还要找 rustc，得把它的目录带上
-        format!("--setenv=PATH={cargo_dir}:/usr/local/bin:/usr/bin:/bin"),
-        cargo.to_string(),
-        "run".into(),
-    ];
-    // 只启用所选 bin 声明的必要 feature，Cargo 参数必须放在程序参数的 -- 前。
-    if !features.is_empty() {
-        v.push("--features".into());
-        v.push(features.join(","));
-    }
-    v.push("--bin".into());
-    v.push(bin.into());
-    // -- 之后的都是你程序自己的参数。不过 shell，所以引号空格都不用转义。
-    // 需求：参数「原样透传」，不对空格做分割解析 —— 用户在这一行输入框里敲什么，
-    // 就整串作为一个启动参数传给这个 bin。纯空白/空输入不加 `--`。
-    if !args.trim().is_empty() {
-        v.push("--".into());
-        v.push(args.to_string());
-    }
-    v
-}
-
 /// 失败时把 journal 尾巴捞出来当错误信息（cargo 的编译错误就在里面）
 async fn journal_tail(unit: &str) -> String {
     let n = "12";
@@ -455,26 +461,15 @@ async fn settle(unit: &str) -> (bool, String) {
 async fn spawn(
     app: &App,
     project: &str,
-    dir: &std::path::Path,
     bin: &str,
     args: &str,
+    command: &PreparedCommand,
 ) -> (bool, String) {
-    let features = match required_features(dir, bin).await {
-        Ok(features) => features,
-        Err(e) => return (false, e),
-    };
     let unit = unit_of(project, bin);
     // 上一次跑完/跑挂的同名 unit 还挂在那儿的话，systemd-run 会拒绝创建
     let _ = run("systemctl", &["reset-failed", "--", unit.as_str()]).await;
 
-    let argv = systemd_run_argv(
-        &app.cargo,
-        &unit,
-        &dir.display().to_string(),
-        bin,
-        &features,
-        args,
-    );
+    let argv = systemd_run_argv(&unit, command);
     let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
 
     match run("systemd-run", &refs).await {
@@ -513,16 +508,15 @@ async fn action(
         return (StatusCode::NOT_FOUND, "未知项目").into_response();
     };
     let req = body.map(|Json(b)| b).unwrap_or_default();
-    let mut this_bins = bins(&dir).await;
-    // 聚合该项目当下所有 unit（每个 bin 一个面板 unit + 你手写的那个）
-    let picked = pick_project_checked(&project, &this_bins).await;
-    let external = picked.external;
-    if (act == "start" || act == "restart") && !external {
-        this_bins = match bins_for_run(&dir).await {
-            Ok(bins) => bins,
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
-        };
+    let targets = load_targets(&dir).await;
+    if (act == "start" || act == "restart") && let Err(error) = &targets {
+        return (StatusCode::INTERNAL_SERVER_ERROR, error.clone()).into_response();
     }
+    let this_bins = listed_names(&app, &project, &targets);
+    // 聚合该项目当下所有 unit（每个 bin 一个面板 unit + 你手写的那个）
+    let configured = targets.as_ref().is_ok_and(ProjectTargets::is_configured);
+    let picked = pick_project_checked(&project, &this_bins, configured).await;
+    let external = picked.external;
 
     // unit 只要没在跑，就得去看是不是有个面板外的裸进程占着
     let outside = if picked.raw.active == "active" {
@@ -543,6 +537,7 @@ async fn action(
             .collect()
     } else {
         lock(&app.last).get(&project).cloned().unwrap_or_default()
+            .into_iter().filter(|(bin, _)| runnable(&targets, bin)).collect()
     };
 
     // quiet=true 时「unit 根本没在跑」不算错（systemctl stop 一个没 loaded 的会报 not loaded，
@@ -597,6 +592,16 @@ async fn action(
             if chosen.is_empty() {
                 return (StatusCode::BAD_REQUEST, "请先选要运行的程序").into_response();
             }
+            // 整批命令先检查好；入口删除、运行时缺失和工作目录错误都不能先停旧进程。
+            let prepared: Result<Vec<_>, String> = chosen.iter().map(|(bin, args)| {
+                let target = targets.as_ref().map_err(Clone::clone)?.target(bin)?;
+                target.prepare(&dir, args, app.cfg.cargo.as_deref())
+                    .map_err(|e| format!("「{bin}」：{e}"))
+            }).collect();
+            let prepared = match prepared {
+                Ok(commands) => commands,
+                Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
+            };
             // 外面已经有一个在跑：必须等它真的退出再起，否则新进程会撞 AddrInUse
             if !outside.is_empty() {
                 let (ok, msg) = stop_pids(&outside).await;
@@ -615,13 +620,13 @@ async fn action(
                     .filter(|u| shown.get(u).map_or(false, |r| r.active == "active"))
                     .collect()
             };
-            for (bin, args) in &chosen {
+            for ((bin, args), command) in chosen.iter().zip(&prepared) {
                 let u = unit_of(&project, bin);
                 // 若这个 bin 的 unit 还在 active，先停掉，否则 systemd-run 同名会拒绝
                 if active_units.contains(&u) {
                     let _ = sysctl_on(&u, "stop", true).await;
                 }
-                let (ok, msg) = spawn(&app, &project, &dir, bin, args).await;
+                let (ok, msg) = spawn(&app, &project, bin, args, command).await;
                 if !ok {
                     let msg = msg.trim();
                     errs.push(if msg.is_empty() {
@@ -665,14 +670,11 @@ async fn bin_action(
     let Some((project, dir)) = resolve(&app, &key).await else {
         return (StatusCode::NOT_FOUND, "未知项目").into_response();
     };
-    let this_bins = if act == "restart" {
-        match bins_for_run(&dir).await {
-            Ok(bins) => bins,
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
-        }
-    } else {
-        bins(&dir).await
-    };
+    let targets = load_targets(&dir).await;
+    if act == "restart" && let Err(error) = &targets {
+        return (StatusCode::INTERNAL_SERVER_ERROR, error.clone()).into_response();
+    }
+    let this_bins = listed_names(&app, &project, &targets);
     if !ok_name(&bin) || !this_bins.contains(&bin) {
         return (StatusCode::BAD_REQUEST, "这个项目里没有这个程序").into_response();
     }
@@ -693,14 +695,21 @@ async fn bin_action(
         }
         // 重启这一个 bin：停掉它的 unit 再按上次参数（或空参数）重新拉起
         "restart" => {
-            let _ = sysctl().await;   // 已在跑的话先停，否则 systemd-run 同名会拒绝
             let args = lock(&app.last)
                 .get(&project)
                 .cloned()
                 .and_then(|g| g.into_iter().find(|(b, _)| b == &bin))
                 .map(|(_, a)| a)
                 .unwrap_or_default();
-            spawn(&app, &project, &dir, &bin, &args).await
+            let command = match targets.as_ref().map_err(Clone::clone)
+                .and_then(|targets| targets.target(&bin))
+                .and_then(|target| target.prepare(&dir, &args, app.cfg.cargo.as_deref()))
+            {
+                Ok(command) => command,
+                Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
+            };
+            let _ = sysctl().await;
+            spawn(&app, &project, &bin, &args, &command).await
         }
         _ => {
             return (StatusCode::BAD_REQUEST, "非法操作").into_response();
@@ -757,8 +766,13 @@ async fn logs(
     let Some((project, dir)) = resolve(&app, &key).await else {
         return (StatusCode::NOT_FOUND, "未知项目").into_response();
     };
-    let this_bins = bins(&dir).await;
-    let picked = pick_project_checked(&project, &this_bins).await;
+    let targets = load_targets(&dir).await;
+    let this_bins = listed_names(&app, &project, &targets);
+    if this_bins.is_empty() && let Err(error) = &targets {
+        return (StatusCode::INTERNAL_SERVER_ERROR, error.clone()).into_response();
+    }
+    let configured = targets.as_ref().is_ok_and(ProjectTargets::is_configured);
+    let picked = pick_project_checked(&project, &this_bins, configured).await;
     let n = q.lines.unwrap_or(300).clamp(1, 2000).to_string();
 
     // 拉日志的目标：面板起的 bin 每个 unit 都拉（多 bin 各自独立日志）；
@@ -958,14 +972,7 @@ async fn start() -> Result<(), BoxErr> {
             eprintln!("提示：目录 {d} 目前不存在，扫描时会跳过");
         }
     }
-    let cargo = match find_cargo(cfg.cargo.as_deref()) {
-        Some(c) => c,
-        None => {
-            return Err("找不到 cargo。在 panel.toml 里加一行指明路径，\
-                        比如 cargo = \"/root/.cargo/bin/cargo\"（用 which cargo 查）"
-                .into());
-        }
-    };
+    let cargo_hint = cfg.cargo.clone().unwrap_or_else(|| "启动 Rust 入口时自动探测".into());
     let bind = cfg.bind.clone();
     let exclude = cfg.exclude.clone();
     let dirs = cfg.dirs.clone();
@@ -981,7 +988,7 @@ async fn start() -> Result<(), BoxErr> {
     let ssh_key_path = cfg_dir.join("panel_ssh_key");
     let state_path = cfg_dir.join("panel_state.toml");
     // App 拿走 cfg 所有权，之后想再读配置就从 App 里读
-    let app = App::new(cfg, cargo.clone(), ssh_key_path, state_path);
+    let app = App::new(cfg, ssh_key_path, state_path);
 
     // 除了首页和登录接口，其它一律要带有效 cookie
     let protected = Router::new()
@@ -1039,7 +1046,7 @@ async fn start() -> Result<(), BoxErr> {
         .await
         .map_err(|e| format!("监听 {bind} 失败：{e}"))?;
     println!("配置: {}", path.display());
-    println!("cargo: {cargo}");
+    println!("cargo: {cargo_hint}");
     println!("扫描目录: {}", dirs.join(", "));
     if !exclude.is_empty() {
         println!("黑名单: {}", exclude.join(", "));
@@ -1049,11 +1056,10 @@ async fn start() -> Result<(), BoxErr> {
         v if v.is_empty() => println!("当前扫到的项目: (无)"),
         v => {
             for (name, dir) in v {
-                let b = bins(&dir).await;
-                let b = if b.is_empty() {
-                    "没找到可运行的 bin".to_string()
-                } else {
-                    b.join(" / ")
+                let b = match load_targets(&dir).await {
+                    Ok(targets) if targets.names().is_empty() => "没找到启动入口".to_string(),
+                    Ok(targets) => targets.names().join(" / "),
+                    Err(error) => error,
                 };
                 println!("  {name}: {b}");
             }
@@ -1072,6 +1078,43 @@ async fn start() -> Result<(), BoxErr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cargo_argv(cargo: &str, unit: &str, dir: &str, bin: &str, features: &[String], args: &str) -> Vec<String> {
+        let command = PreparedCommand::cargo(cargo, std::path::Path::new(dir), bin, features, args);
+        systemd_run_argv(unit, &command)
+    }
+
+    #[test]
+    fn removed_broken_and_deleted_config_keeps_old_units_managed() {
+        let current = ProjectTargets::Configured(vec![launch::Target::Command(launch::CommandTarget {
+            name: "current".into(), program: "node".into(), args: vec![],
+            working_dir: ".".into(), env: std::collections::BTreeMap::new(),
+        })]);
+        let remembered = vec![("old".into(), "  --label two words  ".into())];
+        let mut shown = HashMap::new();
+        shown.insert(unit_of("example", "old"), crate::systemd::Raw {
+            load: "loaded".into(), active: "active".into(), ..Default::default()
+        });
+        for targets in [Ok(current), Err("配置损坏".into()), Ok(ProjectTargets::Unconfigured)] {
+            let names = retained_names(&targets, &remembered);
+            assert!(names.contains(&"old".to_string()));
+            assert!(!runnable(&targets, "old"));
+            assert!(visible_names(&names, &targets, "example", &shown).contains(&"old".to_string()));
+            assert!(!visible_names(&names, &targets, "example", &HashMap::new()).contains(&"old".to_string()));
+        }
+    }
+
+    #[test]
+    fn current_targets_are_visible_without_units_and_names_are_unique() {
+        let targets = Ok(ProjectTargets::Cargo(vec![launch::Target::Cargo {
+            name: "current".into(), features: vec![],
+        }]));
+        let remembered = vec![("current".into(), "args".into()), ("old".into(), String::new())];
+        let names = retained_names(&targets, &remembered);
+        assert_eq!(names, ["current", "old"]);
+        assert!(runnable(&targets, "current"));
+        assert_eq!(visible_names(&names, &targets, "example", &HashMap::new()), ["current"]);
+    }
 
     /// 端到端验证前缀路由：/前缀（301 补斜杠）、/前缀/（首页）、
     /// 前缀外（404，扫描器看不出这里有面板）
@@ -1125,7 +1168,7 @@ mod tests {
 
     #[test]
     fn no_double_dash_when_no_args() {
-        let v = systemd_run_argv(
+        let v = cargo_argv(
             "/root/.cargo/bin/cargo",
             "panel-blog.service",
             "/opt/apps/blog",
@@ -1150,7 +1193,7 @@ mod tests {
     #[test]
     fn args_passed_through_without_splitting() {
         let args = "  --port 8080  -v \"two words\"\t ";
-        let v = systemd_run_argv(
+        let v = cargo_argv(
             "/usr/bin/cargo",
             "panel-a.service",
             "/srv/a",
@@ -1164,7 +1207,7 @@ mod tests {
 
     #[test]
     fn single_required_feature_precedes_bin_without_program_args() {
-        let v = systemd_run_argv(
+        let v = cargo_argv(
             "/root/.cargo/bin/cargo",
             "panel-example-dashboard.service",
             "/srv/example",
@@ -1188,7 +1231,7 @@ mod tests {
     #[test]
     fn multiple_required_features_precede_unsplit_program_args() {
         let args = "  --queue jobs  --label \"two words\"\t ";
-        let v = systemd_run_argv(
+        let v = cargo_argv(
             "/usr/bin/cargo",
             "panel-example-worker.service",
             "/srv/example",

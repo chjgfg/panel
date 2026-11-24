@@ -1,6 +1,7 @@
 // systemctl / journalctl 交互：批量查状态、unit 命名规则、项目 unit 收拢。
 use std::collections::HashMap;
 use std::process::Stdio;
+use std::{format, vec};
 
 use tokio::process::Command;
 
@@ -171,11 +172,23 @@ pub struct Picked {
 /// 从 show_many 的结果里把一个项目的全部 unit 收拢（只读，不改动 shown）。
 /// 主 unit 挑选：面板的 bin unit 里谁在跑取谁；没在跑再退回你手写的 unit；
 /// 都没有就按第一个面板 unit 报「未运行」。
-pub fn pick_project(shown: &HashMap<String, Raw>, project: &str, bins: &[String]) -> Picked {
+#[cfg(test)]
+fn pick_project(shown: &HashMap<String, Raw>, project: &str, bins: &[String]) -> Picked {
+    pick_launch_project(shown, project, bins, false)
+}
+
+/// 显式启动配置使用自己的入口，不让同名手写服务遮住配置的入口列表。
+pub fn pick_launch_project(
+    shown: &HashMap<String, Raw>,
+    project: &str,
+    bins: &[String],
+    configured: bool,
+) -> Picked {
     let theirs = format!("{project}.service");
 
     let mut rows: Vec<(String, Raw)> = project_units(project, bins)
         .into_iter()
+        .filter(|u| !configured || bins.is_empty() || u != &theirs)
         .map(|u| {
             let r = shown.get(&u).cloned().unwrap_or_default();
             (u, r)
@@ -198,7 +211,7 @@ pub fn pick_project(shown: &HashMap<String, Raw>, project: &str, bins: &[String]
         .or_else(|| rows.iter().find(|(u, r)| u.as_str() == theirs && r.active == "active"))
         .or_else(|| rows.first())
         .unwrap(); // bins 至少让 project_units 有一个面板 unit，不会空
-    let external = primary.0.as_str() == theirs;
+    let external = primary.0.as_str() == theirs && primary.1.load == "loaded";
 
     Picked {
         unit: primary.0.clone(),
@@ -209,15 +222,27 @@ pub fn pick_project(shown: &HashMap<String, Raw>, project: &str, bins: &[String]
 }
 
 /// 单个项目用的版本：一次 systemctl show 查目标 bin 的所有候选名，一个进程搞定
-pub async fn pick_project_checked(project: &str, bins: &[String]) -> Picked {
+pub async fn pick_project_checked(project: &str, bins: &[String], configured: bool) -> Picked {
     let cands = project_units(project, bins);
     let shown = show_many(&cands).await;
-    pick_project(&shown, project, bins)
+    pick_launch_project(&shown, project, bins, configured)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_targets_are_not_hidden_by_external_service() {
+        let mut shown = HashMap::new();
+        shown.insert("example.service".into(), parse_show("LoadState=loaded\nActiveState=active\n"));
+        let bins = vec!["api".into()];
+        assert!(pick_launch_project(&shown, "example", &bins, false).external);
+        let configured = pick_launch_project(&shown, "example", &bins, true);
+        assert!(!configured.external);
+        assert_eq!(configured.unit, "panel-example-api.service");
+        assert!(!pick_launch_project(&HashMap::new(), "example", &[], false).external);
+    }
 
     #[test]
     fn parse_show_reads_result_and_exit_code() {
