@@ -1,0 +1,6 @@
+[project]
+name = "panel-launch-fixture"
+version = "0.0.0"
+
+[project.scripts]
+worker = "probe:main"

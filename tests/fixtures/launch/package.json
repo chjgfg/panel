@@ -1,0 +1,9 @@
+{
+  "private": true,
+  "packageManager": "npm@11.6.2",
+  "scripts": {
+    "start": "node probe.cjs",
+    "dev:api": "node probe.cjs",
+    "build": "node -e \"process.exit(0)\""
+  }
+}

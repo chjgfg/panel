@@ -12,6 +12,7 @@
 //   srctree  源码目录树、文件读取、跨文件搜索
 // 这里只剩 web 层：路由、handler 组装。
 mod auth;
+mod auto_launch;
 mod config;
 mod discover;
 mod hostinfo;

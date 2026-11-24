@@ -1,0 +1,1 @@
+{"packageManager": "custom-build-tool@1.0", "scripts": {"build": "build-tool"}}

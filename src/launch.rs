@@ -1,4 +1,4 @@
-// 项目启动入口：显式命令配置优先，没有配置才自动发现 Cargo bin。
+// 项目启动入口：显式命令配置优先，没有配置才自动发现各语言的入口。
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -6,7 +6,7 @@ use std::{format, matches, vec};
 
 use serde::{Deserialize, Serialize};
 
-use crate::discover::{cargo_targets, find_cargo, ok_name};
+use crate::discover::{find_cargo, ok_name};
 
 pub const CONFIG_FILE: &str = "panel-run.toml";
 
@@ -92,11 +92,12 @@ impl Target {
     }
 }
 
-/// 配置缺失、显式配置和 Cargo 自动发现分别保留来源，避免把失败当成自动回退。
+/// 保留配置及自动发现的来源，避免把失败当成自动回退。
 #[derive(Debug)]
 pub enum ProjectTargets {
     Configured(Vec<Target>),
     Cargo(Vec<Target>),
+    Discovered(Vec<Target>),
     Unconfigured,
 }
 
@@ -116,23 +117,24 @@ impl ProjectTargets {
     }
 
     pub fn is_configured(&self) -> bool {
-        matches!(self, Self::Configured(_))
+        // 跨语言入口也优先展示；纯 Cargo 项目保留原来的手写服务选择规则。
+        matches!(self, Self::Configured(_) | Self::Discovered(_))
     }
 
     fn entries(&self) -> &[Target] {
         match self {
-            Self::Configured(targets) | Self::Cargo(targets) => targets,
+            Self::Configured(targets) | Self::Cargo(targets) | Self::Discovered(targets) => targets,
             Self::Unconfigured => &[],
         }
     }
 }
 
-enum FileSource {
+pub(crate) enum FileSource {
     Present(String),
     Missing,
 }
 
-async fn read_config(path: &Path) -> Result<FileSource, String> {
+pub(crate) async fn read_config(path: &Path) -> Result<FileSource, String> {
     // 先查目录项，断开的符号链接也算配置存在，读取失败不能自动回退。
     match tokio::fs::symlink_metadata(path).await {
         Ok(_) => tokio::fs::read_to_string(path)
@@ -162,20 +164,7 @@ async fn targets_from_source(
                 config.targets.into_iter().map(Target::Command).collect(),
             ))
         }
-        FileSource::Missing => {
-            let manifest = dir.join("Cargo.toml");
-            match tokio::fs::symlink_metadata(&manifest).await {
-                Ok(_) => Ok(ProjectTargets::Cargo(
-                    cargo_targets(dir)
-                        .await?
-                        .into_iter()
-                        .map(|(name, features)| Target::Cargo { name, features })
-                        .collect(),
-                )),
-                Err(e) if e.kind() == ErrorKind::NotFound => Ok(ProjectTargets::Unconfigured),
-                Err(e) => Err(format!("检查 {} 失败：{e}", manifest.display())),
-            }
-        }
+        FileSource::Missing => crate::auto_launch::discover_targets(dir).await,
     }
 }
 
@@ -418,6 +407,22 @@ mod tests {
             ]
         );
         assert!(targets.target("panel").is_err());
+    }
+
+    #[tokio::test]
+    async fn explicit_config_wins_over_all_automatic_languages_and_broken_manifests() {
+        for project in ["launch", "launch-invalid"] {
+            let dir = root().join("tests/fixtures").join(project);
+            let targets = targets_from_source(
+                &dir,
+                &dir.join(CONFIG_FILE),
+                FileSource::Present("[[targets]]\nname = 'chosen'\nprogram = 'python3'".into()),
+            )
+            .await
+            .unwrap();
+            assert!(matches!(targets, ProjectTargets::Configured(_)));
+            assert_eq!(targets.names(), ["chosen"]);
+        }
     }
 
     #[tokio::test]

@@ -14,7 +14,10 @@ tokio = { version = "1.43.0", features = [
     "sync",
 ] }
 serde = { version = "1.0.217", features = ["derive"] }
+serde_json = "1.0"
 toml = "0.8.19"
+# 只读取 JAR 清单，关闭 ZIP 的其他压缩及加密格式。
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
 getrandom = "0.3.1"
 # 网页控制台：给 ssh 分配一个 PTY，交互程序（密码提示、vim、top）才能正常跑。
 # 选跨平台的 portable-pty 而不是 unix-only libc，是为了能在 Windows 开发机上编译验证。
