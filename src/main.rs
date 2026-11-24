@@ -25,6 +25,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::{format, vec};
 
 use axum::extract::{ConnectInfo, Path, Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
@@ -36,7 +37,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::cookie_token;
 use crate::config::{BoxErr, Config, config_path};
-use crate::discover::{bins, discover, find_cargo, ok_name};
+use crate::discover::{bins, bins_for_run, discover, find_cargo, ok_name, required_features};
 use crate::procs::{find_outside, proc_exes, stop_pids};
 use crate::state::{lock, App};
 use crate::srctree::{Node, file_path_ok, read_file, search_dir, walk_tree};
@@ -375,7 +376,14 @@ struct BinArg {
 }
 
 /// 拼 systemd-run 的参数。抽成纯函数是为了能单测——真正跑起来只有 Linux 上能验。
-fn systemd_run_argv(cargo: &str, unit: &str, dir: &str, bin: &str, args: &str) -> Vec<String> {
+fn systemd_run_argv(
+    cargo: &str,
+    unit: &str,
+    dir: &str,
+    bin: &str,
+    features: &[String],
+    args: &str,
+) -> Vec<String> {
     let cargo_dir = std::path::Path::new(cargo)
         .parent()
         .map(|p| p.display().to_string())
@@ -387,9 +395,14 @@ fn systemd_run_argv(cargo: &str, unit: &str, dir: &str, bin: &str, args: &str) -
         format!("--setenv=PATH={cargo_dir}:/usr/local/bin:/usr/bin:/bin"),
         cargo.to_string(),
         "run".into(),
-        "--bin".into(),
-        bin.into(),
     ];
+    // 只启用所选 bin 声明的必要 feature，Cargo 参数必须放在程序参数的 -- 前。
+    if !features.is_empty() {
+        v.push("--features".into());
+        v.push(features.join(","));
+    }
+    v.push("--bin".into());
+    v.push(bin.into());
     // -- 之后的都是你程序自己的参数。不过 shell，所以引号空格都不用转义。
     // 需求：参数「原样透传」，不对空格做分割解析 —— 用户在这一行输入框里敲什么，
     // 就整串作为一个启动参数传给这个 bin。纯空白/空输入不加 `--`。
@@ -446,11 +459,22 @@ async fn spawn(
     bin: &str,
     args: &str,
 ) -> (bool, String) {
+    let features = match required_features(dir, bin).await {
+        Ok(features) => features,
+        Err(e) => return (false, e),
+    };
     let unit = unit_of(project, bin);
     // 上一次跑完/跑挂的同名 unit 还挂在那儿的话，systemd-run 会拒绝创建
     let _ = run("systemctl", &["reset-failed", "--", unit.as_str()]).await;
 
-    let argv = systemd_run_argv(&app.cargo, &unit, &dir.display().to_string(), bin, args);
+    let argv = systemd_run_argv(
+        &app.cargo,
+        &unit,
+        &dir.display().to_string(),
+        bin,
+        &features,
+        args,
+    );
     let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
 
     match run("systemd-run", &refs).await {
@@ -489,10 +513,16 @@ async fn action(
         return (StatusCode::NOT_FOUND, "未知项目").into_response();
     };
     let req = body.map(|Json(b)| b).unwrap_or_default();
-    let this_bins = bins(&dir).await;
+    let mut this_bins = bins(&dir).await;
     // 聚合该项目当下所有 unit（每个 bin 一个面板 unit + 你手写的那个）
     let picked = pick_project_checked(&project, &this_bins).await;
     let external = picked.external;
+    if (act == "start" || act == "restart") && !external {
+        this_bins = match bins_for_run(&dir).await {
+            Ok(bins) => bins,
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        };
+    }
 
     // unit 只要没在跑，就得去看是不是有个面板外的裸进程占着
     let outside = if picked.raw.active == "active" {
@@ -635,7 +665,15 @@ async fn bin_action(
     let Some((project, dir)) = resolve(&app, &key).await else {
         return (StatusCode::NOT_FOUND, "未知项目").into_response();
     };
-    if !ok_name(&bin) || !bins(&dir).await.contains(&bin) {
+    let this_bins = if act == "restart" {
+        match bins_for_run(&dir).await {
+            Ok(bins) => bins,
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        }
+    } else {
+        bins(&dir).await
+    };
+    if !ok_name(&bin) || !this_bins.contains(&bin) {
         return (StatusCode::BAD_REQUEST, "这个项目里没有这个程序").into_response();
     }
     let unit = unit_of(&project, &bin);
@@ -1092,6 +1130,7 @@ mod tests {
             "panel-blog.service",
             "/opt/apps/blog",
             "importer",
+            &[],
             "   ",
         );
         assert_eq!(
@@ -1110,15 +1149,66 @@ mod tests {
 
     #[test]
     fn args_passed_through_without_splitting() {
+        let args = "  --port 8080  -v \"two words\"\t ";
         let v = systemd_run_argv(
             "/usr/bin/cargo",
             "panel-a.service",
             "/srv/a",
             "worker",
-            "--port 8080  -v",
+            &[],
+            args,
         );
         // 参数作为一个整体透传给程序，不把空格当分隔符拆成多个参数
-        assert_eq!(&v[v.len() - 3..], &["worker", "--", "--port 8080  -v"]);
+        assert_eq!(&v[v.len() - 3..], &["worker", "--", args]);
+    }
+
+    #[test]
+    fn single_required_feature_precedes_bin_without_program_args() {
+        let v = systemd_run_argv(
+            "/root/.cargo/bin/cargo",
+            "panel-example-dashboard.service",
+            "/srv/example",
+            "dashboard",
+            &["http".into()],
+            "",
+        );
+        assert_eq!(
+            &v[3..],
+            &[
+                "/root/.cargo/bin/cargo",
+                "run",
+                "--features",
+                "http",
+                "--bin",
+                "dashboard",
+            ]
+        );
+    }
+
+    #[test]
+    fn multiple_required_features_precede_unsplit_program_args() {
+        let args = "  --queue jobs  --label \"two words\"\t ";
+        let v = systemd_run_argv(
+            "/usr/bin/cargo",
+            "panel-example-worker.service",
+            "/srv/example",
+            "worker",
+            &["queue".into(), "tls".into()],
+            args,
+        );
+        assert_eq!(
+            &v[3..],
+            &[
+                "/usr/bin/cargo",
+                "run",
+                "--features",
+                "queue,tls",
+                "--bin",
+                "worker",
+                "--",
+                args,
+            ]
+        );
     }
 
     #[test]

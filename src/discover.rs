@@ -1,4 +1,5 @@
 // 项目发现：扫目录、黑名单/通配排除、名字校验、项目 bin 探测。
+use std::format;
 use std::path::PathBuf;
 
 use serde::Deserialize;
@@ -90,26 +91,78 @@ pub async fn discover(dirs: &[String], exclude: &[String]) -> Vec<(String, PathB
 #[derive(Deserialize)]
 struct CargoToml {
     package: Option<CargoPkg>,
+    #[serde(default)]
+    bin: Vec<CargoBin>,
 }
 #[derive(Deserialize)]
 struct CargoPkg {
     name: String,
 }
 
+#[derive(Deserialize)]
+struct CargoBin {
+    name: String,
+    #[serde(default, rename = "required-features")]
+    required_features: Vec<String>,
+}
+
+async fn read_manifest(dir: &std::path::Path) -> Result<CargoToml, String> {
+    let path = dir.join("Cargo.toml");
+    let text = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
+    parse_manifest(&text, &path)
+}
+
+fn parse_manifest(text: &str, path: &std::path::Path) -> Result<CargoToml, String> {
+    toml::from_str(text).map_err(|e| format!("解析 {} 失败：{e}", path.display()))
+}
+
+impl CargoToml {
+    fn required_features(&self, bin: &str) -> Vec<String> {
+        self.bin
+            .iter()
+            .find(|target| target.name == bin)
+            .map(|target| target.required_features.clone())
+            .unwrap_or_default()
+    }
+}
+
+/// 启动前重新读配置，读取或解析失败必须报错，不能当成没有 feature 门槛。
+pub async fn required_features(dir: &std::path::Path, bin: &str) -> Result<Vec<String>, String> {
+    Ok(read_manifest(dir).await?.required_features(bin))
+}
+
+/// 启动入口用严格检查，配置坏了要在停止旧进程之前返回具体错误。
+pub async fn bins_for_run(dir: &std::path::Path) -> Result<Vec<String>, String> {
+    Ok(bins_with_manifest(dir, Some(read_manifest(dir).await?)).await)
+}
+
 /// 列出项目里所有能 `cargo run --bin X` 的 X：
 ///   src/main.rs        -> Cargo.toml 里的包名（cargo 就是这么命名默认 bin 的）
 ///   src/bin/foo.rs     -> foo
 ///   src/bin/foo/main.rs -> foo
+///   [[bin]] name       -> 显式声明的名字，支持自定义源码路径
 pub async fn bins(dir: &std::path::Path) -> Vec<String> {
+    bins_with_manifest(dir, read_manifest(dir).await.ok()).await
+}
+
+async fn bins_with_manifest(dir: &std::path::Path, manifest: Option<CargoToml>) -> Vec<String> {
     let mut v = Vec::new();
 
-    if dir.join("src/main.rs").is_file()
-        && let Ok(t) = tokio::fs::read_to_string(dir.join("Cargo.toml")).await
-        && let Ok(ct) = toml::from_str::<CargoToml>(&t)
-        && let Some(pkg) = ct.package
-        && ok_name(&pkg.name)
-    {
-        v.push(pkg.name);
+    if let Some(ct) = manifest {
+        if dir.join("src/main.rs").is_file()
+            && let Some(pkg) = ct.package
+            && ok_name(&pkg.name)
+        {
+            v.push(pkg.name);
+        }
+        v.extend(
+            ct.bin
+                .into_iter()
+                .map(|target| target.name)
+                .filter(|n| ok_name(n)),
+        );
     }
 
     if let Ok(mut rd) = tokio::fs::read_dir(dir.join("src/bin")).await {
@@ -160,6 +213,78 @@ pub fn find_cargo(explicit: Option<&str>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn required_features_only_come_from_selected_bin() {
+        let manifest = parse_manifest(
+            r#"
+                [package]
+                name = "example"
+                [features]
+                unrelated = []
+                http = []
+                queue = []
+                tls = []
+                [[bin]]
+                name = "plain"
+                [[bin]]
+                name = "empty"
+                required-features = []
+                [[bin]]
+                name = "dashboard"
+                path = "tools/dashboard.rs"
+                required-features = ["http"]
+                [[bin]]
+                name = "worker"
+                required-features = ["queue", "tls"]
+            "#,
+            std::path::Path::new("Cargo.toml"),
+        )
+        .unwrap();
+        assert!(manifest.required_features("example").is_empty());
+        assert!(manifest.required_features("plain").is_empty());
+        assert!(manifest.required_features("empty").is_empty());
+        assert_eq!(manifest.required_features("dashboard"), ["http"]);
+        assert_eq!(manifest.required_features("worker"), ["queue", "tls"]);
+    }
+
+    #[test]
+    fn invalid_manifest_reports_path_and_parse_error() {
+        let path = std::path::Path::new("broken/Cargo.toml");
+        for text in [
+            "[[bin]",
+            "[[bin]]\nname = 'worker'\nrequired-features = 'queue'",
+            "[[bin]]\nname = 'worker'\nrequired-features = [123]",
+        ] {
+            let Err(error) = parse_manifest(text, path) else {
+                panic!("无效配置必须返回错误");
+            };
+            assert!(error.contains("解析 broken/Cargo.toml 失败"), "{error}");
+            assert!(error.contains("TOML parse error"), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn unreadable_manifest_fails_start_checks() {
+        // 用已有文件充当目录，保证读取失败，同时无需创建临时产物。
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let error = required_features(&dir, "worker").await.unwrap_err();
+        assert!(error.contains("读取"), "{error}");
+        assert!(error.contains("Cargo.toml"), "{error}");
+        assert!(bins_for_run(&dir).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn explicit_bin_with_custom_path_is_discovered() {
+        let manifest = parse_manifest(
+            "[[bin]]\nname = 'custom-worker'\npath = 'tools/worker.rs'\nrequired-features = ['queue']",
+            std::path::Path::new("Cargo.toml"),
+        )
+        .unwrap();
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let names = bins_with_manifest(dir, Some(manifest)).await;
+        assert!(names.iter().any(|name| name == "custom-worker"));
+    }
 
     #[test]
     fn dir_name_allows_only_safe_chars() {
