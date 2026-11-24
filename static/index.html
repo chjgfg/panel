@@ -152,6 +152,11 @@
           <!-- 属性里的换行只能写 &#10;：直接写 \n 不换行，屏幕上就明晃晃是「\n」两个字符 -->
           <textarea id="runArgs" class="arg" rows="4" placeholder="启动参数（原样透传，支持多行）&#10;回车、空格都原样作为参数传过去" spellcheck="false"></textarea>
         </div>
+        <div id="runPreview" class="run-preview" aria-live="polite">
+          <p id="runPreviewStatus" class="subline"></p>
+          <dl id="runPreviewMeta"></dl>
+          <pre id="runPreviewCommand"></pre>
+        </div>
         <p id="runErr" class="err"></p>
       </div>
       <div class="modal-foot">

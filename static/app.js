@@ -942,6 +942,55 @@ function rowPull(u, b) {
 
 /// 弹窗一次只针对一个 bin：点哪个 bin 的「启动」就弹哪个，只显示它+参数文本域。
 let runBin = null;   // 当前弹窗要运行的 bin
+let runPreviewVersion = 0;
+let runPreviewTimer = null;
+let runSubmitting = false;
+
+function renderRunPreview(command) {
+  const meta = $('runPreviewMeta');
+  meta.replaceChildren();
+  for (const [label, value] of [['来源', command.source], ['工作目录', command.working_dir], ['feature', command.features.join(', ') || '无']]) {
+    const dt = document.createElement('dt');
+    const dd = document.createElement('dd');
+    dt.textContent = label; dd.textContent = value;
+    meta.append(dt, dd);
+  }
+  $('runPreviewStatus').textContent = '启动命令 · 引号内为一个完整参数';
+  $('runPreviewCommand').textContent = [command.program, ...command.args].map(arg => JSON.stringify(arg)).join('\n');
+}
+
+function scheduleRunPreview(delay = 180) {
+  const version = ++runPreviewVersion;
+  clearTimeout(runPreviewTimer);
+  $('runGo').disabled = true;
+  $('runPreviewStatus').textContent = '正在检查启动命令…';
+  $('runPreviewMeta').replaceChildren();
+  $('runPreviewCommand').textContent = '';
+  runPreviewTimer = setTimeout(() => loadRunPreview(version), delay);
+}
+
+async function loadRunPreview(version) {
+  const key = runKey, bin = runBin, args = $('runArgs').value;
+  if (!key || !bin || version !== runPreviewVersion) return;
+  try {
+    const response = await req(`api/units/${key}/preview`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bins: [{ bin, args }] }),
+    });
+    const commands = await response.json();
+    // 旧入口或旧参数的响应不能覆盖新输入，也不能重新启用运行按钮。
+    if (version !== runPreviewVersion || key !== runKey || bin !== runBin || args !== $('runArgs').value) return;
+    renderRunPreview(commands[0]);
+    $('runErr').textContent = '';
+    $('runGo').disabled = runSubmitting;
+  } catch (error) {
+    if (version !== runPreviewVersion) return;
+    $('runPreviewStatus').textContent = '启动命令检查失败';
+    if (error.message !== '未登录') $('runErr').textContent = error.message;
+  }
+}
+
+$('runArgs').oninput = () => scheduleRunPreview();
 
 function openRun(u, bin) {
   runKey = u.key;
@@ -959,7 +1008,7 @@ function openRun(u, bin) {
   const inst = (u.instances || []).find(i => i.bin === bin);
   $('runArgs').value = inst && inst.args ? inst.args : '';
   $('runErr').textContent = '';
-  $('runGo').disabled = false;
+  scheduleRunPreview(0);
   $('runbox').hidden = false;
   // syncScrollLock();
   const ta = $('runArgs');
@@ -970,32 +1019,35 @@ function openRun(u, bin) {
 }
 
 $('runGo').onclick = async () => {
-  if (!runKey || !runBin) return;
+  if (!runKey || !runBin || runSubmitting || $('runGo').disabled) return;
+  const key = runKey, bin = runBin, version = runPreviewVersion;
   const go = $('runGo');
+  runSubmitting = true;
   go.disabled = true;
   $('runErr').textContent = '';
   try {
     // 只提交当前这个 bin；参数原样透传（空格、换行都不拆）
-    const response = await req(`api/units/${runKey}/start`, {
+    const response = await req(`api/units/${key}/start`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ bins: [{ bin: runBin, args: $('runArgs').value }] }),
+      body: JSON.stringify({ bins: [{ bin, args: $('runArgs').value }] }),
     });
     await actionResult(response);
     // 执行完成自动关闭弹窗
-    $('runbox').hidden = true;
-    // syncScrollLock();
-    runKey = null; runBin = null;
+    if (version === runPreviewVersion) closeRunBox();
   } catch (e) {
-    if (e.message !== '未登录') $('runErr').textContent = e.message;
+    if (version === runPreviewVersion && e.message !== '未登录') $('runErr').textContent = e.message;
   } finally {
-    go.disabled = false;
+    runSubmitting = false;
+    if (version === runPreviewVersion) go.disabled = false;
     refresh();
   }
 };
 
 // 关闭方式仅三种：右上角 X、取消按钮、点「运行」执行完成后。遮罩点击不关闭。
 function closeRunBox() {
+  ++runPreviewVersion;
+  clearTimeout(runPreviewTimer);
   runKey = null;
   runBin = null;
   $('runbox').hidden = true;

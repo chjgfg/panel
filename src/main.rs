@@ -424,6 +424,22 @@ struct BinArg {
     args: String,
 }
 
+async fn preview(State(app): State<Arc<App>>, Path(key): Path<String>, Json(req): Json<ActionReq>) -> Response {
+    let Some((_, dir)) = resolve(&app, &key).await else {
+        return (StatusCode::NOT_FOUND, "未知项目").into_response();
+    };
+    if req.bins.is_empty() { return (StatusCode::BAD_REQUEST, "请先选要运行的程序").into_response(); }
+    let targets = match load_targets(&dir).await {
+        Ok(targets) => targets,
+        Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
+    };
+    let result: Result<Vec<_>, _> = req.bins.iter().map(|entry| targets.preview(&dir, &entry.bin, &entry.args, app.cfg.cargo.as_deref())).collect();
+    match result {
+        Ok(commands) => Json(commands).into_response(),
+        Err(error) => (StatusCode::BAD_REQUEST, error).into_response(),
+    }
+}
+
 fn operation_response(outcome: Outcome) -> Response {
     match outcome {
         Outcome::Complete => StatusCode::NO_CONTENT.into_response(),
@@ -872,6 +888,7 @@ async fn start() -> Result<(), BoxErr> {
         .route("/api/units/{key}/file", get(file))
         .route("/api/units/{key}/search", get(search))
         .route("/api/units/{key}/pull", post(pull))
+        .route("/api/units/{key}/preview", post(preview))
         .route("/api/units/{key}/bins/{bin}/{action}", post(bin_action))
         .route("/api/units/{key}/{action}", post(action))
         .route("/api/version", get(version))

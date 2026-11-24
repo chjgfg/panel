@@ -102,6 +102,24 @@ pub enum ProjectTargets {
 }
 
 impl ProjectTargets {
+    pub fn preview(&self, dir: &Path, name: &str, extra: &str, cargo: Option<&str>) -> Result<CommandPreview, String> {
+        let target = self.target(name)?;
+        let command = target.prepare(dir, extra, cargo)?;
+        let source = match self {
+            Self::Configured(_) => CONFIG_FILE.into(),
+            Self::Cargo(_) => "Cargo.toml".into(),
+            _ => match target {
+                Target::Cargo { .. } => "Cargo.toml".into(),
+                Target::Command(_) if name.starts_with("node-") => "package.json".into(),
+                Target::Command(spec) if name.starts_with("java-") => spec.args.get(1).cloned().unwrap_or_default(),
+                Target::Command(_) if name.starts_with("python-") => "pyproject.toml".into(),
+                _ => "go.mod / Go 源码".into(),
+            },
+        };
+        let features = match target { Target::Cargo { features, .. } => features.clone(), _ => vec![] };
+        Ok(CommandPreview { bin: name.into(), source, features, program: command.program,
+            args: command.args, working_dir: command.working_dir })
+    }
     pub fn names(&self) -> Vec<String> {
         self.entries()
             .iter()
@@ -127,6 +145,17 @@ impl ProjectTargets {
             Self::Unconfigured => &[],
         }
     }
+}
+
+// 预览复用实际启动准备结果，仅返回命令信息，不回传环境变量值。
+#[derive(Debug, Serialize)]
+pub struct CommandPreview {
+    pub bin: String,
+    pub source: String,
+    pub features: Vec<String>,
+    pub program: String,
+    pub args: Vec<String>,
+    pub working_dir: PathBuf,
 }
 
 pub(crate) enum FileSource {
@@ -365,6 +394,23 @@ mod tests {
             working_dir: ".".into(),
             env: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn preview_uses_the_launch_command_and_does_not_expose_environment_values() {
+        let mut spec = command_target();
+        spec.env.insert("SECRET".into(), "hidden-value".into());
+        spec.args = vec!["first argument".into()];
+        let extra = "  a \"quote\"\nnext\t ";
+        let targets = ProjectTargets::Configured(vec![Target::Command(spec)]);
+        let command = targets.target("probe").unwrap().prepare(root(), extra, None).unwrap();
+        let preview = targets.preview(root(), "probe", extra, None).unwrap();
+        assert_eq!(preview.program, command.program);
+        assert_eq!(preview.args, command.args);
+        assert_eq!(preview.working_dir, command.working_dir);
+        assert_eq!(preview.source, CONFIG_FILE);
+        assert!(!serde_json::to_string(&preview).unwrap().contains("hidden-value"));
+        assert!(targets.preview(root(), "missing", extra, None).is_err());
     }
 
     #[test]

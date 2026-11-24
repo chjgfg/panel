@@ -9,7 +9,8 @@ Linux systemd 项目运行面板：启动、停止、重启、日志、资源采
 - `src/launch.rs`：项目配置解析、入口来源选择、运行时检查和 systemd-run 参数生成的实现及测试。
 - `src/auto_launch.rs`：各语言的自动入口发现及测试。
 - `src/lifecycle.rs`：停止证明、启动确认及独立 Linux systemd 探针。
-- `tests/ui.test.cjs`：页面状态提示的行为验证，执行 `node --test tests/ui.test.cjs`。
+- `tests/ui.test.cjs`：页面状态和命令预览的行为验证，执行 `node --test tests/ui.test.cjs`。
+- `tests/fixtures/ui/panel.toml`：回环地址的页面验收配置；从项目根目录指定 `PANEL_CONFIG` 后运行 panel，只检查预览，不启动样本。
 - `tests/fixtures/launch/README.md`：固定测试输入的索引和本地运行方式。
 
 每个被扫描的项目，可以在项目根目录放一个 `panel-run.toml`。从示例中仅保留这个项目需要的 `[[targets]]`，替换 `YOUR_*` 占位值后保存。刷新页面即可看到入口，无需重启 panel。
@@ -66,6 +67,8 @@ panel 自己启动不再要求安装 Cargo。只在启动 Rust 自动发现的�
 
 项目操作与单入口操作共用项目异步锁，同项目按顺序执行，不同项目可并行。停止命令成功后仍复查 PID 和状态；停止失败或无法确认停止时不创建新实例。仅有效的 `LoadState=not-found` 可以视为已不存在，错误文本不能充当证明。启动后只有确认 active 才返回 HTTP 204；状态查询失败或持续启动中返回 HTTP 202，页面显示黄色“状态未确认”；确定失败返回 HTTP 500。未知和过渡状态单独显示，并保留停止入口。
 
+启动弹窗会先请求只读的命令预览，显示运行时实际路径、逐参数内容、必要 feature、工作目录和配置来源；引号内是一整个参数，换行及制表符以 JSON 转义显示。预览与启动共用准备函数，不执行项目命令，也不返回环境变量值。配置或运行时检查失败时禁用运行按钮；输入变化立即禁用按钮，旧响应不能覆盖新入口或新参数。启动时仍重新检查配置，预览不是执行授权缓存。
+
 在项目目录执行 `cargo test --locked`、`cargo check --locked` 和 `cargo build --locked`。
 
 测试覆盖入口来源选择、配置错误、五类命令、参数边界、环境变量、工作目录、运行时缺失、Cargo feature、旧实例管理、配置往返序列化及自动发现。真实 Node/Python 探针作为可选测试，运行方式见测试输入索引。本地子进程验证不经过 systemd；Linux systemd 的实际创建、cgroup 管理和日志读取需要在服务器另外验收。
@@ -82,5 +85,6 @@ panel 自己启动不再要求安装 Cargo。只在启动 Rust 自动发现的�
 - 修订：显式配置阶段只验证五类命令模板；本轮增加真实 Python 调用和 npm/POSIX shell 透传验证。Windows npm/cmd.exe 的换行截断已实测确认，未降低断言要求。Java/Go 实际运行和服务器 Linux systemd 尚未验证。
 - 启停可靠性阶段：`cargo test --locked -- --include-ignored` 为 95 passed，0 failed；`cargo check --locked` 通过；`node --test tests/ui.test.cjs` 为 2 passed。覆盖停止失败阻断、停止后复查、未知状态、结果聚合、HTTP 状态以及两个真实 handler 等待同一项目锁。
 - 可靠性对照：分别移除停止阻断、将未确认返回改为成功、移除 handler 锁后，三个相关测试均失败；源码按字节恢复。Linux 实际启停尚待本轮后续验收。
+- 命令预览阶段：96 passed，0 failed（含真实 npm/Python 探针）；编译检查和构建通过；页面行为测试为 4 passed。实际浏览器检查了未知状态、运行时缺失的禁用按钮和 Python 命令预览；多行参数显示为末尾一个 JSON 参数。Windows 的 Cargo 默认路径探测未命中时明确报错；Linux 路径将在服务器验收。
 
 移除本项目的显式启动配置会恢复自动发现；配置变更不会自动停止已运行实例。回退本轮自动发现功能可恢复提交 `2e3cc0d` 后重新编译部署，该版本仍支持显式多语言配置和 Rust feature 修复。
