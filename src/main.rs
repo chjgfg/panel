@@ -243,8 +243,9 @@ fn runnable(targets: &Result<ProjectTargets, String>, name: &str) -> bool {
 fn visible_names(names: &[String], targets: &Result<ProjectTargets, String>, project: &str,
     shown: &HashMap<String, crate::systemd::Raw>) -> Vec<String>
 {
+    // 查询缺失是未知状态；只有确认 not-found 的旧入口才可从列表隐藏。
     names.iter().filter(|name| runnable(targets, name)
-        || shown.get(&unit_of(project, name)).is_some_and(|raw| raw.load == "loaded"))
+        || shown.get(&unit_of(project, name)).is_none_or(|raw| raw.load != "not-found"))
         .cloned().collect()
 }
 
@@ -1041,7 +1042,11 @@ mod tests {
             assert!(names.contains(&"old".to_string()));
             assert!(!runnable(&targets, "old"));
             assert!(visible_names(&names, &targets, "example", &shown).contains(&"old".to_string()));
-            assert!(!visible_names(&names, &targets, "example", &HashMap::new()).contains(&"old".to_string()));
+            assert!(visible_names(&names, &targets, "example", &HashMap::new()).contains(&"old".to_string()));
+            let absent = HashMap::from([(unit_of("example","old"), crate::systemd::Raw {
+                load: "not-found".into(), active: "inactive".into(), ..Default::default()
+            })]);
+            assert!(!visible_names(&names, &targets, "example", &absent).contains(&"old".to_string()));
         }
     }
 
@@ -1054,7 +1059,7 @@ mod tests {
         let names = retained_names(&targets, &remembered);
         assert_eq!(names, ["current", "old"]);
         assert!(runnable(&targets, "current"));
-        assert_eq!(visible_names(&names, &targets, "example", &HashMap::new()), ["current"]);
+        assert_eq!(visible_names(&names, &targets, "example", &HashMap::new()), ["current", "old"]);
     }
 
     /// 端到端验证前缀路由：/前缀（301 补斜杠）、/前缀/（首页）、
